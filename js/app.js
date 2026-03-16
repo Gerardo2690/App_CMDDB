@@ -29,48 +29,30 @@ const DB = {
    ═══════════════════════════════════════════════════════ */
 function initSampleData() {
   if (DB.get('activos').length === 0) {
-    const tipos = ['LAPTOP', 'DESKTOP', 'MONITOR', 'IMPRESORA', 'SERVIDOR', 'SWITCH', 'ACCESS POINT'];
-    const marcas = ['DELL', 'HP', 'LENOVO', 'APPLE', 'SAMSUNG', 'CISCO', 'ASUS'];
-    const estados = ['Disponible', 'Asignado', 'En Mantenimiento', 'Dado de Baja'];
-    const ubicaciones = ['Almacén San Borja', 'Almacén Norte', 'Almacén Sur', 'Almacén Central', 'Data Center'];
-    const gamas = ['GAMA A', 'GAMA B', 'GAMA C'];
-    const estadosEquipo = ['NUEVO', 'BUENO', 'REGULAR', 'MALO'];
-    const origenes = ['PROPIO', 'ALQUILADO', 'TERCERO'];
-    const ubAlmacen = ['GABINETE 1', 'GABINETE 2', 'GABINETE 3', 'ESTANTE A', 'ESTANTE B'];
-    const activos = [];
-    for (let i = 1; i <= 35; i++) {
-      const tipo = tipos[Math.floor(Math.random() * tipos.length)];
-      const marca = marcas[Math.floor(Math.random() * marcas.length)];
-      const modelo = 'Modelo-' + (100 + Math.floor(Math.random() * 900));
-      activos.push({
-        id: i,
-        codigo: 'ATI-' + String(i).padStart(5, '0'),
-        tipo,
-        equipo: tipo,
-        marca,
-        modelo,
-        serie: 'SN' + Math.random().toString(36).slice(2, 12).toUpperCase(),
-        invEntel: 'INV' + String(10000 + Math.floor(Math.random() * 90000)),
-        gama: gamas[Math.floor(Math.random() * gamas.length)],
-        estado: estados[Math.floor(Math.random() * estados.length)],
-        estadoEquipo: estadosEquipo[Math.floor(Math.random() * estadosEquipo.length)],
-        disco: ['256 GB', '500 GB', '1 TB'][Math.floor(Math.random() * 3)],
-        memoria: ['8', '16', '32'][Math.floor(Math.random() * 3)],
-        ubicacion: ubicaciones[Math.floor(Math.random() * ubicaciones.length)],
-        ubicacionAlmacen: ubAlmacen[Math.floor(Math.random() * ubAlmacen.length)],
-        fechaCompra: new Date(2021 + Math.floor(Math.random() * 3), Math.floor(Math.random() * 12), Math.floor(Math.random() * 28) + 1).toISOString().split('T')[0],
-        fechaIngreso: new Date(2023, Math.floor(Math.random() * 12), Math.floor(Math.random() * 28) + 1).toISOString().split('T')[0],
-        casoPedidoIngreso: 'PEDIDO ' + String(500000 + Math.floor(Math.random() * 99999)),
-        origenEquipo: origenes[Math.floor(Math.random() * origenes.length)],
-        fechaSalida: '',
-        casoPedidoSalida: '',
-        destinoEquipo: '',
-        responsableActivos: '',
-        responsable: '',
-        observaciones: '',
-        valor: Math.floor(Math.random() * 5000 + 500)
-      });
-    }
+    const activos = [
+      {
+        id: 1, codigo: 'ATI-00001', tipo: 'LAPTOP', equipo: 'LAPTOP', marca: 'DELL',
+        modelo: 'LATITUDE 5540', serie: 'SN1234567890', invEntel: 'INV10001',
+        gama: 'GAMA A', estado: 'Disponible', estadoEquipo: 'NUEVO',
+        disco: '512 GB', memoria: '16', ubicacion: 'Almacén San Borja',
+        ubicacionAlmacen: 'GABINETE 1', fechaCompra: '2024-01-15',
+        fechaIngreso: '2024-02-01', casoPedidoIngreso: 'PEDIDO 500001',
+        origenEquipo: 'PROPIO', fechaSalida: '', casoPedidoSalida: '',
+        destinoEquipo: '', responsableActivos: '', responsable: '',
+        observaciones: '', valor: 4500
+      },
+      {
+        id: 2, codigo: 'ATI-00002', tipo: 'MONITOR', equipo: 'MONITOR', marca: 'HP',
+        modelo: 'E24 G5', serie: 'SN0987654321', invEntel: 'INV10002',
+        gama: 'GAMA B', estado: 'Disponible', estadoEquipo: 'NUEVO',
+        disco: '', memoria: '', ubicacion: 'Almacén San Borja',
+        ubicacionAlmacen: 'ESTANTE A', fechaCompra: '2024-03-10',
+        fechaIngreso: '2024-03-20', casoPedidoIngreso: 'PEDIDO 500002',
+        origenEquipo: 'PROPIO', fechaSalida: '', casoPedidoSalida: '',
+        destinoEquipo: '', responsableActivos: '', responsable: '',
+        observaciones: '', valor: 1200
+      }
+    ];
     DB.set('activos', activos);
   }
 
@@ -132,7 +114,10 @@ function initSampleData() {
   if (DB.get('bajasPendientes').length === 0) DB.set('bajasPendientes', []);
   if (DB.get('historialBajas').length === 0) DB.set('historialBajas', []);
 
-  if (DB.get('gestores').length === 0) {
+  // Verificar que los gestores tengan credenciales válidas; si no, reinicializar
+  const _gestoresActuales = DB.get('gestores');
+  const _adminOk = _gestoresActuales.some(g => (g.usuario || '').toLowerCase() === 'admin');
+  if (_gestoresActuales.length === 0 || !_adminOk) {
     DB.set('gestores', [
       { id: 1, nombre: 'Gerardo R.', email: 'gerardo@empresa.com', rol: 'Administrador', perfil: 'Administrativo', usuario: 'admin', password: '', estado: 'Activo' },
       { id: 2, nombre: 'Admin TI', email: 'admin.ti@empresa.com', rol: 'Gestor', perfil: 'Administrativo', usuario: 'gestor', password: 'gestor123', estado: 'Activo' },
@@ -190,7 +175,7 @@ function initSampleData() {
   if (!DB.getConfig('tipoPuesto', null))
     DB.setConfig('tipoPuesto', ['PRESENCIAL', 'REMOTO', 'HÍBRIDO']);
   if (!DB.getConfig('tipoAsignacion', null))
-    DB.setConfig('tipoAsignacion', ['INGRESO NUEVO', 'ASIGNACIÓN', 'REEMPLAZO', 'RENOVACIÓN', 'PRÉSTAMO']);
+    DB.setConfig('tipoAsignacion', ['INGRESO NUEVO', 'ASIGNACIÓN', 'REEMPLAZO', 'RENOVACIÓN', 'PRÉSTAMO', 'REPOSICIÓN DAÑO FÍSICO', 'REPOSICIÓN ROBO']);
   if (!DB.getConfig('tipoEquipos', null))
     DB.setConfig('tipoEquipos', {
       'LAPTOP':       ['LAPTOP', 'LAPTOP MINI', 'LAPTOP GAMER'],
@@ -297,7 +282,9 @@ function doLogin() {
 
   const gestores = DB.get('gestores');
   const gestor = gestores.find(g =>
-    g.usuario === userInput && g.password === passInput && g.estado === 'Activo'
+    (g.usuario || '').toLowerCase() === userInput.toLowerCase() &&
+    (g.password || '').toLowerCase() === (passInput || '').toLowerCase() &&
+    (g.estado || '').toLowerCase() === 'activo'
   );
 
   if (!gestor) {
@@ -573,14 +560,19 @@ function closeModal() {
   // Limpiar estado del modal de asignación al cerrar por cualquier vía
   _asigSelectedColab = null;
   _asigSelectedActivos = [];
+  _asigSelectedAccesorios = [];
   _asigReemOld = null;
   _asigStockSearch = '';
   _asigStockTipo = 'Todos';
   _asigStockPage = 0;
+  _asigAccSearch = '';
+  _asigAccTipo = 'Todos';
+  _asigAccPage = 0;
   _asigFecha = '';
   _asigTicket = '';
   _asigObs = '';
   _asigMotivo = '';
+  _asigFechaPrestamo = '';
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -635,9 +627,9 @@ function formatDate(d) {
       return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear();
     }
   }
-  // Soportar formato interno yyyy-mm-dd
+  // Soportar formato interno yyyy-mm-dd (con o sin hora T...)
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
-    const parts = s.split('-');
+    const parts = s.split('T')[0].split('-');
     return `${parts[2]}/${parts[1]}/${parts[0]}`;
   }
   // Si ya está en dd/mm/yyyy retornarlo tal cual
@@ -665,7 +657,7 @@ function esc(s) {
 }
 
 // Convierte todos los valores string de un objeto a MAYÚSCULAS (excepto campos de fecha, email y password)
-const _SKIP_UPPER = ['email','password','correoColab','fechaIngreso','fechaCompra','fechaAsignacion','fechaCese','fechaApertura','adendaFechaInicio','adendaFechaFin','fecha','fechaAprobacion','estado'];
+const _SKIP_UPPER = ['email','password','usuario','correoColab','fechaIngreso','fechaCompra','fechaAsignacion','fechaCese','fechaApertura','adendaFechaInicio','adendaFechaFin','fecha','fechaAprobacion','estado'];
 function upperFields(obj) {
   const result = {};
   for (const k in obj) {
@@ -1454,7 +1446,8 @@ function saveActivo(id) {
       equipo: campos.equipo || tipo || '',
       modelo: modelo || '',
       serie: '',
-      inv: ''
+      inv: '',
+      motivo: ''
     });
   }
 
@@ -1609,6 +1602,38 @@ function procesarExcel(file) {
         return { ...mapped, _row: i + 2, _fieldErrors: fieldErrors, _valid: !hasErrors };
       });
 
+      // Validar series duplicadas (solo las que el usuario ingresó, no las vacías)
+      const _seriesEnArchivo = {};
+      const _activosDB = DB.get('activos');
+      const _seriesEnBD = new Set();
+      _activosDB.forEach(a => (a.series || []).forEach(s => { if (s.serie) _seriesEnBD.add(s.serie.toUpperCase()); }));
+
+      _cargaMasivaData.forEach((r, i) => {
+        if (!r.serie) return; // Serie vacía se autogenerará, no validar
+        const su = r.serie.toUpperCase();
+        // Duplicada en BD
+        if (_seriesEnBD.has(su)) {
+          r._fieldErrors = r._fieldErrors || {};
+          r._fieldErrors.serie = 'Ya existe en BD';
+          r._valid = false;
+        }
+        // Duplicada dentro del mismo archivo
+        if (_seriesEnArchivo[su] !== undefined) {
+          r._fieldErrors = r._fieldErrors || {};
+          r._fieldErrors.serie = 'Duplicada en archivo (fila ' + _seriesEnArchivo[su] + ')';
+          r._valid = false;
+          // Marcar también la primera ocurrencia
+          const firstIdx = _cargaMasivaData.findIndex(x => x._row === _seriesEnArchivo[su]);
+          if (firstIdx >= 0 && _cargaMasivaData[firstIdx].serie) {
+            _cargaMasivaData[firstIdx]._fieldErrors = _cargaMasivaData[firstIdx]._fieldErrors || {};
+            _cargaMasivaData[firstIdx]._fieldErrors.serie = 'Duplicada en archivo (fila ' + r._row + ')';
+            _cargaMasivaData[firstIdx]._valid = false;
+          }
+        } else {
+          _seriesEnArchivo[su] = r._row;
+        }
+      });
+
       _cargaMasivaPage = 1;
       _renderCargaMasivaPreview();
     } catch (err) {
@@ -1735,6 +1760,55 @@ function _renderCargaMasivaPreview() {
   if (footer) footer.innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
 }
 
+/**
+ * Genera una abreviatura de 3 letras a partir del nombre del equipo.
+ * Ej: "TECLADO USB" → "TCL", "MOUSE USB" → "MOU", "MONITOR" → "MON"
+ */
+function _abreviarEquipo(equipo) {
+  const name = (equipo || '').toUpperCase().replace(/[^A-Z]/g, '');
+  if (name.length <= 3) return (name + 'XXX').substring(0, 3);
+  // Tomar primera, segunda y tercera consonante; si no alcanza, rellenar con vocales
+  const consonantes = name.replace(/[AEIOU]/g, '');
+  if (consonantes.length >= 3) return consonantes.substring(0, 3);
+  // Fallback: primeras 3 letras del nombre limpio
+  return name.substring(0, 3);
+}
+
+/**
+ * Genera una serie interna única para un accesorio.
+ * Formato: ABR + 8 dígitos correlativos (ej: TCL00000001)
+ * Busca el máximo correlativo existente en activos y en las series pendientes del lote actual.
+ */
+function _generarSerieInterna(equipo, seriesExistentesGlobal) {
+  const abr = _abreviarEquipo(equipo);
+  const regex = new RegExp('^' + abr + '(\\d+)$', 'i');
+  let maxCorr = 0;
+
+  // Buscar en todas las series de todos los activos existentes
+  const activos = DB.get('activos');
+  activos.forEach(a => {
+    (a.series || []).forEach(s => {
+      const m = (s.serie || '').match(regex);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n > maxCorr) maxCorr = n;
+      }
+    });
+  });
+
+  // Buscar también en las series ya generadas en este lote (para evitar duplicados intra-lote)
+  (seriesExistentesGlobal || []).forEach(serie => {
+    const m = (serie || '').match(regex);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > maxCorr) maxCorr = n;
+    }
+  });
+
+  maxCorr++;
+  return abr + String(maxCorr).padStart(8, '0');
+}
+
 function ejecutarCargaMasiva() {
   const validos = _cargaMasivaData.filter(r => r._valid);
   if (validos.length === 0) { showToast('No hay registros válidos para importar', 'error'); return; }
@@ -1743,14 +1817,24 @@ function ejecutarCargaMasiva() {
 
   // Agrupar filas por modelo (mismo tipo + marca + modelo)
   const lotes = {};
+  const _seriesGeneradas = []; // Acumulador de series autogeneradas para evitar duplicados intra-lote
   validos.forEach(r => {
     const key = [r.tipo, r.marca, r.modelo].join('||').toLowerCase();
     if (!lotes[key]) {
       lotes[key] = { data: r, series: [] };
     }
-    if (r.serie) {
+    const _esAccesorio = (r.tipo || '').toUpperCase() === 'ACCESORIO';
+    let serieVal = (r.serie || '').trim();
+
+    // Si es accesorio y no tiene serie, generar serie interna automática
+    if (!serieVal && _esAccesorio) {
+      serieVal = _generarSerieInterna(r.equipo || r.tipo, _seriesGeneradas);
+      _seriesGeneradas.push(serieVal);
+    }
+
+    if (serieVal) {
       lotes[key].series.push({
-        serie: r.serie,
+        serie: serieVal,
         codInventario: r.codInventario || '',
         ram: r.ram || '',
         almacenamiento: r.almacenamiento || ''
@@ -1839,7 +1923,8 @@ function ejecutarCargaMasiva() {
         equipo: rd.equipo || rd.tipo || '',
         modelo: rd.modelo || '',
         serie: s.serie || '',
-        inv: s.codInventario || ''
+        inv: s.codInventario || '',
+        motivo: ''
       });
     });
   });
@@ -2895,21 +2980,33 @@ let _asigStockSearch = '';
 let _asigStockTipo = 'Todos';
 let _asigStockPage = 0;
 const _ASIG_PAGE_SIZE = 5;
+// Accesorios para Ingreso Nuevo
+let _asigAccSearch = '';
+let _asigAccTipo = 'Todos';
+let _asigAccPage = 0;
+let _asigSelectedAccesorios = [];
+const _TIPOS_EP_ADMIN = ['LAPTOP', 'DESKTOP'];
 let _asigFecha = '';
 let _asigTicket = '';
 let _asigObs = '';
 let _asigMotivo = '';
+let _asigFechaPrestamo = '';
 let _asigReemOld = null; // asignación seleccionada para reemplazo
 
 function openAsignacionModal() {
   _asigSelectedColab = null;
   _asigSelectedActivos = [];
+  _asigSelectedAccesorios = [];
   _asigStockSearch = '';
   _asigStockTipo = 'Todos';
   _asigStockPage = 0;
+  _asigAccSearch = '';
+  _asigAccTipo = 'Todos';
+  _asigAccPage = 0;
   _asigFecha = today();
   _asigTicket = '';
   _asigObs = '';
+  _asigFechaPrestamo = '';
   _asigMotivo = '';
   _asigReemOld = null;
   _renderAsignacionModal(true);
@@ -2926,12 +3023,30 @@ function _renderAsignacionModal(fresh) {
     if (elTicket) _asigTicket = elTicket.value;
     if (elObs) _asigObs = elObs.value;
     if (elMotivo) _asigMotivo = elMotivo.value;
+    const elFechaPrest = document.getElementById('fAsigFechaPrestamo');
+    if (elFechaPrest) _asigFechaPrestamo = elFechaPrest.value;
   }
 
   const c = _asigSelectedColab;
-  const motivosAsig = ['INGRESO NUEVO','REEMPLAZO','ASIGNACIÓN','PRÉSTAMO','RENOVACIÓN','REPOSICIÓN'];
+  const motivosAsig = ['INGRESO NUEVO','REEMPLAZO','ASIGNACIÓN','PRÉSTAMO','RENOVACIÓN','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'];
   const motVal = _asigMotivo || '';
-  const isReemplazo = motVal.toUpperCase().includes('REEMPLAZO');
+  const _motUp = motVal.toUpperCase();
+  const isReposicionDano = _motUp.includes('REPOSICIÓN DAÑO FÍSICO') || _motUp.includes('REPOSICION DANO FISICO');
+  const isReposicionRobo = _motUp.includes('REPOSICIÓN ROBO') || _motUp.includes('REPOSICION ROBO');
+  const isReemplazo = _motUp.includes('REEMPLAZO') || _motUp.includes('RENOVACIÓN') || _motUp.includes('RENOVACION') || isReposicionDano || isReposicionRobo;
+  const isRenovacion = _motUp.includes('RENOVACIÓN') || _motUp.includes('RENOVACION');
+  const isPrestamo = _motUp.includes('PRÉSTAMO') || _motUp.includes('PRESTAMO');
+  const isIngresoNuevo = _motUp.includes('INGRESO NUEVO');
+
+  // Para Ingreso Nuevo: obtener IDs de colaboradores que ya tienen equipo principal (LAPTOP/DESKTOP)
+  let _colabsConEquipo = new Set();
+  if (isIngresoNuevo) {
+    const _asigAll = DB.get('asignaciones');
+    _asigAll.filter(a => a.estado === 'Vigente' && ['LAPTOP','DESKTOP'].includes((a.activoTipo || '').toUpperCase()))
+      .forEach(a => _colabsConEquipo.add(a.colaboradorId));
+  }
+  window._asigColabsConEquipo = _colabsConEquipo;
+  window._asigIsIngresoNuevo = isIngresoNuevo;
 
   // Build inline stock table
   const activos = DB.get('activos');
@@ -2978,19 +3093,67 @@ function _renderAsignacionModal(fresh) {
     (a.series||[]).forEach(s => {
       const key = a.id + '||' + (s.serie||'').toUpperCase().trim();
       if (!seriesAsig.has(key)) {
-        stock.push({ activoId: a.id, tipo: (a.tipo||'').toUpperCase().trim(), equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie||'', codInventario: s.codInventario||'', ubicacion: a.ubicacion||'', codigo: a.codigo||'' });
+        stock.push({ activoId: a.id, tipo: (a.tipo||'').toUpperCase().trim(), equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie||'', codInventario: s.codInventario||'', ubicacion: a.ubicacion||'', codigo: a.codigo||'', gama: a.gama||'' });
       }
     });
   });
 
   // Filter stock
   let filtered = stock;
-  if (!isReemplazo && _asigStockTipo !== 'Todos') filtered = filtered.filter(r => r.tipo === _asigStockTipo);
+  // Ingreso Nuevo: sección principal solo EP-ADMIN
+  if (isIngresoNuevo) filtered = filtered.filter(r => _TIPOS_EP_ADMIN.includes(r.tipo));
+  else if (!isReemplazo && _asigStockTipo !== 'Todos') filtered = filtered.filter(r => r.tipo === _asigStockTipo);
   if (_asigStockSearch) {
     const s = _asigStockSearch.toLowerCase();
     filtered = filtered.filter(r => r.codigo.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) || r.serie.toLowerCase().includes(s) || r.marca.toLowerCase().includes(s));
   }
-  const tipos = ['Todos', ...new Set(stock.map(r => r.tipo))];
+  const tipos = isIngresoNuevo ? ['Todos', ..._TIPOS_EP_ADMIN.filter(t => stock.some(r => r.tipo === t))] : ['Todos', ...new Set(stock.map(r => r.tipo))];
+
+  // Accesorios para Ingreso Nuevo
+  let accFiltered = [];
+  let accTipos = [];
+  let accStockRowsHTML = '';
+  let accPgInfo = '';
+  let accTotalPages = 1;
+  let accIsFirst = true;
+  let accIsLast = true;
+  if (isIngresoNuevo) {
+    let accStock = stock.filter(r => !_TIPOS_EP_ADMIN.includes(r.tipo));
+    if (_asigAccTipo !== 'Todos') accStock = accStock.filter(r => (r.equipo || r.tipo) === _asigAccTipo);
+    if (_asigAccSearch) {
+      const sa = _asigAccSearch.toLowerCase();
+      accStock = accStock.filter(r => r.codigo.toLowerCase().includes(sa) || r.modelo.toLowerCase().includes(sa) || r.serie.toLowerCase().includes(sa) || r.marca.toLowerCase().includes(sa) || (r.equipo||'').toLowerCase().includes(sa));
+    }
+    accFiltered = accStock;
+    accTipos = ['Todos', ...new Set(stock.filter(r => !_TIPOS_EP_ADMIN.includes(r.tipo)).map(r => r.equipo || r.tipo))];
+    accTotalPages = Math.ceil(accFiltered.length / _ASIG_PAGE_SIZE) || 1;
+    if (_asigAccPage >= accTotalPages) _asigAccPage = accTotalPages - 1;
+    if (_asigAccPage < 0) _asigAccPage = 0;
+    const accPgStart = _asigAccPage * _ASIG_PAGE_SIZE;
+    const accPageItems = accFiltered.slice(accPgStart, accPgStart + _ASIG_PAGE_SIZE);
+    const accSelSet = new Set(_asigSelectedAccesorios.map(x => x.activoId + '||' + x.serie));
+    accStockRowsHTML = accPageItems.length === 0
+      ? `<tr><td colspan="5" style="padding:20px;text-align:center;color:#94a3b8;font-size:12px">No hay accesorios disponibles</td></tr>`
+      : accPageItems.map((r, pi) => {
+          const gi = accPgStart + pi;
+          const isSel = accSelSet.has(r.activoId + '||' + r.serie);
+          return `<tr style="border-bottom:1px solid #f1f5f9;background:${isSel ? '#fef3c7' : ''};cursor:pointer"
+            onclick="_asigToggleAcc(${gi})" onmouseover="if(!this.style.background.includes('fef3c7'))this.style.background='#f8fafc'" onmouseout="if(!this.style.background.includes('fef3c7'))this.style.background=''">
+            <td style="padding:6px;text-align:center"><input type="checkbox" ${isSel ? 'checked' : ''} onclick="event.stopPropagation();_asigToggleAcc(${gi})"></td>
+            <td style="padding:6px 8px;font-family:monospace;font-size:11px;font-weight:700">${esc(r.codigo)}</td>
+            <td style="padding:6px 8px;font-size:11px">${esc(r.equipo || r.tipo)}</td>
+            <td style="padding:6px 8px">${esc(r.marca)} ${esc(r.modelo)}</td>
+            <td style="padding:6px 8px;font-family:monospace;font-size:11px">${esc(r.serie || '—')}</td>
+          </tr>`;
+        }).join('');
+    accPgInfo = accFiltered.length > 0 ? `${accPgStart + 1}-${Math.min(accPgStart + _ASIG_PAGE_SIZE, accFiltered.length)} de ${accFiltered.length}` : '0 resultados';
+    accIsFirst = _asigAccPage === 0;
+    accIsLast = _asigAccPage >= accTotalPages - 1;
+    window._asigAccStockList = accFiltered;
+  }
+
+  // Check if stock is LAPTOP type (to show gama column)
+  const _stockEsLaptop = filtered.length > 0 && filtered.every(r => r.tipo === 'LAPTOP');
 
   // Check which are already selected
   const selSet = new Set(_asigSelectedActivos.map(x => x.activoId + '||' + x.serie));
@@ -3005,12 +3168,12 @@ function _renderAsignacionModal(fresh) {
 
   // Build stock table rows
   const stockRowsHTML = pageItems.length === 0
-    ? '<tr><td colspan="5" style="padding:20px;text-align:center;color:#94a3b8;font-size:12px">No hay equipos disponibles</td></tr>'
+    ? `<tr><td colspan="${_stockEsLaptop ? 6 : 5}" style="padding:20px;text-align:center;color:#94a3b8;font-size:12px">No hay equipos disponibles</td></tr>`
     : pageItems.map((r, pi) => {
         const gi = pgStart + pi;
         const isSel = selSet.has(r.activoId + '||' + r.serie);
-        // En reemplazo: radio (solo 1), normal: checkbox (múltiple)
-        const inputType = isReemplazo ? 'radio' : 'checkbox';
+        // En reemplazo o ingreso nuevo: radio (solo 1), normal: checkbox (múltiple)
+        const inputType = (isReemplazo || isIngresoNuevo) ? 'radio' : 'checkbox';
         return `<tr style="border-bottom:1px solid #f1f5f9;background:${isSel ? '#eff6ff' : ''};cursor:pointer"
           onclick="_asigToggleStock(${gi})" onmouseover="if(!this.style.background.includes('eff6ff'))this.style.background='#f8fafc'" onmouseout="if(!this.style.background.includes('eff6ff'))this.style.background=''">
           <td style="padding:6px;text-align:center">
@@ -3020,6 +3183,7 @@ function _renderAsignacionModal(fresh) {
           <td style="padding:6px 8px">${esc(r.marca)} ${esc(r.modelo)}</td>
           <td style="padding:6px 8px;font-family:monospace;font-size:11px">${esc(r.serie || '—')}</td>
           <td style="padding:6px 8px;font-size:11px;color:#64748b">${esc(r.ubicacion)}</td>
+          ${_stockEsLaptop ? `<td style="padding:6px 8px;font-size:11px;color:#64748b">${esc(r.gama || '—')}</td>` : ''}
         </tr>`;
       }).join('');
 
@@ -3029,23 +3193,24 @@ function _renderAsignacionModal(fresh) {
   const isFirst = _asigStockPage === 0;
   const isLast = _asigStockPage >= totalPages - 1;
 
-  // Reemplazo summary
+  // Reemplazo / Renovación summary
   let reemSummaryHTML = '';
   if (isReemplazo && _asigReemOld && _asigSelectedActivos.length > 0) {
     const oldAct = activos.find(x => x.id === _asigReemOld.activoId);
     const newItem = _asigSelectedActivos[0];
+    const _sumLabel = isReposicionRobo ? 'Resumen de la reposición por robo' : isReposicionDano ? 'Resumen de la reposición por daño físico' : isRenovacion ? 'Resumen de la renovación' : 'Resumen del reemplazo';
     reemSummaryHTML = `
       <div style="margin-top:14px;padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px">
-        <div style="font-size:11px;font-weight:700;color:#166534;margin-bottom:8px">Resumen del reemplazo</div>
+        <div style="font-size:11px;font-weight:700;color:#166534;margin-bottom:8px">${_sumLabel}</div>
         <div style="display:flex;align-items:center;gap:10px;font-size:12px">
           <div style="flex:1;padding:8px;background:#fff;border-radius:6px;border:1px solid #fecaca">
-            <div style="font-size:10px;color:#dc2626;font-weight:600;margin-bottom:2px">RETIRAR</div>
+            <div style="font-size:10px;color:#dc2626;font-weight:600;margin-bottom:2px">${isReposicionRobo ? 'EQUIPO ROBADO' : isReposicionDano ? 'EQUIPO DAÑADO' : 'RETIRAR'}</div>
             <strong>${oldAct ? esc(oldAct.codigo) : '—'}</strong> — ${oldAct ? esc(oldAct.marca) + ' ' + esc(oldAct.modelo) : ''}<br>
             <span style="font-size:11px;color:#64748b">Serie: ${esc(_asigReemOld.serieAsignada || '—')}</span>
           </div>
           <span style="font-size:18px;color:#10b981;font-weight:700">→</span>
           <div style="flex:1;padding:8px;background:#fff;border-radius:6px;border:1px solid #bbf7d0">
-            <div style="font-size:10px;color:#16a34a;font-weight:600;margin-bottom:2px">ENTREGAR</div>
+            <div style="font-size:10px;color:#16a34a;font-weight:600;margin-bottom:2px">${isReposicionDano ? 'REPOSICIÓN' : 'ENTREGAR'}</div>
             <strong>${esc(newItem.codigo)}</strong> — ${esc(newItem.marca)} ${esc(newItem.modelo)}<br>
             <span style="font-size:11px;color:#64748b">Serie: ${esc(newItem.serie || '—')}</span>
           </div>
@@ -3057,10 +3222,10 @@ function _renderAsignacionModal(fresh) {
     <div style="display:flex;flex-direction:column;gap:0">
       <!-- Header -->
       <div style="display:flex;align-items:center;gap:14px;padding-bottom:16px;margin-bottom:16px;border-bottom:2px solid #dbeafe">
-        <div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,${isReemplazo ? '#ea580c,#dc2626' : '#3b82f6,#2563eb'});display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 12px ${isReemplazo ? 'rgba(234,88,12,.25)' : 'rgba(37,99,235,.25)'}">${isReemplazo ? '🔄' : '📋'}</div>
+        <div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,${isReposicionRobo ? '#7c3aed,#4c1d95' : isReposicionDano ? '#dc2626,#991b1b' : isReemplazo ? '#ea580c,#dc2626' : isPrestamo ? '#d97706,#b45309' : isIngresoNuevo ? '#059669,#047857' : '#3b82f6,#2563eb'});display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 12px ${isReposicionRobo ? 'rgba(124,58,237,.25)' : isReposicionDano ? 'rgba(220,38,38,.25)' : isReemplazo ? 'rgba(234,88,12,.25)' : isPrestamo ? 'rgba(217,119,6,.25)' : isIngresoNuevo ? 'rgba(5,150,105,.25)' : 'rgba(37,99,235,.25)'}">${isReposicionRobo ? '🚨' : isReposicionDano ? '🛠️' : isReemplazo ? '🔄' : isPrestamo ? '⏱️' : isIngresoNuevo ? '🆕' : '📋'}</div>
         <div>
-          <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">${isReemplazo ? 'Reemplazo de Equipo' : 'Asignación de Activo'}</h2>
-          <div style="font-size:11px;color:#64748b;margin-top:1px">${isReemplazo ? 'Reemplazar equipo asignado a un colaborador' : 'Asignar equipos del inventario a un colaborador'}</div>
+          <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">${isReposicionRobo ? 'Reposición por Robo' : isReposicionDano ? 'Reposición por Daño Físico' : isReemplazo ? (isRenovacion ? 'Renovación de Equipo' : 'Reemplazo de Equipo') : isPrestamo ? 'Préstamo de Equipo' : isIngresoNuevo ? 'Ingreso Nuevo — Asignación Inicial' : 'Asignación de Activo'}</h2>
+          <div style="font-size:11px;color:#64748b;margin-top:1px">${isReposicionRobo ? 'Reponer equipo robado y registrar el caso para control y trazabilidad' : isReposicionDano ? 'Reponer equipo dañado físicamente a un colaborador' : isReemplazo ? (isRenovacion ? 'Renovar equipo asignado a un colaborador' : 'Reemplazar equipo asignado a un colaborador') : isPrestamo ? 'Préstamo temporal de equipo a un colaborador' : isIngresoNuevo ? 'Asignar kit inicial a un colaborador nuevo sin equipo' : 'Asignar equipos del inventario a un colaborador'}</div>
         </div>
       </div>
 
@@ -3083,7 +3248,29 @@ function _renderAsignacionModal(fresh) {
         </div>
       </div>
 
-      <!-- Row 2: Colaborador -->
+      <!-- Row 2: Motivo + Observaciones -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Motivo <span class="required">*</span></label>
+          ${isReposicionDano || isReposicionRobo ? `
+            <div style="height:38px;font-size:12px;font-weight:700;color:${isReposicionRobo ? '#4c1d95' : '#991b1b'};background:${isReposicionRobo ? '#f5f3ff' : '#fef2f2'};border:1px solid ${isReposicionRobo ? '#c4b5fd' : '#fecaca'};border-radius:8px;display:flex;align-items:center;padding:0 12px;gap:6px">
+              <span style="font-size:14px">${isReposicionRobo ? '🚨' : '🛠️'}</span> ${isReposicionRobo ? 'REPOSICIÓN ROBO' : 'REPOSICIÓN DAÑO FÍSICO'}
+            </div>
+            <input type="hidden" id="fAsigMotivo" value="${isReposicionRobo ? 'REPOSICIÓN ROBO' : 'REPOSICIÓN DAÑO FÍSICO'}">
+          ` : `
+          <select class="form-control" id="fAsigMotivo" onchange="_onMotivoAsigChange()" style="height:38px;font-size:12px">
+            <option value="">Seleccionar...</option>
+            ${motivosAsig.map(m => `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
+          </select>
+          `}
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
+          <input class="form-control" id="fAsigObs" placeholder="Ingrese observaciones aquí..." value="${esc(_asigObs)}" style="height:38px;font-size:12px">
+        </div>
+      </div>
+
+      <!-- Row 3: Colaborador -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
         <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
@@ -3091,13 +3278,14 @@ function _renderAsignacionModal(fresh) {
             <span style="font-size:12px;font-weight:700;color:#334155">Colaborador</span>
           </div>
           <div style="position:relative">
-            <div style="display:flex;align-items:center;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:36px">
+            <div style="display:flex;align-items:center;border:1px solid ${isIngresoNuevo ? '#fbbf24' : '#e2e8f0'};border-radius:8px;overflow:hidden;height:36px${isIngresoNuevo ? ';background:#fffbeb' : ''}">
               <span style="padding:0 8px;font-size:13px;color:#94a3b8">🔍</span>
-              <input class="form-control" id="fAsigUserSearch" placeholder="Buscar por nombre, DNI o correo..."
+              <input class="form-control" id="fAsigUserSearch" placeholder="${isIngresoNuevo ? 'Buscar colaborador sin equipo...' : 'Buscar por nombre, DNI o correo...'}"
                 oninput="_buscarColabAsig(this.value)" autocomplete="off" value="${c ? esc(c.nombre) : ''}"
-                style="border:none;border-radius:0;height:100%;font-size:12px;flex:1">
+                style="border:none;border-radius:0;height:100%;font-size:12px;flex:1;${isIngresoNuevo ? 'background:transparent' : ''}">
+              <span onclick="_toggleColabDropdown()" style="padding:0 10px;cursor:pointer;font-size:12px;color:#64748b;height:100%;display:flex;align-items:center;border-left:1px solid #e2e8f0;background:#f8fafc;user-select:none" title="Ver lista de colaboradores">▼</span>
             </div>
-            <div id="asigUserResults" style="position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;max-height:160px;overflow-y:auto;z-index:10;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.1)"></div>
+            <div id="asigUserResults" style="position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;max-height:220px;overflow-y:auto;z-index:10;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.1)"></div>
           </div>
         </div>
         <div id="asigUserConfirm" style="border:1px solid ${c ? '#bbf7d0' : '#e2e8f0'};border-radius:10px;padding:12px;background:${c ? '#f0fdf4' : '#fafafa'}">
@@ -3118,21 +3306,28 @@ function _renderAsignacionModal(fresh) {
           `}
         </div>
       </div>
+      ${isIngresoNuevo ? `<div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 12px;font-size:11px;color:#065f46;margin-bottom:16px;display:flex;align-items:center;gap:8px">
+        <span style="font-size:14px">ℹ️</span>
+        <span>Solo se muestran colaboradores activos <strong>sin equipo principal asignado</strong> (laptop/desktop). Los nuevos colaboradores deben registrarse primero en el <strong>Padrón de Colaboradores</strong>.</span>
+      </div>` : ''}
 
-      <!-- Row 3: Motivo + Observaciones -->
+      <!-- Row 3b: Fecha fin de préstamo (solo para PRÉSTAMO) -->
+      ${isPrestamo ? `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
         <div>
-          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Motivo <span class="required">*</span></label>
-          <select class="form-control" id="fAsigMotivo" onchange="_onMotivoAsigChange()" style="height:38px;font-size:12px">
-            <option value="">Seleccionar...</option>
-            ${motivosAsig.map(m => `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
-          </select>
+          <label style="font-size:11px;font-weight:700;color:#b45309;margin-bottom:6px;display:block">⏱️ Fecha fin de préstamo <span class="required">*</span></label>
+          <div style="display:flex;align-items:center;gap:0;border:1px solid #fbbf24;border-radius:8px;overflow:hidden;height:38px;background:#fffbeb">
+            <input type="date" class="form-control" id="fAsigFechaPrestamo" value="${_asigFechaPrestamo || ''}" min="${today()}" style="border:none;border-radius:0;height:100%;font-size:12px;flex:1;background:transparent">
+            <span onclick="document.getElementById('fAsigFechaPrestamo').showPicker()" style="padding:0 10px;cursor:pointer;font-size:14px;color:#d97706;background:#fef3c7;height:100%;display:flex;align-items:center;border-left:1px solid #fbbf24">📅</span>
+          </div>
         </div>
-        <div>
-          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
-          <input class="form-control" id="fAsigObs" placeholder="Ingrese observaciones aquí..." value="${esc(_asigObs)}" style="height:38px;font-size:12px">
+        <div style="display:flex;align-items:end">
+          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;font-size:11px;color:#92400e;width:100%">
+            El equipo deberá ser devuelto en la fecha indicada. El préstamo quedará registrado como temporal.
+          </div>
         </div>
       </div>
+      ` : ''}
 
       <!-- Row 4: Reemplazo - Equipos asignados al usuario -->
       ${isReemplazo && motVal ? `
@@ -3140,7 +3335,7 @@ function _renderAsignacionModal(fresh) {
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
           <span style="font-size:14px">📦</span>
           <label style="font-size:13px;font-weight:700;color:#334155">Activos asignados al usuario</label>
-          <span style="font-size:11px;color:#94a3b8;margin-left:auto">Seleccione el equipo a reemplazar</span>
+          <span style="font-size:11px;color:#94a3b8;margin-left:auto">${isReposicionRobo ? 'Seleccione el equipo robado' : isReposicionDano ? 'Seleccione el equipo dañado a retirar' : 'Seleccione el equipo a reemplazar'}</span>
         </div>
         ${!c ? '<div style="padding:12px;text-align:center;color:#94a3b8;font-size:12px;background:#f8fafc;border-radius:8px">Primero seleccione un colaborador</div>' : reemAsigHTML && reemAsigHTML.startsWith('<tr') ? `
         <div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;margin-bottom:16px">
@@ -3161,8 +3356,8 @@ function _renderAsignacionModal(fresh) {
       <div id="asigActivoSection" style="display:${isReemplazo ? (_asigReemOld ? '' : 'none') : (motVal ? '' : 'none')}">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
           <div style="display:flex;align-items:center;gap:6px">
-            <span style="font-size:14px">${isReemplazo ? '🔄' : '💻'}</span>
-            <label style="font-size:13px;font-weight:700;color:#334155">${isReemplazo ? `Equipo nuevo (Stock ${reemTipoFiltro || ''})` : 'Activo a asignar (Inventario disponible)'} ${_asigSelectedActivos.length > 0 ? `<span style="font-size:11px;font-weight:500;color:#2563eb;margin-left:6px">${_asigSelectedActivos.length} seleccionado(s)</span>` : ''}</label>
+            <span style="font-size:14px">${isReemplazo ? '🔄' : isIngresoNuevo ? '💻' : '💻'}</span>
+            <label style="font-size:13px;font-weight:700;color:#334155">${isReposicionRobo ? `Equipo de reposición (Stock ${reemTipoFiltro || ''})` : isReposicionDano ? `Equipo de reposición (Stock ${reemTipoFiltro || ''})` : isReemplazo ? `Equipo nuevo (Stock ${reemTipoFiltro || ''})` : isIngresoNuevo ? 'Equipo Principal (EP-ADMIN)' : 'Activo a asignar (Inventario disponible)'} ${_asigSelectedActivos.length > 0 ? `<span style="font-size:11px;font-weight:500;color:#2563eb;margin-left:6px">${_asigSelectedActivos.length} seleccionado(s)</span>` : ''}</label>
           </div>
           <span style="font-size:11px;color:#94a3b8">${filtered.length} equipo(s)</span>
         </div>
@@ -3173,22 +3368,23 @@ function _renderAsignacionModal(fresh) {
             <input type="text" id="asigStockSearch" placeholder="Buscar por código, modelo o serie..." value="${esc(_asigStockSearch)}"
               oninput="_asigStockSearch=this.value;_asigStockPage=0;_renderAsignacionModal()" style="border:none;flex:1;height:100%;font-size:12px;outline:none;background:transparent">
           </div>
-          ${!isReemplazo ? `
+          ${(!isReemplazo && !isIngresoNuevo) ? `
           <select id="asigStockTipoFilter" onchange="_asigStockTipo=this.value;_asigStockPage=0;_renderAsignacionModal()" style="border:1px solid #e2e8f0;border-radius:8px;padding:0 10px;font-size:11px;color:#334155;height:36px;min-width:130px;cursor:pointer">
             ${tipos.map(t => `<option value="${esc(t)}" ${_asigStockTipo===t?'selected':''}>${esc(t)}${t!=='Todos'?' ('+filtered.filter(r=>r.tipo===t).length+')':' ('+stock.length+')'}</option>`).join('')}
-          </select>` : ''}
+          </select>` : isIngresoNuevo ? `<span style="font-size:11px;color:#64748b;padding:0 10px;display:flex;align-items:center;background:#f0fdf4;border:1px solid #a7f3d0;border-radius:8px;height:36px">LAPTOP / DESKTOP</span>` : ''}
         </div>
 
         <div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
           <table style="width:100%;font-size:12px;border-collapse:collapse">
             <thead><tr style="background:#f8fafc">
               <th style="padding:8px 6px;width:36px;text-align:center;border-bottom:1px solid #e2e8f0">
-                ${!isReemplazo ? `<input type="checkbox" onchange="_asigTogglePageAll(this.checked)" ${pageAllSel ? 'checked' : ''}>` : ''}
+                ${(!isReemplazo && !isIngresoNuevo) ? `<input type="checkbox" onchange="_asigTogglePageAll(this.checked)" ${pageAllSel ? 'checked' : ''}>` : ''}
               </th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Código</th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Modelo</th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Serie</th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Ubicación</th>
+              ${_stockEsLaptop ? '<th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Gama</th>' : ''}
             </tr></thead>
             <tbody>${stockRowsHTML}</tbody>
           </table>
@@ -3208,11 +3404,61 @@ function _renderAsignacionModal(fresh) {
       </div>
 
       ${reemSummaryHTML}
+
+      <!-- Sección Accesorios Ergonómicos (solo Ingreso Nuevo) -->
+      ${isIngresoNuevo ? `
+      <div style="margin-top:20px;display:${motVal ? '' : 'none'}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:14px">🖥️</span>
+            <label style="font-size:13px;font-weight:700;color:#334155">Accesorios Ergonómicos (ADIC-ERG) ${_asigSelectedAccesorios.length > 0 ? `<span style="font-size:11px;font-weight:500;color:#d97706;margin-left:6px">${_asigSelectedAccesorios.length} seleccionado(s)</span>` : ''}</label>
+          </div>
+          <span style="font-size:11px;color:#94a3b8">${accFiltered.length} accesorio(s)</span>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <div style="display:flex;align-items:center;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;flex:1;height:36px">
+            <span style="padding:0 8px;font-size:13px;color:#94a3b8">🔍</span>
+            <input type="text" id="asigAccSearch" placeholder="Buscar accesorio..." value="${esc(_asigAccSearch)}"
+              oninput="_asigAccSearch=this.value;_asigAccPage=0;_renderAsignacionModal()" style="border:none;flex:1;height:100%;font-size:12px;outline:none;background:transparent">
+          </div>
+          <select onchange="_asigAccTipo=this.value;_asigAccPage=0;_renderAsignacionModal()" style="border:1px solid #e2e8f0;border-radius:8px;padding:0 10px;font-size:11px;color:#334155;height:36px;min-width:130px;cursor:pointer">
+            ${accTipos.map(t => `<option value="${esc(t)}" ${_asigAccTipo===t?'selected':''}>${esc(t)}${t!=='Todos'?' ('+accFiltered.filter(r=>(r.equipo||r.tipo)===t).length+')':''}</option>`).join('')}
+          </select>
+        </div>
+
+        <div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <thead><tr style="background:#fffbeb">
+              <th style="padding:8px 6px;width:36px;text-align:center;border-bottom:1px solid #e2e8f0">
+                <input type="checkbox" onchange="_asigToggleAccPageAll(this.checked)" ${(() => { const accSelSet2 = new Set(_asigSelectedAccesorios.map(x => x.activoId + '||' + x.serie)); const accPgStart2 = _asigAccPage * _ASIG_PAGE_SIZE; const accPgItems2 = accFiltered.slice(accPgStart2, accPgStart2 + _ASIG_PAGE_SIZE); return accPgItems2.length > 0 && accPgItems2.every(r => accSelSet2.has(r.activoId + '||' + r.serie)) ? 'checked' : ''; })()}>
+              </th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Código</th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Equipo</th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Modelo</th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Serie</th>
+            </tr></thead>
+            <tbody>${accStockRowsHTML}</tbody>
+          </table>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;padding:0 4px">
+          <span style="font-size:11px;color:#64748b">${accPgInfo}</span>
+          <div style="display:flex;align-items:center;gap:4px">
+            <button onclick="_asigAccPage=0;_renderAsignacionModal()" ${accIsFirst ? 'disabled' : ''} style="${btnStyle(accIsFirst)}">«</button>
+            <button onclick="_asigAccPage--;_renderAsignacionModal()" ${accIsFirst ? 'disabled' : ''} style="${btnStyle(accIsFirst)}">‹</button>
+            <span style="font-size:11px;font-weight:600;color:#334155;padding:0 8px">Pág ${_asigAccPage + 1} / ${accTotalPages}</span>
+            <button onclick="_asigAccPage++;_renderAsignacionModal()" ${accIsLast ? 'disabled' : ''} style="${btnStyle(accIsLast)}">›</button>
+            <button onclick="_asigAccPage=${accTotalPages - 1};_renderAsignacionModal()" ${accIsLast ? 'disabled' : ''} style="${btnStyle(accIsLast)}">»</button>
+          </div>
+        </div>
+      </div>
+      ` : ''}
     </div>
   `;
   const _asigFooterHTML = `
     <button class="btn btn-secondary" onclick="_asigCancelar()">Cancelar</button>
-    <button class="btn btn-primary" onclick="saveAsignacion()">${isReemplazo ? 'Confirmar Reemplazo' : 'Confirmar Asignación'}</button>
+    <button class="btn btn-primary" onclick="saveAsignacion()" ${isReposicionRobo ? 'style="background:#7c3aed;border-color:#7c3aed"' : isReposicionDano ? 'style="background:#dc2626;border-color:#dc2626"' : ''}>${isReposicionRobo ? 'Confirmar Reposición por Robo' : isReposicionDano ? 'Confirmar Reposición' : isReemplazo ? (isRenovacion ? 'Confirmar Renovación' : 'Confirmar Reemplazo') : isPrestamo ? 'Confirmar Préstamo' : isIngresoNuevo ? 'Confirmar Ingreso Nuevo' : 'Confirmar Asignación'}</button>
   `;
   // Si el modal ya está abierto, solo actualizar contenido sin re-abrir (evita flash)
   if (document.getElementById('modalOverlay').classList.contains('show')) {
@@ -3229,6 +3475,8 @@ function _renderAsignacionModal(fresh) {
   // Focus search if needed
   const searchEl = document.getElementById('asigStockSearch');
   if (searchEl && _asigStockSearch) { searchEl.focus(); searchEl.setSelectionRange(searchEl.value.length, searchEl.value.length); }
+  const accSearchEl = document.getElementById('asigAccSearch');
+  if (accSearchEl && _asigAccSearch) { accSearchEl.focus(); accSearchEl.setSelectionRange(accSearchEl.value.length, accSearchEl.value.length); }
 }
 
 function _asigCancelar() {
@@ -3240,8 +3488,10 @@ function _asigToggleStock(idx) {
   const stock = window._asigStockList || [];
   const item = stock[idx];
   if (!item) return;
-  const isReem = (_asigMotivo || '').toUpperCase().includes('REEMPLAZO');
-  if (isReem) {
+  const _toggleUp = (_asigMotivo || '').toUpperCase();
+  const isReem = _toggleUp.includes('REEMPLAZO') || _toggleUp.includes('RENOVACIÓN') || _toggleUp.includes('RENOVACION');
+  const _isIN = _toggleUp.includes('INGRESO NUEVO');
+  if (isReem || _isIN) {
     // Radio: solo 1 seleccionado
     const already = _asigSelectedActivos.length === 1 && _asigSelectedActivos[0].activoId === item.activoId && _asigSelectedActivos[0].serie === item.serie;
     _asigSelectedActivos = already ? [] : [item];
@@ -3253,6 +3503,41 @@ function _asigToggleStock(idx) {
       _asigSelectedActivos.push(item);
     }
   }
+  _renderAsignacionModal();
+}
+
+function _asigToggleAcc(idx) {
+  const stock = window._asigAccStockList || [];
+  const item = stock[idx];
+  if (!item) return;
+  const existIdx = _asigSelectedAccesorios.findIndex(x => x.activoId === item.activoId && x.serie === item.serie);
+  if (existIdx >= 0) {
+    _asigSelectedAccesorios.splice(existIdx, 1);
+  } else {
+    const itemTipo = (item.equipo || item.tipo || '').toUpperCase();
+    const yaExiste = _asigSelectedAccesorios.find(x => (x.equipo || x.tipo || '').toUpperCase() === itemTipo);
+    if (yaExiste) {
+      showToast('Ya tienes un ' + itemTipo + ' seleccionado. Solo se permite 1 por tipo de accesorio.', 'error');
+      return;
+    }
+    _asigSelectedAccesorios.push(item);
+  }
+  _renderAsignacionModal();
+}
+
+function _asigToggleAccPageAll(checked) {
+  const stock = window._asigAccStockList || [];
+  const pgStart = _asigAccPage * _ASIG_PAGE_SIZE;
+  const pageItems = stock.slice(pgStart, pgStart + _ASIG_PAGE_SIZE);
+  pageItems.forEach(item => {
+    const idx = _asigSelectedAccesorios.findIndex(x => x.activoId === item.activoId && x.serie === item.serie);
+    if (checked && idx < 0) {
+      const itemTipo = (item.equipo || item.tipo || '').toUpperCase();
+      const yaExiste = _asigSelectedAccesorios.find(x => (x.equipo || x.tipo || '').toUpperCase() === itemTipo);
+      if (!yaExiste) _asigSelectedAccesorios.push(item);
+    }
+    if (!checked && idx >= 0) _asigSelectedAccesorios.splice(idx, 1);
+  });
   _renderAsignacionModal();
 }
 
@@ -3299,7 +3584,11 @@ function _buscarColabAsig(val) {
     if (!box) return;
     if (!val || val.length < 2) { box.style.display = 'none'; return; }
 
-    const colabs = DB.get('colaboradores').filter(c => c.estado === 'Activo');
+    let colabs = DB.get('colaboradores').filter(c => c.estado === 'Activo');
+    // Ingreso Nuevo: solo colaboradores sin equipo principal
+    if (window._asigIsIngresoNuevo && window._asigColabsConEquipo) {
+      colabs = colabs.filter(c => !window._asigColabsConEquipo.has(c.id));
+    }
     const s = val.toLowerCase();
     const found = colabs.filter(c =>
       (c.nombre || '').toLowerCase().includes(s) ||
@@ -3307,23 +3596,42 @@ function _buscarColabAsig(val) {
       (c.email || '').toLowerCase().includes(s)
     ).slice(0, 8);
 
-    if (found.length === 0) {
-      box.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--text-muted)">Sin coincidencias</div>';
-    } else {
-      box.innerHTML = found.map(c => `
-        <div style="padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"
-             onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''"
-             onclick="_selectColabAsig(${c.id})">
-          <div>
-            <strong>${esc(c.nombre)}</strong>
-            <span style="color:var(--text-muted);margin-left:6px">DNI: ${esc(c.dni)}</span>
-          </div>
+    _renderColabResults(box, found);
+  }, 150);
+}
+
+function _renderColabResults(box, found) {
+  const isIN = window._asigIsIngresoNuevo;
+  if (found.length === 0) {
+    box.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--text-muted)">' + (isIN ? 'No hay colaboradores sin equipo principal' : 'Sin coincidencias') + '</div>';
+  } else {
+    box.innerHTML = found.map(c => `
+      <div style="padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"
+           onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''"
+           onclick="_selectColabAsig(${c.id})">
+        <div>
+          <strong>${esc(c.nombre)}</strong>
+          <span style="color:var(--text-muted);margin-left:6px">DNI: ${esc(c.dni || '')}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          ${isIN ? '<span style="font-size:9px;padding:2px 6px;background:#fef3c7;color:#92400e;border-radius:4px;font-weight:600">Sin equipo</span>' : ''}
           <span style="color:var(--text-light);font-size:11px">${esc(c.email || '')}</span>
         </div>
-      `).join('');
-    }
-    box.style.display = 'block';
-  }, 150);
+      </div>
+    `).join('');
+  }
+  box.style.display = 'block';
+}
+
+function _toggleColabDropdown() {
+  const box = document.getElementById('asigUserResults');
+  if (!box) return;
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  let colabs = DB.get('colaboradores').filter(c => c.estado === 'Activo');
+  if (window._asigIsIngresoNuevo && window._asigColabsConEquipo) {
+    colabs = colabs.filter(c => !window._asigColabsConEquipo.has(c.id));
+  }
+  _renderColabResults(box, colabs.slice(0, 15));
 }
 
 function _selectColabAsig(id) {
@@ -3342,8 +3650,19 @@ function _onMotivoAsigChange(preserveState) {
 
   if (!preserveState) {
     _asigSelectedActivos = [];
+    _asigSelectedAccesorios = [];
     _asigReemOld = null;
     _asigStockPage = 0;
+    _asigAccPage = 0;
+    _asigAccSearch = '';
+    _asigAccTipo = 'Todos';
+  }
+  // Si cambia a Ingreso Nuevo y el colab ya tiene equipo principal, limpiar selección
+  const _motChgUp = (motivo || '').toUpperCase();
+  if (_motChgUp.includes('INGRESO NUEVO') && _asigSelectedColab) {
+    const _chkAsig = DB.get('asignaciones');
+    const _tieneEquipo = _chkAsig.some(a => a.estado === 'Vigente' && a.colaboradorId === _asigSelectedColab.id && ['LAPTOP','DESKTOP'].includes((a.activoTipo || '').toUpperCase()));
+    if (_tieneEquipo) _asigSelectedColab = null;
   }
   _renderAsignacionModal();
 }
@@ -3748,7 +4067,8 @@ function _ejecutarReemplazo() {
       serie: _reemOldAsig.serieAsignada || '',
       inv: _oldAct.codInventario || '',
       correo: colab.email || '',
-      ticket: ticket || ''
+      ticket: ticket || '',
+      motivo: motivo || 'REEMPLAZO'
     });
   }
   // SALIDA del equipo nuevo asignado
@@ -3763,7 +4083,8 @@ function _ejecutarReemplazo() {
       serie: _reemNewItem.serie || '',
       inv: _newAct.codInventario || '',
       correo: colab.email || '',
-      ticket: ticket || ''
+      ticket: ticket || '',
+      motivo: motivo || 'REEMPLAZO'
     });
   }
 
@@ -4015,25 +4336,34 @@ function saveAsignacion() {
   const ticket = ((document.getElementById('fAsigTicket') || {}).value || _asigTicket).trim();
   const motivo = (document.getElementById('fAsigMotivo') || {}).value || _asigMotivo;
   const obs = ((document.getElementById('fAsigObs') || {}).value || _asigObs || '').trim();
-  const isReemplazo = (motivo || '').toUpperCase().includes('REEMPLAZO');
+  const _motSaveUp = (motivo || '').toUpperCase();
+  const isReposicionDano = _motSaveUp.includes('REPOSICIÓN DAÑO FÍSICO') || _motSaveUp.includes('REPOSICION DANO FISICO');
+  const isReposicionRobo = _motSaveUp.includes('REPOSICIÓN ROBO') || _motSaveUp.includes('REPOSICION ROBO');
+  const isReemplazo = _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || isReposicionDano || isReposicionRobo;
+  const isRenovacion = _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION');
+  const isPrestamo = _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO');
+  const isIngresoNuevo = _motSaveUp.includes('INGRESO NUEVO');
+  const fechaFinPrestamo = isPrestamo ? ((document.getElementById('fAsigFechaPrestamo') || {}).value || _asigFechaPrestamo || '') : '';
 
   if (!ticket) { showToast('Ingrese el número de ticket', 'error'); return; }
   if (!_asigSelectedColab) { showToast('Seleccione un colaborador', 'error'); return; }
   if (!motivo) { showToast('Seleccione el motivo de asignación', 'error'); return; }
-  if (isReemplazo && !_asigReemOld) { showToast('Seleccione el equipo a reemplazar', 'error'); return; }
-  if (_asigSelectedActivos.length === 0) { showToast('Seleccione al menos un activo' + (isReemplazo ? ' nuevo' : ''), 'error'); return; }
+  if (isPrestamo && !fechaFinPrestamo) { showToast('Ingrese la fecha fin de préstamo', 'error'); return; }
+  if (isPrestamo && fechaFinPrestamo < today()) { showToast('La fecha fin de préstamo debe ser mayor o igual a hoy', 'error'); return; }
+  if (isReemplazo && !_asigReemOld) { showToast(isReposicionRobo ? 'Seleccione el equipo robado' : isReposicionDano ? 'Seleccione el equipo dañado a retirar' : 'Seleccione el equipo a reemplazar', 'error'); return; }
+  if (_asigSelectedActivos.length === 0) { showToast('Seleccione al menos un equipo principal' + (isReemplazo ? ' nuevo' : ''), 'error'); return; }
 
   const activos = DB.get('activos');
   const asig = DB.get('asignaciones');
   const colab = _asigSelectedColab;
 
-  // ── REEMPLAZO: marcar equipo viejo como pendiente de retorno ──
+  // ── REEMPLAZO / RENOVACIÓN: marcar equipo viejo como pendiente de retorno ──
   if (isReemplazo && _asigReemOld) {
     const oldRec = asig.find(a => a.id === _asigReemOld.id);
     if (oldRec) {
       oldRec.pendienteRetorno = true;
       oldRec.fechaReemplazo = fecha;
-      oldRec.motivoReemplazo = 'REEMPLAZO';
+      oldRec.motivoReemplazo = isReposicionRobo ? 'REPOSICIÓN ROBO' : isReposicionDano ? 'REPOSICIÓN DAÑO FÍSICO' : isRenovacion ? 'RENOVACIÓN' : 'REEMPLAZO';
       oldRec.ticketReemplazo = ticket.toUpperCase();
     }
   }
@@ -4060,7 +4390,8 @@ function saveAsignacion() {
       motivo: motivo,
       ticket: ticket.toUpperCase(),
       observaciones: obs,
-      estado: 'Vigente'
+      estado: 'Vigente',
+      fechaFinPrestamo: isPrestamo ? fechaFinPrestamo : ''
     }));
   });
 
@@ -4077,13 +4408,75 @@ function saveAsignacion() {
     activo.responsable = colab.nombre;
   });
 
+  // ── INGRESO NUEVO: Validar máximo 1 accesorio por tipo ──
+  if (isIngresoNuevo && _asigSelectedAccesorios.length > 0) {
+    const _accTipoCount = {};
+    let _accDup = null;
+    _asigSelectedAccesorios.forEach(sel => {
+      const t = (sel.equipo || sel.tipo || '').toUpperCase();
+      _accTipoCount[t] = (_accTipoCount[t] || 0) + 1;
+      if (_accTipoCount[t] > 1 && !_accDup) _accDup = t;
+    });
+    if (_accDup) {
+      showToast('Solo se permite 1 accesorio por tipo. Tienes duplicado: ' + _accDup, 'error');
+      return;
+    }
+  }
+
+  // ── INGRESO NUEVO: Asignar accesorios ergonómicos (ADIC-ERG) ──
+  if (isIngresoNuevo && _asigSelectedAccesorios.length > 0) {
+    _asigSelectedAccesorios.forEach(sel => {
+      const activo = activos.find(a => a.id === sel.activoId);
+      if (!activo) return;
+
+      asig.push(upperFields({
+        id: nextId(asig),
+        activoId: activo.id,
+        activoCodigo: activo.codigo,
+        activoTipo: activo.tipo,
+        activoMarca: activo.marca,
+        activoModelo: activo.modelo,
+        serieAsignada: sel.serie || '',
+        colaboradorId: colab.id,
+        colaboradorNombre: colab.nombre,
+        correoColab: colab.email || '',
+        area: colab.area,
+        fechaAsignacion: fecha || today(),
+        tipoAsignacion: motivo,
+        motivo: motivo,
+        ticket: ticket.toUpperCase(),
+        observaciones: obs,
+        estado: 'Vigente',
+        fechaFinPrestamo: ''
+      }));
+    });
+
+    // Actualizar estado de activos accesorios
+    const accActivoIds = [...new Set(_asigSelectedAccesorios.map(s => s.activoId))];
+    accActivoIds.forEach(aid => {
+      const activo = activos.find(a => a.id === aid);
+      if (!activo) return;
+      const totalSeries = (activo.series || []).length;
+      const seriesAsignadas = asig.filter(a => a.activoId === aid && a.estado === 'Vigente').length;
+      if (totalSeries === 0 || seriesAsignadas >= totalSeries) {
+        activo.estado = 'Asignado';
+      }
+      activo.responsable = colab.nombre;
+    });
+  }
+
   DB.set('activos', activos);
   DB.set('asignaciones', asig);
 
+  const _totalEquipos = _asigSelectedActivos.length + (isIngresoNuevo ? _asigSelectedAccesorios.length : 0);
+
   if (isReemplazo) {
-    addMovimiento('Reemplazo', `Reemplazo de equipo para ${colab.nombre} [${ticket}]`);
+    const _movTipo = isReposicionRobo ? 'Reposición Robo' : isReposicionDano ? 'Reposición Daño Físico' : isRenovacion ? 'Renovación' : 'Reemplazo';
+    addMovimiento(_movTipo, `${_movTipo} de equipo para ${colab.nombre} [${ticket}]`);
+  } else if (isIngresoNuevo) {
+    addMovimiento('Ingreso Nuevo', `${_totalEquipos} activo(s) asignados (kit inicial) a ${colab.nombre} [${ticket}]`);
   } else {
-    addMovimiento('Asignación', `${_asigSelectedActivos.length} activo(s) asignados a ${colab.nombre} [${ticket}]`);
+    addMovimiento(isPrestamo ? 'Préstamo' : 'Asignación', isPrestamo ? `${_asigSelectedActivos.length} activo(s) en préstamo a ${colab.nombre} hasta ${formatDate(fechaFinPrestamo)} [${ticket}]` : `${_asigSelectedActivos.length} activo(s) asignados a ${colab.nombre} [${ticket}]`);
   }
 
   // Auto-registrar en bitácora estructurada (SALIDA por cada activo asignado)
@@ -4099,15 +4492,41 @@ function saveAsignacion() {
       serie: sel.serie || '',
       inv: _act.codInventario || '',
       correo: colab.email || '',
-      ticket: ticket || ''
+      ticket: ticket || '',
+      motivo: _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO') || isReposicionDano || isReposicionRobo ? motivo : ''
     });
   });
 
+  // Bitácora SALIDA para accesorios (Ingreso Nuevo)
+  if (isIngresoNuevo && _asigSelectedAccesorios.length > 0) {
+    _asigSelectedAccesorios.forEach(sel => {
+      const _act = activos.find(a => a.id === sel.activoId);
+      if (!_act) return;
+      _autoBitacora({
+        movimiento: 'SALIDA',
+        almacen: (_act.ubicacion || 'Almacen TI'),
+        tipoEquipo: _act.tipo || '',
+        equipo: _act.equipo || _act.tipo || '',
+        modelo: _act.modelo || '',
+        serie: sel.serie || '',
+        inv: _act.codInventario || '',
+        correo: colab.email || '',
+        ticket: ticket || '',
+        motivo: ''
+      });
+    });
+  }
+
   closeModal();
-  showToast(isReemplazo ? 'Reemplazo realizado correctamente' : `${_asigSelectedActivos.length} activo(s) asignados correctamente`);
+  showToast(isIngresoNuevo ? `Kit inicial (${_totalEquipos} activo(s)) asignado correctamente` : isReposicionRobo ? 'Reposición por robo registrada correctamente' : isReposicionDano ? 'Reposición por daño físico realizada correctamente' : isReemplazo ? (isRenovacion ? 'Renovación realizada correctamente' : 'Reemplazo realizado correctamente') : isPrestamo ? 'Préstamo registrado correctamente' : `${_asigSelectedActivos.length} activo(s) asignados correctamente`);
   _asigSelectedColab = null;
   _asigSelectedActivos = [];
+  _asigSelectedAccesorios = [];
   _asigReemOld = null;
+  _asigFechaPrestamo = '';
+  _asigAccSearch = '';
+  _asigAccTipo = 'Todos';
+  _asigAccPage = 0;
   renderAsignacion(document.getElementById('contentArea'));
 }
 
@@ -4132,7 +4551,9 @@ function previewActaEntrega(asigId) {
   const activoPrincipal = activos.find(a => a.id === grupo[0].activoId) || {};
 
   const isReposicion = (record.tipoAsignacion || '').toLowerCase().includes('reemplazo') ||
-                       (record.tipoAsignacion || '').toLowerCase().includes('renovación');
+                       (record.tipoAsignacion || '').toLowerCase().includes('renovación') ||
+                       (record.tipoAsignacion || '').toLowerCase().includes('reposición daño físico') ||
+                       (record.tipoAsignacion || '').toLowerCase().includes('reposición robo');
 
   // Build equipment rows (up to 4)
   let equipRows = '';
@@ -4162,7 +4583,7 @@ function previewActaEntrega(asigId) {
     const _devueltos = _allAsig.filter(a =>
       a.colaboradorId === record.colaboradorId &&
       (a.ticketReemplazo === record.ticket || a.ticketCese === record.ticket) &&
-      (a.pendienteRetorno || (a.estado === 'Devuelto' && a.motivoCese === 'REEMPLAZO'))
+      (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
     );
     if (_devueltos.length > 0) {
       let devRows = '';
@@ -4211,7 +4632,7 @@ function _buildActaPrintHTML(record, colab, grupo, activos, activoPrincipal, equ
     const _devueltos = _allAsig.filter(a =>
       a.colaboradorId === record.colaboradorId &&
       (a.ticketReemplazo === record.ticket || a.ticketCese === record.ticket) &&
-      (a.pendienteRetorno || (a.estado === 'Devuelto' && a.motivoCese === 'REEMPLAZO'))
+      (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
     );
     if (_devueltos.length > 0) {
       let devRows = '';
@@ -4345,7 +4766,15 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
     </tr>
   `).join('');
 
-  openModal('Detalle de Asignación', `
+  const _detTipoUp = (first.tipoAsignacion || first.motivo || '').toUpperCase();
+  const _esReposDano = _detTipoUp.includes('REPOSICIÓN DAÑO FÍSICO') || _detTipoUp.includes('REPOSICION DANO FISICO');
+  const _esReposRobo = _detTipoUp.includes('REPOSICIÓN ROBO') || _detTipoUp.includes('REPOSICION ROBO');
+  const _esRenov = _detTipoUp.includes('RENOVACIÓN') || _detTipoUp.includes('RENOVACION');
+  const _esReem = _detTipoUp.includes('REEMPLAZO') || _esReposDano || _esReposRobo;
+  const _esPrest = _detTipoUp.includes('PRÉSTAMO') || _detTipoUp.includes('PRESTAMO');
+  const _detTitle = _esReposRobo ? 'Detalle de Reposición por Robo' : _esReposDano ? 'Detalle de Reposición por Daño Físico' : _esRenov ? 'Detalle de Renovación' : _esReem ? 'Detalle de Reemplazo' : _esPrest ? 'Detalle de Préstamo' : 'Detalle de Asignación';
+
+  openModal(_detTitle, `
     <div style="display:flex;flex-direction:column;gap:16px">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;background:var(--bg-secondary);padding:14px;border-radius:8px">
         <div>
@@ -4372,15 +4801,22 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
           <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px">Área</div>
           <div style="font-size:13px">${esc(colab.area || first.area || '—')}</div>
         </div>
+        ${_esPrest && first.fechaFinPrestamo ? `<div>
+          <div style="font-size:11px;color:#b45309;margin-bottom:2px;font-weight:600">⏱️ Fecha fin de préstamo</div>
+          <div style="font-size:13px;font-weight:700;color:#b45309">${formatDate(first.fechaFinPrestamo)}</div>
+        </div>` : ''}
       </div>
 
       ${(() => {
-        const esReemplazo = (first.tipoAsignacion || first.motivo || '').toUpperCase().includes('REEMPLAZO');
-        // Buscar equipo reportado por este reemplazo (pendienteRetorno o ya devuelto)
+        const _detMotUp = (first.tipoAsignacion || first.motivo || '').toUpperCase();
+        const _esReposDanoD = _detMotUp.includes('REPOSICIÓN DAÑO FÍSICO') || _detMotUp.includes('REPOSICION DANO FISICO');
+        const _esReposRoboD = _detMotUp.includes('REPOSICIÓN ROBO') || _detMotUp.includes('REPOSICION ROBO');
+        const esReemplazo = _detMotUp.includes('REEMPLAZO') || _detMotUp.includes('RENOVACIÓN') || _detMotUp.includes('RENOVACION') || _esReposDanoD || _esReposRoboD;
+        // Buscar equipo reportado por este reemplazo/reposición (pendienteRetorno o ya devuelto)
         const devueltos = esReemplazo ? asignaciones.filter(a =>
           a.colaboradorId === colabId &&
           (a.ticketReemplazo === first.ticket || a.ticketCese === first.ticket) &&
-          (a.pendienteRetorno || (a.estado === 'Devuelto' && a.motivoCese === 'REEMPLAZO'))
+          (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
         ) : [];
 
         if (esReemplazo && devueltos.length > 0) {
@@ -4393,7 +4829,7 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
           };
           return `
           <div>
-            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#dc2626">Equipo a Devolver (Equipo Anterior)</label>
+            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#dc2626">${_esReposRoboD ? 'Equipo Robado' : _esReposDanoD ? 'Equipo Dañado (Retiro por Daño Físico)' : 'Equipo a Devolver (Equipo Anterior)'}</label>
             <div class="table-scroll">
               <table>
                 <thead><tr style="background:#fef2f2">
@@ -4417,7 +4853,7 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
           </div>
 
           <div>
-            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#16a34a">Equipo Entregado (Equipo Nuevo)</label>
+            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#16a34a">${_esReposDanoD ? 'Equipo de Reposición (Equipo Nuevo)' : 'Equipo Entregado (Equipo Nuevo)'}</label>
             <div class="table-scroll">
               <table>
                 <thead><tr style="background:#f0fdf4">
@@ -4467,16 +4903,16 @@ function deleteAsignacionGrupo(ticket, colabId, fecha) {
     a.ticket === ticket && a.colaboradorId === colabId && a.fechaAsignacion === fecha
   );
   if (grupo.length === 0) return;
-  if (!confirm('¿Eliminar esta asignación (' + grupo.length + ' equipo(s))?')) return;
+  if (!confirm('¿Eliminar esta asignación (' + grupo.length + ' equipo(s))?\nSe revertirán los cambios en Activos, Bitácora y Reemplazos asociados.')) return;
 
   const ids = grupo.map(a => a.id);
 
+  // ── 1. Revertir estado de Activos ──
   const activos = DB.get('activos');
   const asigFinal = asignaciones.filter(a => !ids.includes(a.id));
   grupo.forEach(a => {
     const activo = activos.find(x => x.id === a.activoId);
     if (activo && a.estado === 'Vigente') {
-      // Solo volver a Disponible si no quedan más series vigentes de este activo
       const otrasVigentes = asigFinal.filter(o => o.activoId === a.activoId && o.estado === 'Vigente').length;
       if (otrasVigentes === 0) {
         activo.estado = 'Disponible';
@@ -4486,9 +4922,50 @@ function deleteAsignacionGrupo(ticket, colabId, fecha) {
   });
   DB.set('activos', activos);
 
+  // ── 2. Marcar entradas de Bitácora (SALIDA) como CANCELADO/ANULADO ──
+  const bitacora = DB.get('bitacoraMovimientos') || [];
+  const seriesGrupo = grupo.map(a => (a.serieAsignada || '').toUpperCase()).filter(Boolean);
+  const ticketUpper = ticket.toUpperCase();
+  bitacora.forEach(b => {
+    if ((b.movimiento || '').toUpperCase() !== 'SALIDA') return;
+    if ((b.ticket || '').toUpperCase() !== ticketUpper) return;
+    let coincide = false;
+    if (seriesGrupo.length > 0 && (b.serie || '').toUpperCase() && seriesGrupo.includes((b.serie || '').toUpperCase())) {
+      coincide = true;
+    }
+    if (!coincide && seriesGrupo.length === 0) {
+      const correoColab = (grupo[0].correoColab || '').toLowerCase();
+      if (correoColab && (b.correo || '').toLowerCase() === correoColab) coincide = true;
+    }
+    if (coincide) {
+      b.movimiento = 'CANCELADO';
+      b.estadoAsignacion = 'ANULADO';
+      b.actaCorrelativo = '';
+    }
+  });
+  DB.set('bitacoraMovimientos', bitacora);
+
+  // ── 3. Revertir flags de reemplazo/renovación en asignación anterior (si aplica) ──
+  grupo.forEach(a => {
+    const _delTipo = (a.tipoAsignacion || '').toUpperCase();
+    const _delMot = (a.motivo || '').toUpperCase();
+    const _esReemORenov = _delTipo === 'REEMPLAZO' || _delTipo === 'RENOVACIÓN' || _delTipo === 'REPOSICIÓN DAÑO FÍSICO' || _delTipo === 'REPOSICIÓN ROBO' || _delMot === 'REEMPLAZO' || _delMot === 'RENOVACIÓN' || _delMot === 'REPOSICIÓN DAÑO FÍSICO' || _delMot === 'REPOSICIÓN ROBO';
+    if (_esReemORenov) {
+      // Buscar asignaciones anteriores marcadas con pendienteRetorno por este ticket
+      asigFinal.forEach(prev => {
+        if (prev.pendienteRetorno && (prev.ticketReemplazo || '').toUpperCase() === ticketUpper) {
+          prev.pendienteRetorno = false;
+          delete prev.fechaReemplazo;
+          delete prev.motivoReemplazo;
+          delete prev.ticketReemplazo;
+        }
+      });
+    }
+  });
+
   DB.set('asignaciones', asigFinal);
   addMovimiento('Eliminación Asignación', `${grupo.length} equipo(s) del ticket ${ticket}`);
-  showToast('Asignación eliminada');
+  showToast('Asignación eliminada (cambios revertidos)');
   renderAsignacion(document.getElementById('contentArea'));
 }
 
@@ -4579,7 +5056,8 @@ function _ejecutarDevSingle(asigId) {
       modelo: activo.modelo || a.activoModelo || '',
       serie: a.serieAsignada || '',
       inv: activo.codInventario || '',
-      correo: a.correoColab || ''
+      correo: a.correoColab || '',
+      motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((a.tipoAsignacion || a.motivo || '').toUpperCase())) ? (a.tipoAsignacion || a.motivo) : ''
     });
   }
 
@@ -4837,7 +5315,7 @@ function confirmarDevolucion(colabId) {
     const a = asignaciones.find(x => x.id === aid);
     if (!a) return null;
     const act = activos.find(x => x.id === a.activoId);
-    return { asigId: aid, activoId: a.activoId, codigo: act ? act.codigo : '—', tipo: act ? act.tipo : '', marca: act ? act.marca : '', modelo: act ? act.modelo : '', serie: a.serieAsignada || '' };
+    return { asigId: aid, activoId: a.activoId, codigo: act ? act.codigo : '—', tipo: act ? act.tipo : '', marca: act ? act.marca : '', modelo: act ? act.modelo : '', serie: a.serieAsignada || '', motivo: a.tipoAsignacion || a.motivo || '' };
   }).filter(Boolean);
 
   if (items.length === 0) return;
@@ -4996,7 +5474,8 @@ function _ejecutarDevolucion(colabId) {
         modelo: _devActivo.modelo || '',
         serie: item.serie || '',
         inv: _devActivo.codInventario || '',
-        correo: c ? (c.email || '') : ''
+        correo: c ? (c.email || '') : '',
+        motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((item.motivo || '').toUpperCase())) ? item.motivo : ''
       });
     }
   });
@@ -5939,11 +6418,12 @@ function renderInventario(el) {
     </div>
 
     <div class="table-toolbar">
-      <div class="search-box">
+      <div class="search-box" style="position:relative">
         <span class="search-icon">🔍</span>
         <input type="text" id="invSearchInput" placeholder="Buscar por sede, tipo, marca, serie, colaborador..."
                value="${esc(invSearch)}"
                oninput="_onInvSearch(this.value)">
+        <span id="invSearchClear" onclick="_clearInvSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${invSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
       </div>
     </div>
 
@@ -5954,9 +6434,21 @@ function renderInventario(el) {
 
 function _onInvSearch(val) {
   invSearch = val;
+  const clearBtn = document.getElementById('invSearchClear');
+  if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
   resetPage('inventario');
   clearTimeout(_invSearchTimer);
   _invSearchTimer = setTimeout(_renderInvTable, 120);
+}
+
+function _clearInvSearch() {
+  invSearch = '';
+  const inp = document.getElementById('invSearchInput');
+  if (inp) inp.value = '';
+  const clearBtn = document.getElementById('invSearchClear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  resetPage('inventario');
+  _renderInvTable();
 }
 
 function _renderInvTable() {
@@ -6132,7 +6624,8 @@ function _autoBitacora(opts) {
     serie: (opts.serie || '').toUpperCase(),
     inv: (opts.inv || '').toUpperCase(),
     correo: opts.correo || '',
-    gestor: opts.gestor || (currentUser ? currentUser.nombre : 'Sistema'),
+    motivo: (opts.motivo || '').toUpperCase(),
+    gestor: opts.gestor || (currentUser ? (currentUser.usuario || currentUser.nombre) : 'Sistema'),
     ticket: ticketVal.toUpperCase(),
     estadoAsignacion: 'PENDIENTE',
     actaCorrelativo: '',
@@ -6179,11 +6672,13 @@ function renderMovimientos(el) {
           <button class="filter-chip ${_bitFilterMov === 'Todos' ? 'active' : ''}" onclick="_setBitFilterMov('Todos')">Todos</button>
           <button class="filter-chip ${_bitFilterMov === 'INGRESO' ? 'active' : ''}" onclick="_setBitFilterMov('INGRESO')">Ingresos</button>
           <button class="filter-chip ${_bitFilterMov === 'SALIDA' ? 'active' : ''}" onclick="_setBitFilterMov('SALIDA')">Salidas</button>
+          <button class="filter-chip ${_bitFilterMov === 'CANCELADO' ? 'active' : ''}" onclick="_setBitFilterMov('CANCELADO')" style="color:#dc2626">Cancelados</button>
         </div>
         <div class="filter-chips" style="margin-left:8px">
           <button class="filter-chip ${_bitFilterEstado === 'Todos' ? 'active' : ''}" onclick="_setBitFilterEstado('Todos')">Todos</button>
           <button class="filter-chip ${_bitFilterEstado === 'PENDIENTE' ? 'active' : ''}" onclick="_setBitFilterEstado('PENDIENTE')" style="color:#d97706">Pendientes</button>
           <button class="filter-chip ${_bitFilterEstado === 'ATENDIDO' ? 'active' : ''}" onclick="_setBitFilterEstado('ATENDIDO')" style="color:#059669">Atendidos</button>
+          <button class="filter-chip ${_bitFilterEstado === 'ANULADO' ? 'active' : ''}" onclick="_setBitFilterEstado('ANULADO')" style="color:#dc2626">Anulados</button>
         </div>
       </div>
     </div>
@@ -6221,6 +6716,7 @@ function _renderBitTable() {
     if (_bitFilterMov !== 'Todos' && m.movimiento !== _bitFilterMov) return false;
     if (_bitFilterEstado === 'PENDIENTE' && m.estadoAsignacion !== 'PENDIENTE') return false;
     if (_bitFilterEstado === 'ATENDIDO' && m.estadoAsignacion !== 'ATENDIDO') return false;
+    if (_bitFilterEstado === 'ANULADO' && m.estadoAsignacion !== 'ANULADO') return false;
     if (_bitSearch) {
       const s = _bitSearch.toLowerCase();
       return (m.almacen || '').toLowerCase().includes(s) ||
@@ -6232,7 +6728,8 @@ function _renderBitTable() {
              (m.gestor || '').toLowerCase().includes(s) ||
              (m.ticket || '').toLowerCase().includes(s) ||
              (m.actaCorrelativo || '').toLowerCase().includes(s) ||
-             (m.movimiento || '').toLowerCase().includes(s);
+             (m.movimiento || '').toLowerCase().includes(s) ||
+             (m.motivo || '').toLowerCase().includes(s);
     }
     return true;
   });
@@ -6251,6 +6748,7 @@ function _renderBitTable() {
               <th style="min-width:130px">Modelo</th>
               <th style="min-width:130px">Serie</th>
               <th style="min-width:100px">INV</th>
+              <th style="min-width:120px">Motivo</th>
               <th style="min-width:120px">Estado Asign.</th>
               <th style="min-width:150px">Acta Asignacion</th>
               <th style="min-width:120px">Ticket</th>
@@ -6261,19 +6759,27 @@ function _renderBitTable() {
           </thead>
           <tbody>
             ${filtered.length === 0
-              ? '<tr><td colspan="14"><div class="empty-state"><div class="empty-icon">📋</div><h3>Sin movimientos registrados</h3><p>Registra un nuevo movimiento para comenzar</p></div></td></tr>'
+              ? '<tr><td colspan="15"><div class="empty-state"><div class="empty-icon">📋</div><h3>Sin movimientos registrados</h3><p>Registra un nuevo movimiento para comenzar</p></div></td></tr>'
               : pagSlice(filtered, 'bitacora').map(m => {
-                  const estadoBadge = m.estadoAsignacion === 'ATENDIDO'
+                  const isCancelado = (m.movimiento || '').toUpperCase() === 'CANCELADO';
+
+                  const estadoBadge = m.estadoAsignacion === 'ANULADO'
+                    ? `<span class="badge bit-badge-estado" style="background:transparent;color:#dc2626;border:none;font-weight:700">ANULADO</span>`
+                    : m.estadoAsignacion === 'ATENDIDO'
                     ? `<span class="badge badge-success bit-badge-estado">ATENDIDO</span>`
                     : `<span class="badge badge-warning bit-badge-estado">PENDIENTE</span>`;
 
-                  const actaHTML = m.actaCorrelativo
+                  const actaHTML = isCancelado
+                    ? `<button class="btn bit-btn-cargar" disabled style="opacity:0.5;cursor:not-allowed">📎 Cargar acta</button>`
+                    : m.actaCorrelativo
                     ? `<span class="bit-acta-link" onclick="verActaAdjunta(${m.id})" title="Ver acta adjunta">${esc(m.actaCorrelativo)}</span>`
                     : `<button class="btn bit-btn-cargar" onclick="cargarActaBitacora(${m.id})">📎 Cargar acta</button>`;
 
-                  const movBadge = m.movimiento === 'INGRESO'
-                    ? `<span class="badge badge-success">${esc(m.movimiento)}</span>`
-                    : `<span class="badge badge-info">${esc(m.movimiento)}</span>`;
+                  const movBadge = isCancelado
+                    ? `<span class="badge" style="background:transparent;color:#dc2626;border:none;font-weight:700"><span style="font-size:10px">✕</span> ${esc(m.movimiento)}</span>`
+                    : m.movimiento === 'INGRESO'
+                    ? `<span class="badge badge-success"><span style="font-size:10px">←</span> ${esc(m.movimiento)}</span>`
+                    : `<span class="badge badge-info"><span style="font-size:10px">→</span> ${esc(m.movimiento)}</span>`;
 
                   return `
                   <tr>
@@ -6285,6 +6791,7 @@ function _renderBitTable() {
                     <td style="font-size:12px">${esc(m.modelo || '-')}</td>
                     <td style="font-size:12px;font-family:monospace">${esc(m.serie || '-')}</td>
                     <td style="font-size:12px">${esc(m.inv || '-')}</td>
+                    <td style="font-size:11px">${esc(m.motivo || '-')}</td>
                     <td>${estadoBadge}</td>
                     <td>${actaHTML}</td>
                     <td style="font-size:12px;font-family:monospace">${esc(m.ticket || '-')}</td>
@@ -6314,7 +6821,7 @@ function openBitacoraModal(editId) {
   const m = editId ? movs.find(x => x.id === editId) : null;
 
   const gestores = DB.get('gestores').filter(g => g.estado === 'Activo');
-  const gestorOpts = gestores.map(g => `<option value="${esc(g.nombre)}" ${m && m.gestor === g.nombre ? 'selected' : ''}>${esc(g.nombre)}</option>`).join('');
+  const gestorOpts = gestores.map(g => `<option value="${esc(g.usuario || g.nombre)}" ${m && m.gestor === (g.usuario || g.nombre) ? 'selected' : ''}>${esc(g.usuario || g.nombre)}</option>`).join('');
 
   const body = `
     <div class="form-grid">
@@ -6552,26 +7059,66 @@ function _confirmActaUpload(movId) {
     data: _bitPendingFile.data
   });
 
-  // Actualizar movimiento
-  movs[idx].actaCorrelativo = correlativo;
-  movs[idx].estadoAsignacion = 'ATENDIDO';
-  DB.set('bitacoraMovimientos', movs);
+  // Buscar todos los movimientos relacionados (misma atención: mismo ticket + correo + fecha)
+  const ref = movs[idx];
+  const _refTicket = (ref.ticket || '').toUpperCase().trim();
+  const _refCorreo = (ref.correo || '').toUpperCase().trim();
+  const _refFecha = (ref.fechaRegistro || '').split('T')[0];
+  const _relatedIds = [];
 
-  // Sincronizar correlativo con asignación (para que aparezca en CMDB)
-  const serieSync = (movs[idx].serie || '').toUpperCase().trim();
-  if (serieSync) {
-    const asigs = DB.get('asignaciones');
-    const asigIdx = asigs.findIndex(a => a.estado === 'Vigente' && (a.serieAsignada || '').toUpperCase().trim() === serieSync);
-    if (asigIdx >= 0) {
-      asigs[asigIdx].actaEntrega = correlativo;
-      DB.set('asignaciones', asigs);
+  movs.forEach((m, i) => {
+    const mTicket = (m.ticket || '').toUpperCase().trim();
+    const mCorreo = (m.correo || '').toUpperCase().trim();
+    const mFecha = (m.fechaRegistro || '').split('T')[0];
+    if (_refTicket && mTicket === _refTicket && mCorreo === _refCorreo && mFecha === _refFecha) {
+      m.actaCorrelativo = correlativo;
+      m.estadoAsignacion = 'ATENDIDO';
+      _relatedIds.push(m.id);
+      // Guardar el mismo archivo para cada movimiento relacionado
+      if (m.id !== movId) {
+        _bitArchivos.save(m.id, {
+          correlativo,
+          name: _bitPendingFile.name,
+          type: _bitPendingFile.type,
+          data: _bitPendingFile.data
+        });
+      }
     }
+  });
+
+  // Si no se encontraron relacionados por ticket (fallback), actualizar solo el actual
+  if (_relatedIds.length === 0) {
+    movs[idx].actaCorrelativo = correlativo;
+    movs[idx].estadoAsignacion = 'ATENDIDO';
+    _relatedIds.push(movId);
   }
 
+  DB.set('bitacoraMovimientos', movs);
+
+  // Sincronizar correlativo con asignaciones (para que aparezca en CMDB)
+  const asigs = DB.get('asignaciones');
+  let _asigChanged = false;
+  _relatedIds.forEach(rid => {
+    const rm = movs.find(m => m.id === rid);
+    if (!rm) return;
+    const serieSync = (rm.serie || '').toUpperCase().trim();
+    if (serieSync) {
+      const asigIdx = asigs.findIndex(a => a.estado === 'Vigente' && (a.serieAsignada || '').toUpperCase().trim() === serieSync);
+      if (asigIdx >= 0) {
+        asigs[asigIdx].actaEntrega = correlativo;
+        _asigChanged = true;
+      }
+    }
+  });
+  if (_asigChanged) DB.set('asignaciones', asigs);
+
   _bitPendingFile = null;
-  addMovimiento('Acta Cargada', `Acta ${correlativo} adjuntada al movimiento #${movId}`);
+  const _countRel = _relatedIds.length;
+  addMovimiento('Acta Cargada', `Acta ${correlativo} adjuntada a ${_countRel} movimiento(s) de la atención [${_refTicket}]`);
   closeModal();
-  showToast('Acta adjuntada correctamente — ' + correlativo);
+  showToast(_countRel > 1
+    ? `Acta adjuntada a ${_countRel} registros de la misma atención — ${correlativo}`
+    : 'Acta adjuntada correctamente — ' + correlativo);
   renderPage();
 }
 
@@ -6631,9 +7178,9 @@ function renderPendientesRetorno(el) {
   const porCese = asignaciones.filter(a => a.estado === 'Vigente' && cesadosIds.has(a.colaboradorId))
     .map(a => ({ ...a, _motivo: 'CESE DE COLABORADOR' }));
 
-  // 2. Equipos con flag pendienteRetorno (por reemplazo)
+  // 2. Equipos con flag pendienteRetorno (por reemplazo o renovación)
   const porReemplazo = asignaciones.filter(a => a.estado === 'Vigente' && a.pendienteRetorno)
-    .map(a => ({ ...a, _motivo: 'REEMPLAZO' }));
+    .map(a => ({ ...a, _motivo: a.motivoReemplazo || 'REEMPLAZO' }));
 
   const pendientes = [...porCese, ...porReemplazo];
 
@@ -6667,11 +7214,11 @@ function renderPendientesRetorno(el) {
                     <td><strong>${esc(a.activoTipo || '')}</strong> — ${esc(a.activoCodigo || '')}</td>
                     <td>${esc(a.activoMarca || '')} ${esc(a.activoModelo || '')}</td>
                     <td style="font-family:monospace;font-size:11px">${esc(a.serieAsignada || '—')}</td>
-                    <td><span class="badge ${a._motivo === 'REEMPLAZO' ? 'badge-info' : 'badge-warning'}" style="font-size:10px">${esc(a._motivo)}</span></td>
+                    <td><span class="badge ${a._motivo === 'REPOSICIÓN ROBO' ? 'badge-danger' : a._motivo === 'REPOSICIÓN DAÑO FÍSICO' ? 'badge-warning' : a._motivo === 'REEMPLAZO' || a._motivo === 'RENOVACIÓN' ? 'badge-info' : 'badge-warning'}" style="font-size:10px">${esc(a._motivo)}</span></td>
                     <td>${esc(a.colaboradorNombre || '')}</td>
-                    <td>${formatDate(a._motivo === 'REEMPLAZO' ? a.fechaReemplazo || a.fechaAsignacion : a.fechaAsignacion)}</td>
+                    <td>${formatDate(['REEMPLAZO','RENOVACIÓN','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes(a._motivo) ? a.fechaReemplazo || a.fechaAsignacion : a.fechaAsignacion)}</td>
                     <td><span class="badge badge-warning" style="font-size:10px"><span class="badge-dot"></span>Pendiente</span></td>
-                    <td><button class="btn btn-sm btn-success" onclick="confirmarRetorno(${a.id},'${a._motivo}')">Confirmar Retorno</button></td>
+                    <td><button class="btn btn-sm ${a._motivo === 'REPOSICIÓN ROBO' ? 'btn-danger' : 'btn-success'}" onclick="confirmarRetorno(${a.id},'${esc(a._motivo)}')">${a._motivo === 'REPOSICIÓN ROBO' ? 'Registrar Baja por Robo' : 'Confirmar Retorno'}</button></td>
                   </tr>`;
                 }).join('')
             }
@@ -6689,6 +7236,7 @@ let _retornoMotivo = '';
 function confirmarRetorno(asigId, motivo) {
   _retornoAsigId = asigId;
   _retornoMotivo = motivo;
+  _retornoDenunciaFile = null;
 
   const asignaciones = DB.get('asignaciones');
   const activos = DB.get('activos');
@@ -6696,14 +7244,21 @@ function confirmarRetorno(asigId, motivo) {
   if (!rec) return;
   const act = activos.find(a => a.id === rec.activoId);
 
+  const _esRobo = (motivo || '').toUpperCase().includes('REPOSICIÓN ROBO');
+
   const PARTES_EQUIPO = ['BACKCOVER','TOPCOVER','BASE COVER','PANTALLA','TECLADO','PUERTO USB','PLACA MADRE','CAMARA','PARLANTE','TOUCH PAD','DISCO DURO','RAM','BISAGRAS','VENTILADOR','OTRO'];
 
-  openModal('Confirmar Retorno', `
+  openModal(_esRobo ? 'Baja por Robo' : 'Confirmar Retorno', `
     <div style="display:flex;flex-direction:column;gap:16px">
+      ${_esRobo ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;font-size:12px;color:#991b1b;display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px">🚨</span>
+        <span><strong>Reposición por Robo</strong> — El equipo no será retornado físicamente. Este proceso registra la baja del activo robado. Se requiere adjuntar la denuncia de robo.</span>
+      </div>` : ''}
+
       <!-- Info del equipo -->
-      <div style="background:#f8fafc;border-radius:8px;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="background:${_esRobo ? '#fef2f2' : '#f8fafc'};border-radius:8px;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div>
-          <div style="font-size:10px;color:#64748b;text-transform:uppercase">Equipo</div>
+          <div style="font-size:10px;color:#64748b;text-transform:uppercase">${_esRobo ? 'Equipo Robado' : 'Equipo'}</div>
           <div style="font-size:13px;font-weight:700">${esc(rec.activoTipo || '')} — ${esc(rec.activoCodigo || '')}</div>
         </div>
         <div>
@@ -6720,6 +7275,31 @@ function confirmarRetorno(asigId, motivo) {
         </div>
       </div>
 
+      ${_esRobo ? `
+      <!-- ROBO: Denuncia obligatoria -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#991b1b;margin-bottom:6px;display:block">🚨 Denuncia de Robo <span class="required">*</span></label>
+        <div id="retornoDenunciaWrap" style="border:2px dashed #fecaca;border-radius:8px;padding:16px;text-align:center;background:#fff;cursor:pointer;transition:all .15s"
+          onclick="document.getElementById('retornoDenunciaInput').click()"
+          onmouseover="this.style.borderColor='#ef4444';this.style.background='#fef2f2'"
+          onmouseout="this.style.borderColor='#fecaca';this.style.background='#fff'">
+          <input type="file" id="retornoDenunciaInput" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style="display:none" onchange="_onRetornoDenunciaChange(this)">
+          <div id="retornoDenunciaLabel" style="color:#94a3b8;font-size:12px">
+            <div style="font-size:24px;margin-bottom:4px">📎</div>
+            Haga clic para adjuntar la denuncia de robo<br>
+            <span style="font-size:10px;color:#cbd5e1">PDF, JPG, PNG, DOC — máx. 5MB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ROBO: Estado fijo BAJA -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Estado CMDB</label>
+        <div style="height:38px;font-size:12px;font-weight:700;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;display:flex;align-items:center;padding:0 12px;gap:6px">
+          <span style="font-size:14px">⛔</span> BAJA
+        </div>
+      </div>
+      ` : `
       <!-- Almacén destino -->
       <div style="max-width:280px">
         <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Almacén de retorno <span class="required">*</span></label>
@@ -6747,6 +7327,7 @@ function confirmarRetorno(asigId, motivo) {
           </button>
         </div>
       </div>
+      `}
 
       <!-- Estado Equipo (dinámico) -->
       <div id="retornoEstadoEquipoSection" style="display:none">
@@ -6770,23 +7351,51 @@ function confirmarRetorno(asigId, motivo) {
       <!-- Observaciones -->
       <div>
         <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones <span class="required">*</span></label>
-        <textarea id="retornoObs" class="form-control" rows="3" placeholder="Describa el estado en que se recibe el equipo..." style="font-size:12px;resize:vertical"></textarea>
+        <textarea id="retornoObs" class="form-control" rows="3" placeholder="${_esRobo ? 'Describa las circunstancias del robo, lugar, fecha del incidente...' : 'Describa el estado en que se recibe el equipo...'}" style="font-size:12px;resize:vertical"></textarea>
       </div>
     </div>
   `, `
     <button class="btn btn-secondary" onclick="closeModal();navigateTo('bitacora','pendientesRetorno')">Cancelar</button>
-    <button class="btn btn-primary" onclick="_ejecutarRetorno()">Confirmar Retorno</button>
+    <button class="btn ${_esRobo ? 'btn-danger' : 'btn-primary'}" onclick="_ejecutarRetorno()">${_esRobo ? 'Confirmar Baja por Robo' : 'Confirmar Retorno'}</button>
   `, 'modal-lg');
+
+  // Si es robo, auto-seleccionar BAJA como estado CMDB
+  if (_esRobo) {
+    _retornoCmdb = 'Baja';
+    _retornoEstadoEq = 'ROBO';
+  }
 }
 
 let _retornoCmdb = '';
 let _retornoEstadoEq = '';
+let _retornoDenunciaFile = null;
 
 const _RETORNO_ESTADOS = {
   'Disponible':       ['NUEVO', 'USADO'],
   'En Mantenimiento': ['GARANTÍA', 'REPARACIÓN'],
-  'Baja':             ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN']
+  'Baja':             ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN', 'ROBO']
 };
+
+function _onRetornoDenunciaChange(input) {
+  const file = input.files && input.files[0];
+  const label = document.getElementById('retornoDenunciaLabel');
+  const wrap = document.getElementById('retornoDenunciaWrap');
+  if (!file) {
+    _retornoDenunciaFile = null;
+    if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">📎</div>Haga clic para adjuntar la denuncia de robo<br><span style="font-size:10px;color:#cbd5e1">PDF, JPG, PNG, DOC — máx. 5MB</span>';
+    if (wrap) { wrap.style.borderColor = '#fecaca'; wrap.style.background = '#fff'; }
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    showToast('El archivo excede 5MB', 'error');
+    input.value = '';
+    _retornoDenunciaFile = null;
+    return;
+  }
+  _retornoDenunciaFile = file;
+  if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">✅</div><strong>' + esc(file.name) + '</strong><br><span style="font-size:10px;color:#10b981">Archivo adjunto correctamente — clic para cambiar</span>';
+  if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
+}
 
 function _retornoSelectCmdb(val) {
   _retornoCmdb = val;
@@ -6830,10 +7439,12 @@ function _retornoSelectEstadoEq(val) {
 }
 
 function _ejecutarRetorno() {
-  const almacen = (document.getElementById('retornoAlmacen') || {}).value || '';
-  if (!almacen) { showToast('Seleccione el almacén de retorno', 'error'); return; }
+  const _esRoboRet = (_retornoMotivo || '').toUpperCase().includes('REPOSICIÓN ROBO');
+  const almacen = _esRoboRet ? '' : ((document.getElementById('retornoAlmacen') || {}).value || '');
+  if (!_esRoboRet && !almacen) { showToast('Seleccione el almacén de retorno', 'error'); return; }
   if (!_retornoCmdb) { showToast('Seleccione el estado CMDB', 'error'); return; }
   if (!_retornoEstadoEq) { showToast('Seleccione el estado del equipo', 'error'); return; }
+  if (_esRoboRet && !_retornoDenunciaFile) { showToast('Debe adjuntar la denuncia de robo para confirmar la baja', 'error'); return; }
   const obs = (document.getElementById('retornoObs') || {}).value || '';
   if (!obs.trim()) { showToast('Ingrese las observaciones', 'error'); return; }
 
@@ -6850,11 +7461,15 @@ function _ejecutarRetorno() {
   rec.estado = 'Devuelto';
   rec.pendienteRetorno = false;
   rec.fechaCese = today();
-  rec.motivoCese = _retornoMotivo === 'REEMPLAZO' ? 'REEMPLAZO' : 'RETORNO POR CESE';
+  rec.motivoCese = _retornoMotivo === 'REPOSICIÓN ROBO' ? 'REPOSICIÓN ROBO' : _retornoMotivo === 'REPOSICIÓN DAÑO FÍSICO' ? 'REPOSICIÓN DAÑO FÍSICO' : _retornoMotivo === 'REEMPLAZO' ? 'REEMPLAZO' : _retornoMotivo === 'RENOVACIÓN' ? 'RENOVACIÓN' : 'RETORNO POR CESE';
   rec.retornoObs = obs.trim();
   rec.retornoEstadoCmdb = _retornoCmdb;
   rec.retornoEstadoEquipo = _retornoEstadoEq;
   if (partes.length) rec.retornoPartes = partes;
+  if (_esRoboRet && _retornoDenunciaFile) {
+    rec.denunciaRobo = _retornoDenunciaFile.name;
+    rec.denunciaRoboFecha = today();
+  }
 
   // Actualizar activo
   const activo = activos.find(a => a.id === rec.activoId);
@@ -6862,8 +7477,9 @@ function _ejecutarRetorno() {
     activo.estado = _retornoCmdb;
     activo.estadoEquipo = _retornoEstadoEq;
     activo.obsRetorno = obs.trim();
-    activo.ubicacion = almacen;
+    if (!_esRoboRet) activo.ubicacion = almacen;
     if (partes.length) activo.partesAfectadas = partes.join(', ');
+    if (_esRoboRet) activo.motivoBaja = 'ROBO';
     if (_retornoCmdb === 'Disponible' || _retornoCmdb === 'Baja') {
       const otrasVigentes = asignaciones.filter(a => a.activoId === activo.id && a.estado === 'Vigente' && a.id !== rec.id).length;
       if (otrasVigentes === 0) activo.responsable = '';
@@ -6872,77 +7488,549 @@ function _ejecutarRetorno() {
 
   DB.set('asignaciones', asignaciones);
   DB.set('activos', activos);
-  addMovimiento('Retorno', `Retorno de ${rec.activoCodigo || 'activo'} → ${_retornoCmdb} / ${_retornoEstadoEq}${partes.length ? ' [' + partes.join(', ') + ']' : ''}`);
+  addMovimiento(_esRoboRet ? 'Baja por Robo' : 'Retorno', _esRoboRet ? `Baja por robo de ${rec.activoCodigo || 'activo'} — Denuncia: ${_retornoDenunciaFile ? _retornoDenunciaFile.name : '—'}` : `Retorno de ${rec.activoCodigo || 'activo'} → ${_retornoCmdb} / ${_retornoEstadoEq}${partes.length ? ' [' + partes.join(', ') + ']' : ''}`);
 
-  // Auto-registrar en bitácora: INGRESO (equipo retornado a almacén)
+  // Auto-registrar en bitácora
   if (activo) {
     _autoBitacora({
-      movimiento: 'INGRESO',
-      almacen: (almacen || 'Almacen TI'),
+      movimiento: _esRoboRet ? 'BAJA' : 'INGRESO',
+      almacen: _esRoboRet ? 'N/A — ROBO' : (almacen || 'Almacen TI'),
       tipoEquipo: activo.tipo || rec.activoTipo || '',
       equipo: activo.equipo || activo.tipo || '',
       modelo: activo.modelo || rec.activoModelo || '',
       serie: rec.serieAsignada || '',
       inv: activo.codInventario || '',
-      correo: rec.correoColab || ''
+      correo: rec.correoColab || '',
+      motivo: _esRoboRet ? 'REPOSICIÓN ROBO' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((rec.tipoAsignacion || rec.motivo || '').toUpperCase())) ? (rec.tipoAsignacion || rec.motivo) : ''
     });
   }
 
   closeModal();
-  showToast('Retorno confirmado correctamente');
+  showToast(_esRoboRet ? 'Baja por robo registrada correctamente' : 'Retorno confirmado correctamente');
   navigateTo('bitacora', 'pendientesRetorno');
 }
 
 /* ═══════════════════════════════════════════════════════
    BAJAS - BAJAS PENDIENTES
    ═══════════════════════════════════════════════════════ */
+let _bajasSeleccionadas = new Set();
+let _bajasSearch = '';
+let _bajasSearchTimer = null;
+
+function _buildBajasRows() {
+  const activos = DB.get('activos');
+  const asignaciones = DB.get('asignaciones');
+  const rows = [];
+  activos.forEach(a => {
+    const eUp = (a.estado || '').toUpperCase();
+    if (eUp !== 'BAJA' && eUp !== 'DADO DE BAJA') return;
+    // Verificar que no esté ya ejecutado (en historial)
+    const historial = DB.get('historialBajas');
+    const yaEjecutado = historial.some(h => h.activoId === a.id && h.estadoBaja === 'Ejecutada');
+    if (yaEjecutado) return;
+
+    // Buscar última asignación para obtener responsable
+    const ultimaAsig = asignaciones.filter(x => x.activoId === a.id).sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0];
+
+    // Calcular antigüedad
+    let antiguedad = '—';
+    if (a.fechaCompra) {
+      const fc = new Date(a.fechaCompra);
+      const hoy = new Date();
+      const diffMs = hoy - fc;
+      const diffYears = Math.floor(diffMs / (365.25 * 24 * 60 * 60 * 1000));
+      const diffMonths = Math.floor((diffMs % (365.25 * 24 * 60 * 60 * 1000)) / (30.44 * 24 * 60 * 60 * 1000));
+      antiguedad = diffYears > 0 ? `${diffYears}a ${diffMonths}m` : `${diffMonths}m`;
+    }
+
+    const tieneValor = a.costo && parseFloat(a.costo) > 0;
+
+    (a.series || [{}]).forEach(s => {
+      rows.push({
+        activoId: a.id,
+        codigo: a.codigo || '',
+        almacen: a.ubicacion || '',
+        tipo: a.tipo || '',
+        equipo: a.equipo || a.tipo || '',
+        marca: a.marca || '',
+        modelo: a.modelo || '',
+        serie: s.serie || '',
+        codInventario: s.codInventario || '',
+        estadoCmdb: a.estado || 'Baja',
+        estadoEquipo: a.estadoEquipo || '',
+        antiguedad,
+        fechaCompra: a.fechaCompra || '',
+        costo: a.costo || 0,
+        valorizado: tieneValor,
+        motivoBaja: a.motivoBaja || a.obsRetorno || '',
+        responsable: ultimaAsig ? (ultimaAsig.colaboradorNombre || '') : (a.responsable || ''),
+        observaciones: a.obsRetorno || a.observaciones || '',
+        origenEquipo: a.origenEquipo || '',
+        nDocumento: a.nDocumento || '',
+        tipoDocumento: a.tipoDocumento || '',
+        sku: a.sku || '',
+        fechaIngreso: a.fechaIngreso || '',
+        _activo: a
+      });
+    });
+  });
+  return rows;
+}
+
 function renderBajasPendientes(el) {
-  const bajas = DB.get('bajasPendientes');
+  const rows = _buildBajasRows();
+  const totalValorizados = rows.filter(r => r.valorizado).length;
+  const totalSinValorizar = rows.filter(r => !r.valorizado).length;
+  const totalCosto = rows.reduce((s, r) => s + (parseFloat(r.costo) || 0), 0);
+
+  // Filtrar por búsqueda
+  let filtered = rows;
+  if (_bajasSearch) {
+    const s = _bajasSearch.toLowerCase();
+    filtered = rows.filter(r =>
+      r.codigo.toLowerCase().includes(s) || r.equipo.toLowerCase().includes(s) ||
+      r.marca.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) ||
+      r.serie.toLowerCase().includes(s) || r.almacen.toLowerCase().includes(s) ||
+      r.responsable.toLowerCase().includes(s) || r.estadoEquipo.toLowerCase().includes(s)
+    );
+  }
+
+  // Limpiar selecciones que ya no están en la lista
+  const validIds = new Set(rows.map(r => r.activoId + '||' + r.serie));
+  _bajasSeleccionadas.forEach(k => { if (!validIds.has(k)) _bajasSeleccionadas.delete(k); });
+
+  const selCount = _bajasSeleccionadas.size;
+  const selAptos = [..._bajasSeleccionadas].filter(k => {
+    const r = rows.find(x => (x.activoId + '||' + x.serie) === k);
+    return r && r.valorizado;
+  }).length;
 
   el.innerHTML = `
     <div class="page-header">
       <div>
         <h1>Bajas Pendientes</h1>
-        <div class="subtitle">Activos pendientes de aprobación para baja</div>
+        <div class="subtitle">Activos registrados para baja, pendientes de ejecución definitiva</div>
       </div>
-      <button class="btn btn-primary" onclick="openBajaModal()">+ Solicitar Baja</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary" onclick="_exportBajasPendientes()" ${rows.length === 0 ? 'disabled' : ''}>📥 Exportar Reporte</button>
+        <button class="btn btn-primary" onclick="openBajaModal()">+ Solicitar Baja</button>
+      </div>
     </div>
+
+    <!-- Stats -->
+    <div class="stats-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:20px">
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon" style="background:#fef2f2;color:#dc2626">⛔</div></div>
+        <div class="stat-value">${rows.length}</div>
+        <div class="stat-label">Total en baja pendiente</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon green">✅</div></div>
+        <div class="stat-value">${totalValorizados}</div>
+        <div class="stat-label">Valorizados (aptos)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon" style="background:#fffbeb;color:#d97706">⚠️</div></div>
+        <div class="stat-value">${totalSinValorizar}</div>
+        <div class="stat-label">Sin valorizar</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon blue">💰</div></div>
+        <div class="stat-value" style="font-size:18px">S/ ${totalCosto.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</div>
+        <div class="stat-label">Valor total acumulado</div>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="table-toolbar" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
+      <div class="search-box" style="position:relative;flex:1;max-width:420px">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="bajasSearchInput" placeholder="Buscar por código, equipo, serie, marca, responsable..."
+               value="${esc(_bajasSearch)}" oninput="_onBajasSearch(this.value)">
+        <span id="bajasSearchClear" onclick="_bajasSearch='';document.getElementById('bajasSearchInput').value='';resetPage('bajasP');_renderBajasTable()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${_bajasSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar">✕</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        ${selCount > 0 ? `
+          <span style="font-size:12px;font-weight:600;color:#334155">${selCount} seleccionado(s)</span>
+          ${selAptos < selCount ? `<span style="font-size:11px;color:#d97706" title="Algunos ítems no tienen valorización">⚠️ ${selCount - selAptos} sin valorizar</span>` : ''}
+          <button class="btn btn-danger" onclick="_ejecutarBajasMasivas()" ${selAptos === 0 ? 'disabled title="Ningún ítem seleccionado tiene valorización"' : ''} style="font-weight:700">
+            ⛔ Ejecutar Bajas (${selAptos})
+          </button>
+        ` : `
+          <span style="font-size:12px;color:#94a3b8">Seleccione ítems para ejecutar bajas</span>
+        `}
+      </div>
+    </div>
+
+    <div id="bajasTableWrap"></div>
+  `;
+  _renderBajasTable();
+}
+
+function _onBajasSearch(val) {
+  _bajasSearch = val;
+  const clearBtn = document.getElementById('bajasSearchClear');
+  if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
+  resetPage('bajasP');
+  clearTimeout(_bajasSearchTimer);
+  _bajasSearchTimer = setTimeout(_renderBajasTable, 120);
+}
+
+function _renderBajasTable() {
+  const wrap = document.getElementById('bajasTableWrap');
+  if (!wrap) return;
+  const rows = _buildBajasRows();
+  let filtered = rows;
+  if (_bajasSearch) {
+    const s = _bajasSearch.toLowerCase();
+    filtered = rows.filter(r =>
+      r.codigo.toLowerCase().includes(s) || r.equipo.toLowerCase().includes(s) ||
+      r.marca.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) ||
+      r.serie.toLowerCase().includes(s) || r.almacen.toLowerCase().includes(s) ||
+      r.responsable.toLowerCase().includes(s) || r.estadoEquipo.toLowerCase().includes(s)
+    );
+  }
+
+  const pageItems = pagSlice(filtered, 'bajasP');
+  const allPageKeys = pageItems.map(r => r.activoId + '||' + r.serie);
+  const allPageSel = pageItems.length > 0 && pageItems.every(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie));
+
+  const _eqBadge = (eq) => {
+    if (!eq) return '<span class="badge badge-neutral" style="font-size:10px">—</span>';
+    const u = eq.toUpperCase();
+    const cls = u === 'DESTRUCCIÓN' ? 'badge-danger' : u === 'VENTA' ? 'badge-info' : u === 'DONACIÓN' ? 'badge-success' : u === 'ROBO' ? 'badge-danger' : 'badge-warning';
+    return '<span class="badge ' + cls + '" style="font-size:10px">' + esc(eq) + '</span>';
+  };
+
+  wrap.innerHTML = `
     <div class="table-container">
       <div class="table-scroll">
         <table>
-          <thead><tr><th>ID</th><th>Activo</th><th>Tipo</th><th>Motivo</th><th>F. Solicitud</th><th>Solicitante</th><th>Estado</th><th>Acciones</th></tr></thead>
+          <thead><tr>
+            <th style="width:36px;text-align:center"><input type="checkbox" ${allPageSel ? 'checked' : ''} onchange="_bajasTogglePageAll(this.checked)" title="Seleccionar página"></th>
+            <th>Almacén</th>
+            <th>Equipo</th>
+            <th>Marca</th>
+            <th>Modelo</th>
+            <th>Serie</th>
+            <th>INV</th>
+            <th>Estado CMDB</th>
+            <th>Estado Equipo</th>
+            <th>Antigüedad</th>
+            <th>Valorizado</th>
+            <th>Acciones</th>
+          </tr></thead>
           <tbody>
-            ${bajas.length === 0
-              ? '<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">📦</div><h3>Sin bajas pendientes</h3><p>No hay solicitudes de baja pendientes</p></div></td></tr>'
-              : pagSlice(bajas, 'bajasP').map(b => `
-                  <tr>
-                    <td>${b.id}</td>
-                    <td><strong>${esc(b.activoCodigo)}</strong></td>
-                    <td>${esc(b.activoTipo)}</td>
-                    <td>${esc(b.motivo)}</td>
-                    <td>${formatDate(b.fecha)}</td>
-                    <td>${esc(b.solicitante)}</td>
-                    <td><span class="badge badge-warning"><span class="badge-dot"></span>Pendiente</span></td>
-                    <td>
-                      <div class="action-btns">
-                        <button class="btn btn-sm btn-success" onclick="aprobarBaja(${b.id})">Aprobar</button>
-                        <button class="btn btn-sm btn-danger" onclick="rechazarBaja(${b.id})">Rechazar</button>
-                      </div>
-                    </td>
-                  </tr>
-                `).join('')
+            ${filtered.length === 0
+              ? '<tr><td colspan="12"><div class="empty-state"><div class="empty-icon">📦</div><h3>Sin bajas pendientes</h3><p>No hay activos pendientes de ejecución de baja</p></div></td></tr>'
+              : pageItems.map(r => {
+                  const key = r.activoId + '||' + r.serie;
+                  const isSel = _bajasSeleccionadas.has(key);
+                  const canSelect = r.valorizado;
+                  const chk = canSelect
+                    ? '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onchange="_bajasToggleItem(\'' + key.replace(/'/g, "\\'") + '\')">'
+                    : '<input type="checkbox" disabled title="Sin valorización — no se puede ejecutar" style="opacity:.4;cursor:not-allowed">';
+                  const valTd = r.valorizado
+                    ? '<span style="color:#10b981;font-weight:700;font-size:12px" title="S/ ' + (parseFloat(r.costo)||0).toFixed(2) + '">SÍ</span>'
+                    : '<span style="color:#d97706;font-weight:700;font-size:12px" title="Falta información de costo">NO</span>';
+                  return '<tr style="background:' + (isSel ? '#fef2f2' : '') + '">'
+                    + '<td style="text-align:center">' + chk + '</td>'
+                    + '<td style="font-size:12px">' + esc(r.almacen || '—') + '</td>'
+                    + '<td style="font-size:12px;font-weight:600">' + esc(r.equipo) + '</td>'
+                    + '<td style="font-size:12px">' + esc(r.marca) + '</td>'
+                    + '<td style="font-size:12px">' + esc(r.modelo) + '</td>'
+                    + '<td style="font-size:11px;font-family:monospace">' + esc(r.serie || '—') + '</td>'
+                    + '<td style="font-size:11px;font-family:monospace">' + esc(r.codInventario || '—') + '</td>'
+                    + '<td><span class="badge badge-danger" style="font-size:10px">BAJA</span></td>'
+                    + '<td>' + _eqBadge(r.estadoEquipo) + '</td>'
+                    + '<td style="font-size:11px;color:#64748b">' + r.antiguedad + '</td>'
+                    + '<td style="text-align:center">' + valTd + '</td>'
+                    + '<td><div class="action-btns"><button class="btn-icon" title="Ver detalle" onclick="_verDetalleBaja(' + r.activoId + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">👁️</button></div></td>'
+                    + '</tr>';
+                }).join('')
             }
           </tbody>
         </table>
       </div>
-      <div class="table-footer">${pagFooter('bajasP', bajas.length)}</div>
+      <div class="table-footer">${pagFooter('bajasP', filtered.length)}</div>
     </div>
   `;
 }
 
+function _bajasToggleItem(key) {
+  if (_bajasSeleccionadas.has(key)) _bajasSeleccionadas.delete(key);
+  else _bajasSeleccionadas.add(key);
+  renderBajasPendientes(document.getElementById('contentArea'));
+}
+
+function _bajasTogglePageAll(checked) {
+  const rows = _buildBajasRows();
+  let filtered = rows;
+  if (_bajasSearch) {
+    const s = _bajasSearch.toLowerCase();
+    filtered = rows.filter(r =>
+      r.codigo.toLowerCase().includes(s) || r.equipo.toLowerCase().includes(s) ||
+      r.marca.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) ||
+      r.serie.toLowerCase().includes(s) || r.almacen.toLowerCase().includes(s) ||
+      r.responsable.toLowerCase().includes(s) || r.estadoEquipo.toLowerCase().includes(s)
+    );
+  }
+  const pageItems = pagSlice(filtered, 'bajasP');
+  pageItems.forEach(r => {
+    if (!r.valorizado) return; // Skip non-valorized
+    const key = r.activoId + '||' + r.serie;
+    if (checked) _bajasSeleccionadas.add(key);
+    else _bajasSeleccionadas.delete(key);
+  });
+  renderBajasPendientes(document.getElementById('contentArea'));
+}
+
+function _verDetalleBaja(activoId) {
+  const activos = DB.get('activos');
+  const a = activos.find(x => x.id === activoId);
+  if (!a) return;
+  const asignaciones = DB.get('asignaciones');
+  const ultimaAsig = asignaciones.filter(x => x.activoId === a.id).sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0];
+  const _f = (label, val) => `<div><div style="font-size:10px;color:#64748b;text-transform:uppercase">${label}</div><div style="font-size:13px;font-weight:600">${val || '—'}</div></div>`;
+
+  openModal('Detalle de Activo en Baja', `
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;background:#fef2f2;padding:14px;border-radius:8px;border:1px solid #fecaca">
+        ${_f('Código', esc(a.codigo))}
+        ${_f('Tipo', esc(a.tipo))}
+        ${_f('Equipo', esc(a.equipo || a.tipo))}
+        ${_f('Marca', esc(a.marca))}
+        ${_f('Modelo', esc(a.modelo))}
+        ${_f('SKU', esc(a.sku))}
+        ${_f('Serie', (a.series||[]).map(s=>s.serie).join(', ') || '—')}
+        ${_f('INV', (a.series||[]).map(s=>s.codInventario).join(', ') || '—')}
+        ${_f('Almacén', esc(a.ubicacion))}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;background:#f8fafc;padding:14px;border-radius:8px">
+        ${_f('Estado CMDB', esc(a.estado))}
+        ${_f('Estado Equipo', esc(a.estadoEquipo))}
+        ${_f('Motivo Baja', esc(a.motivoBaja || a.obsRetorno || ''))}
+        ${_f('Fecha Compra', formatDate(a.fechaCompra))}
+        ${_f('Fecha Ingreso', formatDate(a.fechaIngreso))}
+        ${_f('Costo', a.costo ? 'S/ ' + parseFloat(a.costo).toFixed(2) : '—')}
+        ${_f('Origen', esc(a.origenEquipo))}
+        ${_f('N° Documento', esc(a.nDocumento))}
+        ${_f('Último Responsable', esc(ultimaAsig ? ultimaAsig.colaboradorNombre : a.responsable || ''))}
+      </div>
+      ${a.obsRetorno ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;font-size:12px;color:#92400e"><strong>Observaciones:</strong> ${esc(a.obsRetorno)}</div>` : ''}
+    </div>
+  `, `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`, 'modal-lg');
+}
+
+function _exportBajasPendientes() {
+  const rows = _buildBajasRows();
+  if (rows.length === 0) { showToast('No hay datos para exportar', 'error'); return; }
+
+  const asignaciones = DB.get('asignaciones');
+  const data = rows.map(r => ({
+    'ALMACÉN': r.almacen,
+    'EQUIPO': r.equipo,
+    'MARCA': r.marca,
+    'MODELO': r.modelo,
+    'SERIE': r.serie,
+    'INV': r.codInventario,
+    'CÓDIGO': r.codigo,
+    'SKU': r.sku,
+    'ESTADO CMDB': r.estadoCmdb,
+    'ESTADO EQUIPO': r.estadoEquipo,
+    'MOTIVO BAJA': r.motivoBaja,
+    'FECHA COMPRA': r.fechaCompra ? formatDate(r.fechaCompra) : '',
+    'ANTIGÜEDAD': r.antiguedad,
+    'FECHA INGRESO': r.fechaIngreso ? formatDate(r.fechaIngreso) : '',
+    'ORIGEN': r.origenEquipo,
+    'N° DOCUMENTO': r.nDocumento,
+    'TIPO DOCUMENTO': r.tipoDocumento,
+    'COSTO (S/)': parseFloat(r.costo) || 0,
+    'VALORIZADO': r.valorizado ? 'SÍ' : 'NO',
+    'ÚLTIMO RESPONSABLE': r.responsable,
+    'UBICACIÓN': r.almacen,
+    'OBSERVACIONES': r.observaciones
+  }));
+
+  const ws = XLSX.utils.json_to_sheet(data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Bajas Pendientes');
+  XLSX.writeFile(wb, 'Bajas_Pendientes_' + today().replace(/-/g, '') + '.xlsx');
+  showToast('Reporte exportado correctamente');
+}
+
+function _ejecutarBajasMasivas() {
+  const rows = _buildBajasRows();
+  const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado);
+  if (selRows.length === 0) { showToast('No hay ítems válidos seleccionados', 'error'); return; }
+
+  const seriesResumen = selRows.map(r => r.serie || r.codigo).join(', ');
+
+  openModal('Ejecutar Bajas — Guía de Salida', `
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;font-size:12px;color:#991b1b;display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px">⛔</span>
+        <span>Se ejecutará la baja definitiva de <strong>${selRows.length} equipo(s)</strong>. Esta acción es irreversible. Debe adjuntar la guía de salida para completar el proceso.</span>
+      </div>
+
+      <!-- Resumen -->
+      <div style="background:#f8fafc;border-radius:8px;padding:14px">
+        <div style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px">Resumen de equipos</div>
+        <div style="font-size:11px;color:#64748b;max-height:80px;overflow-y:auto;line-height:1.6">${selRows.map(r => '<span style="display:inline-block;background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:2px 8px;margin:2px;font-family:monospace;font-size:10px">' + esc(r.codigo) + ' — ' + esc(r.serie || '—') + '</span>').join('')}</div>
+        <div style="font-size:12px;font-weight:700;color:#334155;margin-top:8px">Total: ${selRows.length} equipo(s) | Valor: S/ ${selRows.reduce((s, r) => s + (parseFloat(r.costo) || 0), 0).toLocaleString('es-PE', { minimumFractionDigits: 2 })}</div>
+      </div>
+
+      <!-- Fecha de salida -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Fecha de salida <span class="required">*</span></label>
+          <input type="date" class="form-control" id="bajaSalidaFecha" value="${today()}" style="height:38px;font-size:12px">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Número de guía <span class="required">*</span></label>
+          <input class="form-control" id="bajaSalidaGuia" placeholder="GS-000000" style="height:38px;font-size:12px">
+        </div>
+      </div>
+
+      <!-- Guía de salida (obligatoria) -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#991b1b;margin-bottom:6px;display:block">📎 Guía de salida (archivo adjunto) <span class="required">*</span></label>
+        <div id="bajaGuiaWrap" style="border:2px dashed #fecaca;border-radius:8px;padding:16px;text-align:center;background:#fff;cursor:pointer;transition:all .15s"
+          onclick="document.getElementById('bajaGuiaInput').click()"
+          onmouseover="this.style.borderColor='#ef4444';this.style.background='#fef2f2'"
+          onmouseout="this.style.borderColor='#fecaca';this.style.background='#fff'">
+          <input type="file" id="bajaGuiaInput" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xlsx" style="display:none" onchange="_onBajaGuiaChange(this)">
+          <div id="bajaGuiaLabel" style="color:#94a3b8;font-size:12px">
+            <div style="font-size:24px;margin-bottom:4px">📎</div>
+            Haga clic para adjuntar la guía de salida<br>
+            <span style="font-size:10px;color:#cbd5e1">PDF, JPG, PNG, DOC, XLSX — máx. 10MB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Observaciones -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
+        <textarea id="bajaSalidaObs" class="form-control" rows="2" placeholder="Observaciones adicionales..." style="font-size:12px;resize:vertical"></textarea>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-danger" onclick="_confirmarEjecucionBajas()" style="font-weight:700">⛔ Confirmar Ejecución de Bajas</button>
+  `, 'modal-lg');
+
+  window._bajaPendGuiaFile = null;
+}
+
+function _onBajaGuiaChange(input) {
+  const file = input.files && input.files[0];
+  const label = document.getElementById('bajaGuiaLabel');
+  const wrap = document.getElementById('bajaGuiaWrap');
+  if (!file) {
+    window._bajaPendGuiaFile = null;
+    if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">📎</div>Haga clic para adjuntar la guía de salida<br><span style="font-size:10px;color:#cbd5e1">PDF, JPG, PNG, DOC, XLSX — máx. 10MB</span>';
+    if (wrap) { wrap.style.borderColor = '#fecaca'; wrap.style.background = '#fff'; }
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    showToast('El archivo excede 10MB', 'error');
+    input.value = '';
+    window._bajaPendGuiaFile = null;
+    return;
+  }
+  window._bajaPendGuiaFile = file;
+  if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">✅</div><strong>' + esc(file.name) + '</strong><br><span style="font-size:10px;color:#10b981">Archivo adjunto correctamente — clic para cambiar</span>';
+  if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
+}
+
+function _confirmarEjecucionBajas() {
+  const fechaSalida = (document.getElementById('bajaSalidaFecha') || {}).value || '';
+  const numGuia = ((document.getElementById('bajaSalidaGuia') || {}).value || '').trim();
+  const obs = ((document.getElementById('bajaSalidaObs') || {}).value || '').trim();
+
+  if (!fechaSalida) { showToast('Ingrese la fecha de salida', 'error'); return; }
+  if (!numGuia) { showToast('Ingrese el número de guía', 'error'); return; }
+  if (!window._bajaPendGuiaFile) { showToast('Debe adjuntar la guía de salida para ejecutar las bajas', 'error'); return; }
+
+  if (!confirm('¿Está seguro de ejecutar la baja definitiva de los equipos seleccionados? Esta acción es irreversible.')) return;
+
+  const rows = _buildBajasRows();
+  const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado);
+  if (selRows.length === 0) { showToast('No hay ítems válidos', 'error'); return; }
+
+  const activos = DB.get('activos');
+  const historial = DB.get('historialBajas');
+
+  selRows.forEach(r => {
+    const activo = activos.find(a => a.id === r.activoId);
+    if (activo) {
+      activo.estado = 'Dado de Baja';
+      activo.fechaBajaEjecutada = fechaSalida;
+      activo.guiaSalida = numGuia;
+      activo.guiaSalidaArchivo = window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '';
+    }
+
+    historial.unshift({
+      id: nextId(historial),
+      activoId: r.activoId,
+      activoCodigo: r.codigo,
+      activoTipo: r.equipo,
+      marca: r.marca,
+      modelo: r.modelo,
+      serie: r.serie,
+      codInventario: r.codInventario,
+      almacen: r.almacen,
+      estadoEquipo: r.estadoEquipo,
+      motivoBaja: r.motivoBaja,
+      costo: r.costo,
+      fechaCompra: r.fechaCompra,
+      antiguedad: r.antiguedad,
+      responsable: r.responsable,
+      observaciones: r.observaciones || obs,
+      fechaSalida: fechaSalida,
+      numGuia: numGuia,
+      guiaArchivo: window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '',
+      estadoBaja: 'Ejecutada',
+      fechaAprobacion: today(),
+      solicitante: currentUser ? currentUser.nombre : 'Sistema'
+    });
+
+    // Bitácora BAJA
+    _autoBitacora({
+      movimiento: 'BAJA',
+      almacen: r.almacen || '',
+      tipoEquipo: r.tipo || '',
+      equipo: r.equipo || '',
+      modelo: r.modelo || '',
+      serie: r.serie || '',
+      inv: r.codInventario || '',
+      motivo: 'BAJA EJECUTADA'
+    });
+  });
+
+  DB.set('activos', activos);
+  DB.set('historialBajas', historial);
+
+  // Limpiar bajasPendientes legacy que coincidan
+  const bajasPend = DB.get('bajasPendientes');
+  const ejectedIds = new Set(selRows.map(r => r.activoId));
+  DB.set('bajasPendientes', bajasPend.filter(b => !ejectedIds.has(b.activoId)));
+
+  addMovimiento('Ejecución de Bajas', `${selRows.length} equipo(s) dados de baja definitiva — Guía: ${numGuia}`);
+
+  _bajasSeleccionadas.clear();
+  window._bajaPendGuiaFile = null;
+  closeModal();
+  showToast(`${selRows.length} equipo(s) dados de baja definitiva correctamente`);
+  renderBajasPendientes(document.getElementById('contentArea'));
+}
+
 function openBajaModal() {
-  const activos = DB.get('activos').filter(a => a.estado !== 'Dado de Baja');
-  const motivos = ['Obsoleto', 'Dañado irreparable', 'Pérdida', 'Robo', 'Fin de vida útil', 'Otro'];
+  const activos = DB.get('activos').filter(a => {
+    const e = (a.estado||'').toUpperCase();
+    return e !== 'DADO DE BAJA' && e !== 'BAJA';
+  });
+  const motivos = ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN', 'OBSOLETO', 'DAÑADO IRREPARABLE', 'PÉRDIDA', 'ROBO', 'FIN DE VIDA ÚTIL', 'OTRO'];
 
   openModal('Solicitar Baja de Activo', `
     <div class="form-grid">
@@ -6955,7 +8043,7 @@ function openBajaModal() {
       </div>
       <div class="form-group">
         <label>Motivo <span class="required">*</span></label>
-        <select class="form-control" id="fBajaMotivo"><option value="">Seleccionar...</option>${optionsHTML(motivos, '')}</select>
+        <select class="form-control" id="fBajaMotivo"><option value="">Seleccionar...</option>${motivos.map(m => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('')}</select>
       </div>
       <div class="form-group">
         <label>Fecha</label>
@@ -6987,6 +8075,13 @@ function saveBaja() {
   const activo = activos.find(a => a.id === activoId);
   if (!activo) return;
 
+  // Marcar activo como Baja (pendiente)
+  activo.estado = 'Baja';
+  activo.estadoEquipo = motivo;
+  activo.motivoBaja = motivo;
+  activo.obsRetorno = obs;
+  DB.set('activos', activos);
+
   const bajas = DB.get('bajasPendientes');
   bajas.push(upperFields({
     id: nextId(bajas),
@@ -6998,7 +8093,6 @@ function saveBaja() {
   DB.set('bajasPendientes', bajas);
   addMovimiento('Solicitud Baja', `Baja solicitada para ${activo.codigo}: ${motivo}`);
 
-  // Auto-registrar en bitácora: SALIDA (equipo dado de baja)
   _autoBitacora({
     movimiento: 'SALIDA',
     almacen: (activo.ubicacion || 'Almacen TI'),
@@ -7006,49 +8100,12 @@ function saveBaja() {
     equipo: activo.equipo || activo.tipo || '',
     modelo: activo.modelo || '',
     serie: (activo.series && activo.series[0]) ? activo.series[0].serie || '' : '',
-    inv: activo.codInventario || ''
+    inv: activo.codInventario || '',
+    motivo: 'BAJA'
   });
 
   closeModal();
   showToast('Solicitud de baja registrada');
-  renderBajasPendientes(document.getElementById('contentArea'));
-}
-
-function aprobarBaja(id) {
-  if (!confirm('¿Aprobar esta baja?')) return;
-  const bajas = DB.get('bajasPendientes');
-  const b = bajas.find(x => x.id === id);
-  if (!b) return;
-
-  const historial = DB.get('historialBajas');
-  historial.unshift({ ...b, estadoBaja: 'Aprobada', fechaAprobacion: today() });
-  DB.set('historialBajas', historial);
-
-  const activos = DB.get('activos');
-  const activo = activos.find(a => a.id === b.activoId);
-  if (activo) { activo.estado = 'Dado de Baja'; DB.set('activos', activos); }
-
-  DB.set('bajasPendientes', bajas.filter(x => x.id !== id));
-  addMovimiento('Baja Aprobada', `Baja aprobada para ${b.activoCodigo}`);
-
-  showToast('Baja aprobada correctamente');
-  renderBajasPendientes(document.getElementById('contentArea'));
-}
-
-function rechazarBaja(id) {
-  if (!confirm('¿Rechazar esta solicitud de baja?')) return;
-  const bajas = DB.get('bajasPendientes');
-  const b = bajas.find(x => x.id === id);
-  if (!b) return;
-
-  const historial = DB.get('historialBajas');
-  historial.unshift({ ...b, estadoBaja: 'Rechazada', fechaAprobacion: today() });
-  DB.set('historialBajas', historial);
-
-  DB.set('bajasPendientes', bajas.filter(x => x.id !== id));
-  addMovimiento('Baja Rechazada', `Baja rechazada para ${b.activoCodigo}`);
-
-  showToast('Solicitud de baja rechazada', 'info');
   renderBajasPendientes(document.getElementById('contentArea'));
 }
 
