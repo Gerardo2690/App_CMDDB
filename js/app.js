@@ -190,7 +190,7 @@ function initSampleData() {
   if (!DB.getConfig('tipoPuesto', null))
     DB.setConfig('tipoPuesto', ['PRESENCIAL', 'REMOTO', 'HÍBRIDO']);
   if (!DB.getConfig('tipoAsignacion', null))
-    DB.setConfig('tipoAsignacion', ['INGRESO NUEVO', 'ASIGNACIÓN', 'REEMPLAZO', 'RENOVACIÓN', 'PRÉSTAMO']);
+    DB.setConfig('tipoAsignacion', ['INGRESO NUEVO', 'ASIGNACIÓN', 'REEMPLAZO', 'RENOVACIÓN', 'PRÉSTAMO', 'REPOSICIÓN DAÑO FÍSICO', 'REPOSICIÓN ROBO']);
   if (!DB.getConfig('tipoEquipos', null))
     DB.setConfig('tipoEquipos', {
       'LAPTOP':       ['LAPTOP', 'LAPTOP MINI', 'LAPTOP GAMER'],
@@ -3041,10 +3041,12 @@ function _renderAsignacionModal(fresh) {
   }
 
   const c = _asigSelectedColab;
-  const motivosAsig = ['INGRESO NUEVO','REEMPLAZO','ASIGNACIÓN','PRÉSTAMO','RENOVACIÓN','REPOSICIÓN'];
+  const motivosAsig = ['INGRESO NUEVO','REEMPLAZO','ASIGNACIÓN','PRÉSTAMO','RENOVACIÓN','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'];
   const motVal = _asigMotivo || '';
   const _motUp = motVal.toUpperCase();
-  const isReemplazo = _motUp.includes('REEMPLAZO') || _motUp.includes('RENOVACIÓN') || _motUp.includes('RENOVACION');
+  const isReposicionDano = _motUp.includes('REPOSICIÓN DAÑO FÍSICO') || _motUp.includes('REPOSICION DANO FISICO');
+  const isReposicionRobo = _motUp.includes('REPOSICIÓN ROBO') || _motUp.includes('REPOSICION ROBO');
+  const isReemplazo = _motUp.includes('REEMPLAZO') || _motUp.includes('RENOVACIÓN') || _motUp.includes('RENOVACION') || isReposicionDano || isReposicionRobo;
   const isRenovacion = _motUp.includes('RENOVACIÓN') || _motUp.includes('RENOVACION');
   const isPrestamo = _motUp.includes('PRÉSTAMO') || _motUp.includes('PRESTAMO');
   const isIngresoNuevo = _motUp.includes('INGRESO NUEVO');
@@ -3209,19 +3211,19 @@ function _renderAsignacionModal(fresh) {
   if (isReemplazo && _asigReemOld && _asigSelectedActivos.length > 0) {
     const oldAct = activos.find(x => x.id === _asigReemOld.activoId);
     const newItem = _asigSelectedActivos[0];
-    const _sumLabel = isRenovacion ? 'Resumen de la renovación' : 'Resumen del reemplazo';
+    const _sumLabel = isReposicionRobo ? 'Resumen de la reposición por robo' : isReposicionDano ? 'Resumen de la reposición por daño físico' : isRenovacion ? 'Resumen de la renovación' : 'Resumen del reemplazo';
     reemSummaryHTML = `
       <div style="margin-top:14px;padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px">
         <div style="font-size:11px;font-weight:700;color:#166534;margin-bottom:8px">${_sumLabel}</div>
         <div style="display:flex;align-items:center;gap:10px;font-size:12px">
           <div style="flex:1;padding:8px;background:#fff;border-radius:6px;border:1px solid #fecaca">
-            <div style="font-size:10px;color:#dc2626;font-weight:600;margin-bottom:2px">RETIRAR</div>
+            <div style="font-size:10px;color:#dc2626;font-weight:600;margin-bottom:2px">${isReposicionRobo ? 'EQUIPO ROBADO' : isReposicionDano ? 'EQUIPO DAÑADO' : 'RETIRAR'}</div>
             <strong>${oldAct ? esc(oldAct.codigo) : '—'}</strong> — ${oldAct ? esc(oldAct.marca) + ' ' + esc(oldAct.modelo) : ''}<br>
             <span style="font-size:11px;color:#64748b">Serie: ${esc(_asigReemOld.serieAsignada || '—')}</span>
           </div>
           <span style="font-size:18px;color:#10b981;font-weight:700">→</span>
           <div style="flex:1;padding:8px;background:#fff;border-radius:6px;border:1px solid #bbf7d0">
-            <div style="font-size:10px;color:#16a34a;font-weight:600;margin-bottom:2px">ENTREGAR</div>
+            <div style="font-size:10px;color:#16a34a;font-weight:600;margin-bottom:2px">${isReposicionDano ? 'REPOSICIÓN' : 'ENTREGAR'}</div>
             <strong>${esc(newItem.codigo)}</strong> — ${esc(newItem.marca)} ${esc(newItem.modelo)}<br>
             <span style="font-size:11px;color:#64748b">Serie: ${esc(newItem.serie || '—')}</span>
           </div>
@@ -3233,10 +3235,10 @@ function _renderAsignacionModal(fresh) {
     <div style="display:flex;flex-direction:column;gap:0">
       <!-- Header -->
       <div style="display:flex;align-items:center;gap:14px;padding-bottom:16px;margin-bottom:16px;border-bottom:2px solid #dbeafe">
-        <div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,${isReemplazo ? '#ea580c,#dc2626' : isPrestamo ? '#d97706,#b45309' : isIngresoNuevo ? '#059669,#047857' : '#3b82f6,#2563eb'});display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 12px ${isReemplazo ? 'rgba(234,88,12,.25)' : isPrestamo ? 'rgba(217,119,6,.25)' : isIngresoNuevo ? 'rgba(5,150,105,.25)' : 'rgba(37,99,235,.25)'}">${isReemplazo ? '🔄' : isPrestamo ? '⏱️' : isIngresoNuevo ? '🆕' : '📋'}</div>
+        <div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,${isReposicionRobo ? '#7c3aed,#4c1d95' : isReposicionDano ? '#dc2626,#991b1b' : isReemplazo ? '#ea580c,#dc2626' : isPrestamo ? '#d97706,#b45309' : isIngresoNuevo ? '#059669,#047857' : '#3b82f6,#2563eb'});display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 12px ${isReposicionRobo ? 'rgba(124,58,237,.25)' : isReposicionDano ? 'rgba(220,38,38,.25)' : isReemplazo ? 'rgba(234,88,12,.25)' : isPrestamo ? 'rgba(217,119,6,.25)' : isIngresoNuevo ? 'rgba(5,150,105,.25)' : 'rgba(37,99,235,.25)'}">${isReposicionRobo ? '🚨' : isReposicionDano ? '🛠️' : isReemplazo ? '🔄' : isPrestamo ? '⏱️' : isIngresoNuevo ? '🆕' : '📋'}</div>
         <div>
-          <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">${isReemplazo ? (isRenovacion ? 'Renovación de Equipo' : 'Reemplazo de Equipo') : isPrestamo ? 'Préstamo de Equipo' : isIngresoNuevo ? 'Ingreso Nuevo — Asignación Inicial' : 'Asignación de Activo'}</h2>
-          <div style="font-size:11px;color:#64748b;margin-top:1px">${isReemplazo ? (isRenovacion ? 'Renovar equipo asignado a un colaborador' : 'Reemplazar equipo asignado a un colaborador') : isPrestamo ? 'Préstamo temporal de equipo a un colaborador' : isIngresoNuevo ? 'Asignar kit inicial a un colaborador nuevo sin equipo' : 'Asignar equipos del inventario a un colaborador'}</div>
+          <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">${isReposicionRobo ? 'Reposición por Robo' : isReposicionDano ? 'Reposición por Daño Físico' : isReemplazo ? (isRenovacion ? 'Renovación de Equipo' : 'Reemplazo de Equipo') : isPrestamo ? 'Préstamo de Equipo' : isIngresoNuevo ? 'Ingreso Nuevo — Asignación Inicial' : 'Asignación de Activo'}</h2>
+          <div style="font-size:11px;color:#64748b;margin-top:1px">${isReposicionRobo ? 'Reponer equipo robado y registrar el caso para control y trazabilidad' : isReposicionDano ? 'Reponer equipo dañado físicamente a un colaborador' : isReemplazo ? (isRenovacion ? 'Renovar equipo asignado a un colaborador' : 'Reemplazar equipo asignado a un colaborador') : isPrestamo ? 'Préstamo temporal de equipo a un colaborador' : isIngresoNuevo ? 'Asignar kit inicial a un colaborador nuevo sin equipo' : 'Asignar equipos del inventario a un colaborador'}</div>
         </div>
       </div>
 
@@ -3263,10 +3265,17 @@ function _renderAsignacionModal(fresh) {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
         <div>
           <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Motivo <span class="required">*</span></label>
+          ${isReposicionDano || isReposicionRobo ? `
+            <div style="height:38px;font-size:12px;font-weight:700;color:${isReposicionRobo ? '#4c1d95' : '#991b1b'};background:${isReposicionRobo ? '#f5f3ff' : '#fef2f2'};border:1px solid ${isReposicionRobo ? '#c4b5fd' : '#fecaca'};border-radius:8px;display:flex;align-items:center;padding:0 12px;gap:6px">
+              <span style="font-size:14px">${isReposicionRobo ? '🚨' : '🛠️'}</span> ${isReposicionRobo ? 'REPOSICIÓN ROBO' : 'REPOSICIÓN DAÑO FÍSICO'}
+            </div>
+            <input type="hidden" id="fAsigMotivo" value="${isReposicionRobo ? 'REPOSICIÓN ROBO' : 'REPOSICIÓN DAÑO FÍSICO'}">
+          ` : `
           <select class="form-control" id="fAsigMotivo" onchange="_onMotivoAsigChange()" style="height:38px;font-size:12px">
             <option value="">Seleccionar...</option>
             ${motivosAsig.map(m => `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
           </select>
+          `}
         </div>
         <div>
           <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
@@ -3339,7 +3348,7 @@ function _renderAsignacionModal(fresh) {
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
           <span style="font-size:14px">📦</span>
           <label style="font-size:13px;font-weight:700;color:#334155">Activos asignados al usuario</label>
-          <span style="font-size:11px;color:#94a3b8;margin-left:auto">Seleccione el equipo a reemplazar</span>
+          <span style="font-size:11px;color:#94a3b8;margin-left:auto">${isReposicionRobo ? 'Seleccione el equipo robado' : isReposicionDano ? 'Seleccione el equipo dañado a retirar' : 'Seleccione el equipo a reemplazar'}</span>
         </div>
         ${!c ? '<div style="padding:12px;text-align:center;color:#94a3b8;font-size:12px;background:#f8fafc;border-radius:8px">Primero seleccione un colaborador</div>' : reemAsigHTML && reemAsigHTML.startsWith('<tr') ? `
         <div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;margin-bottom:16px">
@@ -3361,7 +3370,7 @@ function _renderAsignacionModal(fresh) {
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-size:14px">${isReemplazo ? '🔄' : isIngresoNuevo ? '💻' : '💻'}</span>
-            <label style="font-size:13px;font-weight:700;color:#334155">${isReemplazo ? `Equipo nuevo (Stock ${reemTipoFiltro || ''})` : isIngresoNuevo ? 'Equipo Principal (EP-ADMIN)' : 'Activo a asignar (Inventario disponible)'} ${_asigSelectedActivos.length > 0 ? `<span style="font-size:11px;font-weight:500;color:#2563eb;margin-left:6px">${_asigSelectedActivos.length} seleccionado(s)</span>` : ''}</label>
+            <label style="font-size:13px;font-weight:700;color:#334155">${isReposicionRobo ? `Equipo de reposición (Stock ${reemTipoFiltro || ''})` : isReposicionDano ? `Equipo de reposición (Stock ${reemTipoFiltro || ''})` : isReemplazo ? `Equipo nuevo (Stock ${reemTipoFiltro || ''})` : isIngresoNuevo ? 'Equipo Principal (EP-ADMIN)' : 'Activo a asignar (Inventario disponible)'} ${_asigSelectedActivos.length > 0 ? `<span style="font-size:11px;font-weight:500;color:#2563eb;margin-left:6px">${_asigSelectedActivos.length} seleccionado(s)</span>` : ''}</label>
           </div>
           <span style="font-size:11px;color:#94a3b8">${filtered.length} equipo(s)</span>
         </div>
@@ -3462,7 +3471,7 @@ function _renderAsignacionModal(fresh) {
   `;
   const _asigFooterHTML = `
     <button class="btn btn-secondary" onclick="_asigCancelar()">Cancelar</button>
-    <button class="btn btn-primary" onclick="saveAsignacion()">${isReemplazo ? (isRenovacion ? 'Confirmar Renovación' : 'Confirmar Reemplazo') : isPrestamo ? 'Confirmar Préstamo' : isIngresoNuevo ? 'Confirmar Ingreso Nuevo' : 'Confirmar Asignación'}</button>
+    <button class="btn btn-primary" onclick="saveAsignacion()" ${isReposicionRobo ? 'style="background:#7c3aed;border-color:#7c3aed"' : isReposicionDano ? 'style="background:#dc2626;border-color:#dc2626"' : ''}>${isReposicionRobo ? 'Confirmar Reposición por Robo' : isReposicionDano ? 'Confirmar Reposición' : isReemplazo ? (isRenovacion ? 'Confirmar Renovación' : 'Confirmar Reemplazo') : isPrestamo ? 'Confirmar Préstamo' : isIngresoNuevo ? 'Confirmar Ingreso Nuevo' : 'Confirmar Asignación'}</button>
   `;
   // Si el modal ya está abierto, solo actualizar contenido sin re-abrir (evita flash)
   if (document.getElementById('modalOverlay').classList.contains('show')) {
@@ -4331,7 +4340,9 @@ function saveAsignacion() {
   const motivo = (document.getElementById('fAsigMotivo') || {}).value || _asigMotivo;
   const obs = ((document.getElementById('fAsigObs') || {}).value || _asigObs || '').trim();
   const _motSaveUp = (motivo || '').toUpperCase();
-  const isReemplazo = _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION');
+  const isReposicionDano = _motSaveUp.includes('REPOSICIÓN DAÑO FÍSICO') || _motSaveUp.includes('REPOSICION DANO FISICO');
+  const isReposicionRobo = _motSaveUp.includes('REPOSICIÓN ROBO') || _motSaveUp.includes('REPOSICION ROBO');
+  const isReemplazo = _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || isReposicionDano || isReposicionRobo;
   const isRenovacion = _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION');
   const isPrestamo = _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO');
   const isIngresoNuevo = _motSaveUp.includes('INGRESO NUEVO');
@@ -4342,7 +4353,7 @@ function saveAsignacion() {
   if (!motivo) { showToast('Seleccione el motivo de asignación', 'error'); return; }
   if (isPrestamo && !fechaFinPrestamo) { showToast('Ingrese la fecha fin de préstamo', 'error'); return; }
   if (isPrestamo && fechaFinPrestamo < today()) { showToast('La fecha fin de préstamo debe ser mayor o igual a hoy', 'error'); return; }
-  if (isReemplazo && !_asigReemOld) { showToast('Seleccione el equipo a reemplazar', 'error'); return; }
+  if (isReemplazo && !_asigReemOld) { showToast(isReposicionRobo ? 'Seleccione el equipo robado' : isReposicionDano ? 'Seleccione el equipo dañado a retirar' : 'Seleccione el equipo a reemplazar', 'error'); return; }
   if (_asigSelectedActivos.length === 0) { showToast('Seleccione al menos un equipo principal' + (isReemplazo ? ' nuevo' : ''), 'error'); return; }
 
   const activos = DB.get('activos');
@@ -4355,7 +4366,7 @@ function saveAsignacion() {
     if (oldRec) {
       oldRec.pendienteRetorno = true;
       oldRec.fechaReemplazo = fecha;
-      oldRec.motivoReemplazo = isRenovacion ? 'RENOVACIÓN' : 'REEMPLAZO';
+      oldRec.motivoReemplazo = isReposicionRobo ? 'REPOSICIÓN ROBO' : isReposicionDano ? 'REPOSICIÓN DAÑO FÍSICO' : isRenovacion ? 'RENOVACIÓN' : 'REEMPLAZO';
       oldRec.ticketReemplazo = ticket.toUpperCase();
     }
   }
@@ -4448,7 +4459,7 @@ function saveAsignacion() {
   const _totalEquipos = _asigSelectedActivos.length + (isIngresoNuevo ? _asigSelectedAccesorios.length : 0);
 
   if (isReemplazo) {
-    const _movTipo = isRenovacion ? 'Renovación' : 'Reemplazo';
+    const _movTipo = isReposicionRobo ? 'Reposición Robo' : isReposicionDano ? 'Reposición Daño Físico' : isRenovacion ? 'Renovación' : 'Reemplazo';
     addMovimiento(_movTipo, `${_movTipo} de equipo para ${colab.nombre} [${ticket}]`);
   } else if (isIngresoNuevo) {
     addMovimiento('Ingreso Nuevo', `${_totalEquipos} activo(s) asignados (kit inicial) a ${colab.nombre} [${ticket}]`);
@@ -4470,7 +4481,7 @@ function saveAsignacion() {
       inv: _act.codInventario || '',
       correo: colab.email || '',
       ticket: ticket || '',
-      motivo: _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO') ? motivo : ''
+      motivo: _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO') || isReposicionDano || isReposicionRobo ? motivo : ''
     });
   });
 
@@ -4495,7 +4506,7 @@ function saveAsignacion() {
   }
 
   closeModal();
-  showToast(isIngresoNuevo ? `Kit inicial (${_totalEquipos} activo(s)) asignado correctamente` : isReemplazo ? (isRenovacion ? 'Renovación realizada correctamente' : 'Reemplazo realizado correctamente') : isPrestamo ? 'Préstamo registrado correctamente' : `${_asigSelectedActivos.length} activo(s) asignados correctamente`);
+  showToast(isIngresoNuevo ? `Kit inicial (${_totalEquipos} activo(s)) asignado correctamente` : isReposicionRobo ? 'Reposición por robo registrada correctamente' : isReposicionDano ? 'Reposición por daño físico realizada correctamente' : isReemplazo ? (isRenovacion ? 'Renovación realizada correctamente' : 'Reemplazo realizado correctamente') : isPrestamo ? 'Préstamo registrado correctamente' : `${_asigSelectedActivos.length} activo(s) asignados correctamente`);
   _asigSelectedColab = null;
   _asigSelectedActivos = [];
   _asigSelectedAccesorios = [];
@@ -4528,7 +4539,9 @@ function previewActaEntrega(asigId) {
   const activoPrincipal = activos.find(a => a.id === grupo[0].activoId) || {};
 
   const isReposicion = (record.tipoAsignacion || '').toLowerCase().includes('reemplazo') ||
-                       (record.tipoAsignacion || '').toLowerCase().includes('renovación');
+                       (record.tipoAsignacion || '').toLowerCase().includes('renovación') ||
+                       (record.tipoAsignacion || '').toLowerCase().includes('reposición daño físico') ||
+                       (record.tipoAsignacion || '').toLowerCase().includes('reposición robo');
 
   // Build equipment rows (up to 4)
   let equipRows = '';
@@ -4558,7 +4571,7 @@ function previewActaEntrega(asigId) {
     const _devueltos = _allAsig.filter(a =>
       a.colaboradorId === record.colaboradorId &&
       (a.ticketReemplazo === record.ticket || a.ticketCese === record.ticket) &&
-      (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN')))
+      (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
     );
     if (_devueltos.length > 0) {
       let devRows = '';
@@ -4607,7 +4620,7 @@ function _buildActaPrintHTML(record, colab, grupo, activos, activoPrincipal, equ
     const _devueltos = _allAsig.filter(a =>
       a.colaboradorId === record.colaboradorId &&
       (a.ticketReemplazo === record.ticket || a.ticketCese === record.ticket) &&
-      (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN')))
+      (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
     );
     if (_devueltos.length > 0) {
       let devRows = '';
@@ -4742,10 +4755,12 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
   `).join('');
 
   const _detTipoUp = (first.tipoAsignacion || first.motivo || '').toUpperCase();
+  const _esReposDano = _detTipoUp.includes('REPOSICIÓN DAÑO FÍSICO') || _detTipoUp.includes('REPOSICION DANO FISICO');
+  const _esReposRobo = _detTipoUp.includes('REPOSICIÓN ROBO') || _detTipoUp.includes('REPOSICION ROBO');
   const _esRenov = _detTipoUp.includes('RENOVACIÓN') || _detTipoUp.includes('RENOVACION');
-  const _esReem = _detTipoUp.includes('REEMPLAZO');
+  const _esReem = _detTipoUp.includes('REEMPLAZO') || _esReposDano || _esReposRobo;
   const _esPrest = _detTipoUp.includes('PRÉSTAMO') || _detTipoUp.includes('PRESTAMO');
-  const _detTitle = _esRenov ? 'Detalle de Renovación' : _esReem ? 'Detalle de Reemplazo' : _esPrest ? 'Detalle de Préstamo' : 'Detalle de Asignación';
+  const _detTitle = _esReposRobo ? 'Detalle de Reposición por Robo' : _esReposDano ? 'Detalle de Reposición por Daño Físico' : _esRenov ? 'Detalle de Renovación' : _esReem ? 'Detalle de Reemplazo' : _esPrest ? 'Detalle de Préstamo' : 'Detalle de Asignación';
 
   openModal(_detTitle, `
     <div style="display:flex;flex-direction:column;gap:16px">
@@ -4782,12 +4797,14 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
 
       ${(() => {
         const _detMotUp = (first.tipoAsignacion || first.motivo || '').toUpperCase();
-        const esReemplazo = _detMotUp.includes('REEMPLAZO') || _detMotUp.includes('RENOVACIÓN') || _detMotUp.includes('RENOVACION');
-        // Buscar equipo reportado por este reemplazo (pendienteRetorno o ya devuelto)
+        const _esReposDanoD = _detMotUp.includes('REPOSICIÓN DAÑO FÍSICO') || _detMotUp.includes('REPOSICION DANO FISICO');
+        const _esReposRoboD = _detMotUp.includes('REPOSICIÓN ROBO') || _detMotUp.includes('REPOSICION ROBO');
+        const esReemplazo = _detMotUp.includes('REEMPLAZO') || _detMotUp.includes('RENOVACIÓN') || _detMotUp.includes('RENOVACION') || _esReposDanoD || _esReposRoboD;
+        // Buscar equipo reportado por este reemplazo/reposición (pendienteRetorno o ya devuelto)
         const devueltos = esReemplazo ? asignaciones.filter(a =>
           a.colaboradorId === colabId &&
           (a.ticketReemplazo === first.ticket || a.ticketCese === first.ticket) &&
-          (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN')))
+          (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
         ) : [];
 
         if (esReemplazo && devueltos.length > 0) {
@@ -4800,7 +4817,7 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
           };
           return `
           <div>
-            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#dc2626">Equipo a Devolver (Equipo Anterior)</label>
+            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#dc2626">${_esReposRoboD ? 'Equipo Robado' : _esReposDanoD ? 'Equipo Dañado (Retiro por Daño Físico)' : 'Equipo a Devolver (Equipo Anterior)'}</label>
             <div class="table-scroll">
               <table>
                 <thead><tr style="background:#fef2f2">
@@ -4824,7 +4841,7 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
           </div>
 
           <div>
-            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#16a34a">Equipo Entregado (Equipo Nuevo)</label>
+            <label style="font-size:13px;font-weight:600;margin-bottom:8px;display:block;color:#16a34a">${_esReposDanoD ? 'Equipo de Reposición (Equipo Nuevo)' : 'Equipo Entregado (Equipo Nuevo)'}</label>
             <div class="table-scroll">
               <table>
                 <thead><tr style="background:#f0fdf4">
@@ -4920,7 +4937,7 @@ function deleteAsignacionGrupo(ticket, colabId, fecha) {
   grupo.forEach(a => {
     const _delTipo = (a.tipoAsignacion || '').toUpperCase();
     const _delMot = (a.motivo || '').toUpperCase();
-    const _esReemORenov = _delTipo === 'REEMPLAZO' || _delTipo === 'RENOVACIÓN' || _delMot === 'REEMPLAZO' || _delMot === 'RENOVACIÓN';
+    const _esReemORenov = _delTipo === 'REEMPLAZO' || _delTipo === 'RENOVACIÓN' || _delTipo === 'REPOSICIÓN DAÑO FÍSICO' || _delTipo === 'REPOSICIÓN ROBO' || _delMot === 'REEMPLAZO' || _delMot === 'RENOVACIÓN' || _delMot === 'REPOSICIÓN DAÑO FÍSICO' || _delMot === 'REPOSICIÓN ROBO';
     if (_esReemORenov) {
       // Buscar asignaciones anteriores marcadas con pendienteRetorno por este ticket
       asigFinal.forEach(prev => {
@@ -5028,7 +5045,7 @@ function _ejecutarDevSingle(asigId) {
       serie: a.serieAsignada || '',
       inv: activo.codInventario || '',
       correo: a.correoColab || '',
-      motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO'].includes((a.tipoAsignacion || a.motivo || '').toUpperCase())) ? (a.tipoAsignacion || a.motivo) : ''
+      motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((a.tipoAsignacion || a.motivo || '').toUpperCase())) ? (a.tipoAsignacion || a.motivo) : ''
     });
   }
 
@@ -5446,7 +5463,7 @@ function _ejecutarDevolucion(colabId) {
         serie: item.serie || '',
         inv: _devActivo.codInventario || '',
         correo: c ? (c.email || '') : '',
-        motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO'].includes((item.motivo || '').toUpperCase())) ? item.motivo : ''
+        motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((item.motivo || '').toUpperCase())) ? item.motivo : ''
       });
     }
   });
@@ -6389,11 +6406,12 @@ function renderInventario(el) {
     </div>
 
     <div class="table-toolbar">
-      <div class="search-box">
+      <div class="search-box" style="position:relative">
         <span class="search-icon">🔍</span>
         <input type="text" id="invSearchInput" placeholder="Buscar por sede, tipo, marca, serie, colaborador..."
                value="${esc(invSearch)}"
                oninput="_onInvSearch(this.value)">
+        <span id="invSearchClear" onclick="_clearInvSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${invSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
       </div>
     </div>
 
@@ -6404,9 +6422,21 @@ function renderInventario(el) {
 
 function _onInvSearch(val) {
   invSearch = val;
+  const clearBtn = document.getElementById('invSearchClear');
+  if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
   resetPage('inventario');
   clearTimeout(_invSearchTimer);
   _invSearchTimer = setTimeout(_renderInvTable, 120);
+}
+
+function _clearInvSearch() {
+  invSearch = '';
+  const inp = document.getElementById('invSearchInput');
+  if (inp) inp.value = '';
+  const clearBtn = document.getElementById('invSearchClear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  resetPage('inventario');
+  _renderInvTable();
 }
 
 function _renderInvTable() {
@@ -7132,11 +7162,11 @@ function renderPendientesRetorno(el) {
                     <td><strong>${esc(a.activoTipo || '')}</strong> — ${esc(a.activoCodigo || '')}</td>
                     <td>${esc(a.activoMarca || '')} ${esc(a.activoModelo || '')}</td>
                     <td style="font-family:monospace;font-size:11px">${esc(a.serieAsignada || '—')}</td>
-                    <td><span class="badge ${a._motivo === 'REEMPLAZO' || a._motivo === 'RENOVACIÓN' ? 'badge-info' : 'badge-warning'}" style="font-size:10px">${esc(a._motivo)}</span></td>
+                    <td><span class="badge ${a._motivo === 'REPOSICIÓN ROBO' ? 'badge-danger' : a._motivo === 'REPOSICIÓN DAÑO FÍSICO' ? 'badge-warning' : a._motivo === 'REEMPLAZO' || a._motivo === 'RENOVACIÓN' ? 'badge-info' : 'badge-warning'}" style="font-size:10px">${esc(a._motivo)}</span></td>
                     <td>${esc(a.colaboradorNombre || '')}</td>
-                    <td>${formatDate(a._motivo === 'REEMPLAZO' || a._motivo === 'RENOVACIÓN' ? a.fechaReemplazo || a.fechaAsignacion : a.fechaAsignacion)}</td>
+                    <td>${formatDate(['REEMPLAZO','RENOVACIÓN','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes(a._motivo) ? a.fechaReemplazo || a.fechaAsignacion : a.fechaAsignacion)}</td>
                     <td><span class="badge badge-warning" style="font-size:10px"><span class="badge-dot"></span>Pendiente</span></td>
-                    <td><button class="btn btn-sm btn-success" onclick="confirmarRetorno(${a.id},'${a._motivo}')">Confirmar Retorno</button></td>
+                    <td><button class="btn btn-sm ${a._motivo === 'REPOSICIÓN ROBO' ? 'btn-danger' : 'btn-success'}" onclick="confirmarRetorno(${a.id},'${esc(a._motivo)}')">${a._motivo === 'REPOSICIÓN ROBO' ? 'Registrar Baja por Robo' : 'Confirmar Retorno'}</button></td>
                   </tr>`;
                 }).join('')
             }
@@ -7154,6 +7184,7 @@ let _retornoMotivo = '';
 function confirmarRetorno(asigId, motivo) {
   _retornoAsigId = asigId;
   _retornoMotivo = motivo;
+  _retornoDenunciaFile = null;
 
   const asignaciones = DB.get('asignaciones');
   const activos = DB.get('activos');
@@ -7161,14 +7192,21 @@ function confirmarRetorno(asigId, motivo) {
   if (!rec) return;
   const act = activos.find(a => a.id === rec.activoId);
 
+  const _esRobo = (motivo || '').toUpperCase().includes('REPOSICIÓN ROBO');
+
   const PARTES_EQUIPO = ['BACKCOVER','TOPCOVER','BASE COVER','PANTALLA','TECLADO','PUERTO USB','PLACA MADRE','CAMARA','PARLANTE','TOUCH PAD','DISCO DURO','RAM','BISAGRAS','VENTILADOR','OTRO'];
 
-  openModal('Confirmar Retorno', `
+  openModal(_esRobo ? 'Baja por Robo' : 'Confirmar Retorno', `
     <div style="display:flex;flex-direction:column;gap:16px">
+      ${_esRobo ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;font-size:12px;color:#991b1b;display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px">🚨</span>
+        <span><strong>Reposición por Robo</strong> — El equipo no será retornado físicamente. Este proceso registra la baja del activo robado. Se requiere adjuntar la denuncia de robo.</span>
+      </div>` : ''}
+
       <!-- Info del equipo -->
-      <div style="background:#f8fafc;border-radius:8px;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="background:${_esRobo ? '#fef2f2' : '#f8fafc'};border-radius:8px;padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div>
-          <div style="font-size:10px;color:#64748b;text-transform:uppercase">Equipo</div>
+          <div style="font-size:10px;color:#64748b;text-transform:uppercase">${_esRobo ? 'Equipo Robado' : 'Equipo'}</div>
           <div style="font-size:13px;font-weight:700">${esc(rec.activoTipo || '')} — ${esc(rec.activoCodigo || '')}</div>
         </div>
         <div>
@@ -7185,6 +7223,31 @@ function confirmarRetorno(asigId, motivo) {
         </div>
       </div>
 
+      ${_esRobo ? `
+      <!-- ROBO: Denuncia obligatoria -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#991b1b;margin-bottom:6px;display:block">🚨 Denuncia de Robo <span class="required">*</span></label>
+        <div id="retornoDenunciaWrap" style="border:2px dashed #fecaca;border-radius:8px;padding:16px;text-align:center;background:#fff;cursor:pointer;transition:all .15s"
+          onclick="document.getElementById('retornoDenunciaInput').click()"
+          onmouseover="this.style.borderColor='#ef4444';this.style.background='#fef2f2'"
+          onmouseout="this.style.borderColor='#fecaca';this.style.background='#fff'">
+          <input type="file" id="retornoDenunciaInput" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" style="display:none" onchange="_onRetornoDenunciaChange(this)">
+          <div id="retornoDenunciaLabel" style="color:#94a3b8;font-size:12px">
+            <div style="font-size:24px;margin-bottom:4px">📎</div>
+            Haga clic para adjuntar la denuncia de robo<br>
+            <span style="font-size:10px;color:#cbd5e1">PDF, JPG, PNG, DOC — máx. 5MB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ROBO: Estado fijo BAJA -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Estado CMDB</label>
+        <div style="height:38px;font-size:12px;font-weight:700;color:#dc2626;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;display:flex;align-items:center;padding:0 12px;gap:6px">
+          <span style="font-size:14px">⛔</span> BAJA
+        </div>
+      </div>
+      ` : `
       <!-- Almacén destino -->
       <div style="max-width:280px">
         <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Almacén de retorno <span class="required">*</span></label>
@@ -7212,6 +7275,7 @@ function confirmarRetorno(asigId, motivo) {
           </button>
         </div>
       </div>
+      `}
 
       <!-- Estado Equipo (dinámico) -->
       <div id="retornoEstadoEquipoSection" style="display:none">
@@ -7235,23 +7299,51 @@ function confirmarRetorno(asigId, motivo) {
       <!-- Observaciones -->
       <div>
         <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones <span class="required">*</span></label>
-        <textarea id="retornoObs" class="form-control" rows="3" placeholder="Describa el estado en que se recibe el equipo..." style="font-size:12px;resize:vertical"></textarea>
+        <textarea id="retornoObs" class="form-control" rows="3" placeholder="${_esRobo ? 'Describa las circunstancias del robo, lugar, fecha del incidente...' : 'Describa el estado en que se recibe el equipo...'}" style="font-size:12px;resize:vertical"></textarea>
       </div>
     </div>
   `, `
     <button class="btn btn-secondary" onclick="closeModal();navigateTo('bitacora','pendientesRetorno')">Cancelar</button>
-    <button class="btn btn-primary" onclick="_ejecutarRetorno()">Confirmar Retorno</button>
+    <button class="btn ${_esRobo ? 'btn-danger' : 'btn-primary'}" onclick="_ejecutarRetorno()">${_esRobo ? 'Confirmar Baja por Robo' : 'Confirmar Retorno'}</button>
   `, 'modal-lg');
+
+  // Si es robo, auto-seleccionar BAJA como estado CMDB
+  if (_esRobo) {
+    _retornoCmdb = 'Baja';
+    _retornoEstadoEq = 'ROBO';
+  }
 }
 
 let _retornoCmdb = '';
 let _retornoEstadoEq = '';
+let _retornoDenunciaFile = null;
 
 const _RETORNO_ESTADOS = {
   'Disponible':       ['NUEVO', 'USADO'],
   'En Mantenimiento': ['GARANTÍA', 'REPARACIÓN'],
-  'Baja':             ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN']
+  'Baja':             ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN', 'ROBO']
 };
+
+function _onRetornoDenunciaChange(input) {
+  const file = input.files && input.files[0];
+  const label = document.getElementById('retornoDenunciaLabel');
+  const wrap = document.getElementById('retornoDenunciaWrap');
+  if (!file) {
+    _retornoDenunciaFile = null;
+    if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">📎</div>Haga clic para adjuntar la denuncia de robo<br><span style="font-size:10px;color:#cbd5e1">PDF, JPG, PNG, DOC — máx. 5MB</span>';
+    if (wrap) { wrap.style.borderColor = '#fecaca'; wrap.style.background = '#fff'; }
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    showToast('El archivo excede 5MB', 'error');
+    input.value = '';
+    _retornoDenunciaFile = null;
+    return;
+  }
+  _retornoDenunciaFile = file;
+  if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">✅</div><strong>' + esc(file.name) + '</strong><br><span style="font-size:10px;color:#10b981">Archivo adjunto correctamente — clic para cambiar</span>';
+  if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
+}
 
 function _retornoSelectCmdb(val) {
   _retornoCmdb = val;
@@ -7295,10 +7387,12 @@ function _retornoSelectEstadoEq(val) {
 }
 
 function _ejecutarRetorno() {
-  const almacen = (document.getElementById('retornoAlmacen') || {}).value || '';
-  if (!almacen) { showToast('Seleccione el almacén de retorno', 'error'); return; }
+  const _esRoboRet = (_retornoMotivo || '').toUpperCase().includes('REPOSICIÓN ROBO');
+  const almacen = _esRoboRet ? '' : ((document.getElementById('retornoAlmacen') || {}).value || '');
+  if (!_esRoboRet && !almacen) { showToast('Seleccione el almacén de retorno', 'error'); return; }
   if (!_retornoCmdb) { showToast('Seleccione el estado CMDB', 'error'); return; }
   if (!_retornoEstadoEq) { showToast('Seleccione el estado del equipo', 'error'); return; }
+  if (_esRoboRet && !_retornoDenunciaFile) { showToast('Debe adjuntar la denuncia de robo para confirmar la baja', 'error'); return; }
   const obs = (document.getElementById('retornoObs') || {}).value || '';
   if (!obs.trim()) { showToast('Ingrese las observaciones', 'error'); return; }
 
@@ -7315,11 +7409,15 @@ function _ejecutarRetorno() {
   rec.estado = 'Devuelto';
   rec.pendienteRetorno = false;
   rec.fechaCese = today();
-  rec.motivoCese = _retornoMotivo === 'REEMPLAZO' ? 'REEMPLAZO' : _retornoMotivo === 'RENOVACIÓN' ? 'RENOVACIÓN' : 'RETORNO POR CESE';
+  rec.motivoCese = _retornoMotivo === 'REPOSICIÓN ROBO' ? 'REPOSICIÓN ROBO' : _retornoMotivo === 'REPOSICIÓN DAÑO FÍSICO' ? 'REPOSICIÓN DAÑO FÍSICO' : _retornoMotivo === 'REEMPLAZO' ? 'REEMPLAZO' : _retornoMotivo === 'RENOVACIÓN' ? 'RENOVACIÓN' : 'RETORNO POR CESE';
   rec.retornoObs = obs.trim();
   rec.retornoEstadoCmdb = _retornoCmdb;
   rec.retornoEstadoEquipo = _retornoEstadoEq;
   if (partes.length) rec.retornoPartes = partes;
+  if (_esRoboRet && _retornoDenunciaFile) {
+    rec.denunciaRobo = _retornoDenunciaFile.name;
+    rec.denunciaRoboFecha = today();
+  }
 
   // Actualizar activo
   const activo = activos.find(a => a.id === rec.activoId);
@@ -7327,8 +7425,9 @@ function _ejecutarRetorno() {
     activo.estado = _retornoCmdb;
     activo.estadoEquipo = _retornoEstadoEq;
     activo.obsRetorno = obs.trim();
-    activo.ubicacion = almacen;
+    if (!_esRoboRet) activo.ubicacion = almacen;
     if (partes.length) activo.partesAfectadas = partes.join(', ');
+    if (_esRoboRet) activo.motivoBaja = 'ROBO';
     if (_retornoCmdb === 'Disponible' || _retornoCmdb === 'Baja') {
       const otrasVigentes = asignaciones.filter(a => a.activoId === activo.id && a.estado === 'Vigente' && a.id !== rec.id).length;
       if (otrasVigentes === 0) activo.responsable = '';
@@ -7337,25 +7436,25 @@ function _ejecutarRetorno() {
 
   DB.set('asignaciones', asignaciones);
   DB.set('activos', activos);
-  addMovimiento('Retorno', `Retorno de ${rec.activoCodigo || 'activo'} → ${_retornoCmdb} / ${_retornoEstadoEq}${partes.length ? ' [' + partes.join(', ') + ']' : ''}`);
+  addMovimiento(_esRoboRet ? 'Baja por Robo' : 'Retorno', _esRoboRet ? `Baja por robo de ${rec.activoCodigo || 'activo'} — Denuncia: ${_retornoDenunciaFile ? _retornoDenunciaFile.name : '—'}` : `Retorno de ${rec.activoCodigo || 'activo'} → ${_retornoCmdb} / ${_retornoEstadoEq}${partes.length ? ' [' + partes.join(', ') + ']' : ''}`);
 
-  // Auto-registrar en bitácora: INGRESO (equipo retornado a almacén)
+  // Auto-registrar en bitácora
   if (activo) {
     _autoBitacora({
-      movimiento: 'INGRESO',
-      almacen: (almacen || 'Almacen TI'),
+      movimiento: _esRoboRet ? 'BAJA' : 'INGRESO',
+      almacen: _esRoboRet ? 'N/A — ROBO' : (almacen || 'Almacen TI'),
       tipoEquipo: activo.tipo || rec.activoTipo || '',
       equipo: activo.equipo || activo.tipo || '',
       modelo: activo.modelo || rec.activoModelo || '',
       serie: rec.serieAsignada || '',
       inv: activo.codInventario || '',
       correo: rec.correoColab || '',
-      motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO'].includes((rec.tipoAsignacion || rec.motivo || '').toUpperCase())) ? (rec.tipoAsignacion || rec.motivo) : ''
+      motivo: _esRoboRet ? 'REPOSICIÓN ROBO' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((rec.tipoAsignacion || rec.motivo || '').toUpperCase())) ? (rec.tipoAsignacion || rec.motivo) : ''
     });
   }
 
   closeModal();
-  showToast('Retorno confirmado correctamente');
+  showToast(_esRoboRet ? 'Baja por robo registrada correctamente' : 'Retorno confirmado correctamente');
   navigateTo('bitacora', 'pendientesRetorno');
 }
 
