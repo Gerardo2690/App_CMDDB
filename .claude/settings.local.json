@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c c:/App_CMDDB/js/app.js)"
+    ]
+  }
+}

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Gestión de Activos TI</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════
+       LOGIN SCREEN
+       ═══════════════════════════════════════════ -->
+  <div class="login-screen" id="loginScreen">
+    <div class="login-left">
+      <div class="login-left-content">
+        <div class="login-brand">
+          <div class="login-brand-icon">AT</div>
+          <div>
+            <div class="login-brand-name">Activos TI</div>
+            <div class="login-brand-sub">Asset Management</div>
+          </div>
+        </div>
+        <h1 class="login-welcome">Bienvenido.</h1>
+        <p class="login-welcome-sub">Sistema de Gestión de Activos TI<br>Administra tus equipos, tiendas y colaboradores en un solo lugar.</p>
+        <div class="login-decorative">
+          <div class="login-circle login-circle-1"></div>
+          <div class="login-circle login-circle-2"></div>
+          <div class="login-circle login-circle-3"></div>
+        </div>
+      </div>
+    </div>
+    <div class="login-right">
+      <div class="login-form-container">
+        <div class="login-avatar">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+        </div>
+        <h2 class="login-title">Iniciar Sesión</h2>
+        <p class="login-subtitle">Ingresa tus credenciales para acceder</p>
+        <div class="login-form">
+          <div class="login-field">
+            <span class="login-field-icon">👤</span>
+            <input type="text" id="loginUser" placeholder="Usuario" autocomplete="username" onkeydown="if(event.key==='Enter')doLogin()">
+          </div>
+          <div class="login-field">
+            <span class="login-field-icon">🔒</span>
+            <input type="password" id="loginPass" placeholder="Contraseña" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
+          </div>
+          <div id="loginError" class="login-error" style="display:none"></div>
+          <button class="login-btn" onclick="doLogin()">Ingresar</button>
+        </div>
+        <div class="login-footer-text">
+          <span>🔒</span> Acceso restringido a personal autorizado
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       APP WRAPPER (hidden until login)
+       ═══════════════════════════════════════════ -->
+  <div class="app-wrapper" id="appWrapper" style="display:none">
+
+  <!-- ═══════════════════════════════════════════
+       SIDEBAR
+       ═══════════════════════════════════════════ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <div class="logo-icon">AT</div>
+        <div>
+          <div class="logo-text">Activos TI</div>
+          <div class="logo-sub">Asset Management</div>
+        </div>
+      </div>
+    </div>
+    <nav class="sidebar-nav" id="sidebarNav"></nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-user" style="justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="avatar" id="sidebarAvatar">GR</div>
+          <div class="user-info">
+            <div class="user-name" id="sidebarUserName">Gerardo R.</div>
+            <div class="user-role" id="sidebarUserRole">Administrador</div>
+          </div>
+        </div>
+        <button onclick="doLogout()" title="Cerrar Sesión" style="background:none;border:none;color:var(--sidebar-text);cursor:pointer;font-size:16px;padding:4px;border-radius:6px;transition:all 0.2s" onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='var(--sidebar-text)'">🚪</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ═══════════════════════════════════════════
+       MAIN CONTENT
+       ═══════════════════════════════════════════ -->
+  <main class="main">
+    <div class="topbar">
+      <div class="topbar-left">
+        <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Ocultar / Mostrar menú">
+          <span class="burger-line"></span>
+          <span class="burger-line"></span>
+          <span class="burger-line"></span>
+        </button>
+        <div class="breadcrumb" id="breadcrumb">
+          <span>Inicio</span>
+          <span class="separator">›</span>
+          <span class="current">Dashboard 1</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <button class="topbar-btn" title="Notificaciones">🔔<span class="badge"></span></button>
+        <button class="topbar-btn" title="Configuración" onclick="navigateTo('configuracion','parametros')">⚙️</button>
+      </div>
+    </div>
+    <div class="content" id="contentArea"></div>
+  </main>
+
+  <!-- ═══════════════════════════════════════════
+       MODAL
+       ═══════════════════════════════════════════ -->
+  <div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)closeModal()">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <h2 id="modalTitle">Modal</h2>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-footer" id="modalFooter"></div>
+    </div>
+  </div>
+
+  </div><!-- /app-wrapper -->
+
+  <!-- TOAST CONTAINER -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- JAVASCRIPT -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>
