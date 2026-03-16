@@ -3130,13 +3130,13 @@ function _renderAsignacionModal(fresh) {
   let accIsLast = true;
   if (isIngresoNuevo) {
     let accStock = stock.filter(r => !_TIPOS_EP_ADMIN.includes(r.tipo));
-    if (_asigAccTipo !== 'Todos') accStock = accStock.filter(r => r.tipo === _asigAccTipo);
+    if (_asigAccTipo !== 'Todos') accStock = accStock.filter(r => (r.equipo || r.tipo) === _asigAccTipo);
     if (_asigAccSearch) {
       const sa = _asigAccSearch.toLowerCase();
-      accStock = accStock.filter(r => r.codigo.toLowerCase().includes(sa) || r.modelo.toLowerCase().includes(sa) || r.serie.toLowerCase().includes(sa) || r.marca.toLowerCase().includes(sa));
+      accStock = accStock.filter(r => r.codigo.toLowerCase().includes(sa) || r.modelo.toLowerCase().includes(sa) || r.serie.toLowerCase().includes(sa) || r.marca.toLowerCase().includes(sa) || (r.equipo||'').toLowerCase().includes(sa));
     }
     accFiltered = accStock;
-    accTipos = ['Todos', ...new Set(stock.filter(r => !_TIPOS_EP_ADMIN.includes(r.tipo)).map(r => r.tipo))];
+    accTipos = ['Todos', ...new Set(stock.filter(r => !_TIPOS_EP_ADMIN.includes(r.tipo)).map(r => r.equipo || r.tipo))];
     accTotalPages = Math.ceil(accFiltered.length / _ASIG_PAGE_SIZE) || 1;
     if (_asigAccPage >= accTotalPages) _asigAccPage = accTotalPages - 1;
     if (_asigAccPage < 0) _asigAccPage = 0;
@@ -3259,7 +3259,22 @@ function _renderAsignacionModal(fresh) {
         </div>
       </div>
 
-      <!-- Row 2: Colaborador -->
+      <!-- Row 2: Motivo + Observaciones -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Motivo <span class="required">*</span></label>
+          <select class="form-control" id="fAsigMotivo" onchange="_onMotivoAsigChange()" style="height:38px;font-size:12px">
+            <option value="">Seleccionar...</option>
+            ${motivosAsig.map(m => `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
+          <input class="form-control" id="fAsigObs" placeholder="Ingrese observaciones aquí..." value="${esc(_asigObs)}" style="height:38px;font-size:12px">
+        </div>
+      </div>
+
+      <!-- Row 3: Colaborador -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
         <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
@@ -3299,21 +3314,6 @@ function _renderAsignacionModal(fresh) {
         <span style="font-size:14px">ℹ️</span>
         <span>Solo se muestran colaboradores activos <strong>sin equipo principal asignado</strong> (laptop/desktop). Los nuevos colaboradores deben registrarse primero en el <strong>Padrón de Colaboradores</strong>.</span>
       </div>` : ''}
-
-      <!-- Row 3: Motivo + Observaciones -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
-        <div>
-          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Motivo <span class="required">*</span></label>
-          <select class="form-control" id="fAsigMotivo" onchange="_onMotivoAsigChange()" style="height:38px;font-size:12px">
-            <option value="">Seleccionar...</option>
-            ${motivosAsig.map(m => `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
-          </select>
-        </div>
-        <div>
-          <label style="font-size:11px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
-          <input class="form-control" id="fAsigObs" placeholder="Ingrese observaciones aquí..." value="${esc(_asigObs)}" style="height:38px;font-size:12px">
-        </div>
-      </div>
 
       <!-- Row 3b: Fecha fin de préstamo (solo para PRÉSTAMO) -->
       ${isPrestamo ? `
@@ -3427,7 +3427,7 @@ function _renderAsignacionModal(fresh) {
               oninput="_asigAccSearch=this.value;_asigAccPage=0;_renderAsignacionModal()" style="border:none;flex:1;height:100%;font-size:12px;outline:none;background:transparent">
           </div>
           <select onchange="_asigAccTipo=this.value;_asigAccPage=0;_renderAsignacionModal()" style="border:1px solid #e2e8f0;border-radius:8px;padding:0 10px;font-size:11px;color:#334155;height:36px;min-width:130px;cursor:pointer">
-            ${accTipos.map(t => `<option value="${esc(t)}" ${_asigAccTipo===t?'selected':''}>${esc(t)}${t!=='Todos'?' ('+accFiltered.filter(r=>r.tipo===t).length+')':''}</option>`).join('')}
+            ${accTipos.map(t => `<option value="${esc(t)}" ${_asigAccTipo===t?'selected':''}>${esc(t)}${t!=='Todos'?' ('+accFiltered.filter(r=>(r.equipo||r.tipo)===t).length+')':''}</option>`).join('')}
           </select>
         </div>
 
