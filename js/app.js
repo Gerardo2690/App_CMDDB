@@ -147,7 +147,7 @@ function initSampleData() {
   if (!DB.getConfig('estados', null))
     DB.setConfig('estados', ['Disponible', 'Asignado', 'En Mantenimiento', 'Dado de Baja']);
   if (!DB.getConfig('ubicaciones', null))
-    DB.setConfig('ubicaciones', ['ALMACÉN SAN BORJA', 'ALMACÉN NORTE', 'ALMACÉN SUR', 'ALMACÉN CENTRAL', 'DATA CENTER']);
+    DB.setConfig('ubicaciones', ['ALMACÉN SAN BORJA', 'ALMACÉN NORTE', 'ALMACÉN SUR', 'ALMACÉN CENTRAL', 'DATA CENTER', 'ALMACEN TI PR']);
   if (!DB.getConfig('areas', null))
     DB.setConfig('areas', ['TI', 'FINANZAS', 'RRHH', 'OPERACIONES', 'COMERCIAL', 'LEGAL']);
   if (!DB.getConfig('gamas', null))
@@ -564,6 +564,7 @@ function closeModal() {
   _asigReemOld = null;
   _asigStockSearch = '';
   _asigStockTipo = 'Todos';
+  _asigStockAlmacen = 'Todos';
   _asigStockPage = 0;
   _asigAccSearch = '';
   _asigAccTipo = 'Todos';
@@ -1561,6 +1562,7 @@ function procesarExcel(file) {
       const _vTipos     = DB.getConfig('tipos', []).map(v => v.toUpperCase());
       const _vEstadosEq = DB.getConfig('estadosEquipo', []).map(v => v.toUpperCase());
       const _vOrigenes  = DB.getConfig('origenes', []).map(v => v.toUpperCase());
+      const _vUbicaciones = DB.getConfig('ubicaciones', []).map(v => v.toUpperCase());
 
       _cargaMasivaData = rows.map((row, i) => {
         const mapped = {};
@@ -1589,6 +1591,8 @@ function procesarExcel(file) {
           fieldErrors.estadoEquipo = 'No existe en catálogo';
         if (mapped.origenEquipo && _vOrigenes.length && !_vOrigenes.includes(mapped.origenEquipo.toUpperCase()))
           fieldErrors.origenEquipo = 'No existe en catálogo';
+        if (mapped.ubicacion && _vUbicaciones.length && !_vUbicaciones.includes(mapped.ubicacion.toUpperCase()))
+          fieldErrors.ubicacion = 'No existe en catálogo';
         // Validar fechas
         dateFields.forEach(f => {
           if (mapped[f] && !/^\d{4}-\d{2}-\d{2}$/.test(mapped[f]))
@@ -1702,14 +1706,16 @@ function _renderCargaMasivaPreview() {
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Disco</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Estado Eq.</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Origen</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Almacén</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">F.Ingreso</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary);text-align:center">✓</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Error</th>
           </tr>
         </thead>
         <tbody>
           ${pageData.map(r => {
             const fe = r._fieldErrors || {};
-            const errList = Object.values(fe).join(', ');
+            const errList = Object.entries(fe).map(([k, v]) => k + ': ' + v).join(' | ');
             const ok = 'background:#dcfce7';
             const bad = 'background:#fecaca';
             const cellStyle = (field, val) => fe[field] ? bad : val ? ok : '';
@@ -1719,16 +1725,18 @@ function _renderCargaMasivaPreview() {
               <td style="padding:6px;${cellStyle('tipo', r.tipo)}" ${fe.tipo ? 'title="'+esc(fe.tipo)+'"' : ''}>${esc(r.tipo || '—')}</td>
               <td style="padding:6px;${cellStyle('marca', r.marca)}" ${fe.marca ? 'title="'+esc(fe.marca)+'"' : ''}>${esc(r.marca || '—')}</td>
               <td style="padding:6px;${cellStyle('modelo', r.modelo)}" ${fe.modelo ? 'title="'+esc(fe.modelo)+'"' : ''}>${esc(r.modelo || '—')}</td>
-              <td style="padding:6px;font-size:11px;${r.serie ? ok : ''}">${esc(r.serie || '—')}</td>
+              <td style="padding:6px;font-size:11px;${cellStyle('serie', r.serie)}" ${fe.serie ? 'title="'+esc(fe.serie)+'"' : ''}>${esc(r.serie || '—')}</td>
               <td style="padding:6px;font-size:11px;${r.codInventario ? ok : ''}">${esc(r.codInventario || '—')}</td>
               <td style="padding:6px;font-size:11px;${r.ram ? ok : ''}">${esc(r.ram || '—')}</td>
               <td style="padding:6px;font-size:11px;${r.almacenamiento ? ok : ''}">${esc(r.almacenamiento || '—')}</td>
               <td style="padding:6px;${cellStyle('estadoEquipo', r.estadoEquipo)}" ${fe.estadoEquipo ? 'title="'+esc(fe.estadoEquipo)+'"' : ''}>${esc(r.estadoEquipo || '—')}</td>
               <td style="padding:6px;${cellStyle('origenEquipo', r.origenEquipo)}" ${fe.origenEquipo ? 'title="'+esc(fe.origenEquipo)+'"' : ''}>${esc(r.origenEquipo || '—')}</td>
+              <td style="padding:6px;font-size:11px;${cellStyle('ubicacion', r.ubicacion)}" ${fe.ubicacion ? 'title="'+esc(fe.ubicacion)+'"' : ''}>${esc(r.ubicacion || '—')}</td>
               <td style="padding:6px;font-size:11px;${cellStyle('fechaIngreso', r.fechaIngreso)}" ${fe.fechaIngreso ? 'title="'+esc(fe.fechaIngreso)+'"' : ''}>${r.fechaIngreso ? formatDate(r.fechaIngreso) : '—'}</td>
               <td style="padding:6px;text-align:center">${r._valid
                 ? '<span style="color:#16a34a;font-weight:700">✓</span>'
-                : '<span style="color:#dc2626;font-weight:700" title="'+esc(errList)+'">✗</span>'}</td>
+                : '<span style="color:#dc2626;font-weight:700">✗</span>'}</td>
+              <td style="padding:6px;font-size:11px;color:#dc2626;max-width:220px;word-break:break-word">${r._valid ? '' : esc(errList)}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -2978,6 +2986,7 @@ function _renderAsigTable() {
 
 let _asigStockSearch = '';
 let _asigStockTipo = 'Todos';
+let _asigStockAlmacen = 'Todos';
 let _asigStockPage = 0;
 const _ASIG_PAGE_SIZE = 5;
 // Accesorios para Ingreso Nuevo
@@ -2999,6 +3008,7 @@ function openAsignacionModal() {
   _asigSelectedAccesorios = [];
   _asigStockSearch = '';
   _asigStockTipo = 'Todos';
+  _asigStockAlmacen = 'Todos';
   _asigStockPage = 0;
   _asigAccSearch = '';
   _asigAccTipo = 'Todos';
@@ -3056,23 +3066,27 @@ function _renderAsignacionModal(fresh) {
   // ── Reemplazo: equipos asignados al colaborador ──
   let reemAsigHTML = '';
   let reemTipoFiltro = '';
+  let _reemHasLaptop = false;
   if (isReemplazo && c) {
     const userAsigs = asignaciones.filter(a => a.colaboradorId === c.id && a.estado === 'Vigente');
     if (userAsigs.length === 0) {
       reemAsigHTML = '<div style="padding:16px;text-align:center;color:#dc2626;font-size:12px;background:#fef2f2;border-radius:8px">Este colaborador no tiene activos asignados para reemplazar.</div>';
     } else {
+      _reemHasLaptop = userAsigs.some(a => { const ax = activos.find(x => x.id === a.activoId); return ax && (ax.tipo||'').toUpperCase() === 'LAPTOP'; });
       reemAsigHTML = userAsigs.map(a => {
         const act = activos.find(x => x.id === a.activoId);
         const sel = _asigReemOld && _asigReemOld.id === a.id;
+        const esLaptop = act && (act.tipo||'').toUpperCase() === 'LAPTOP';
         return `<tr onclick="_asigSelectReemOld(${a.id})" style="cursor:pointer;background:${sel ? '#fef3c7' : ''};border-bottom:1px solid #f1f5f9"
           onmouseover="if(!this.style.background.includes('fef3c7'))this.style.background='#f8fafc'" onmouseout="if(!this.style.background.includes('fef3c7'))this.style.background=''">
           <td style="padding:6px;text-align:center">
             <input type="radio" name="reemOld" ${sel ? 'checked' : ''} onclick="event.stopPropagation();_asigSelectReemOld(${a.id})">
           </td>
           <td style="padding:6px 8px;font-family:monospace;font-size:11px;font-weight:700">${act ? esc(act.codigo) : '—'}</td>
-          <td style="padding:6px 8px;font-size:11px">${act ? esc(act.tipo) : '—'}</td>
+          <td style="padding:6px 8px;font-size:11px">${act ? esc(act.equipo || act.tipo) : '—'}</td>
           <td style="padding:6px 8px">${act ? esc(act.marca) + ' ' + esc(act.modelo) : '—'}</td>
           <td style="padding:6px 8px;font-family:monospace;font-size:11px">${esc(a.serieAsignada || '—')}</td>
+          ${_reemHasLaptop ? `<td style="padding:6px 8px;font-size:11px;color:#64748b">${esLaptop ? esc(act.gama || '—') : '—'}</td>` : ''}
         </tr>`;
       }).join('');
     }
@@ -3103,6 +3117,9 @@ function _renderAsignacionModal(fresh) {
   // Ingreso Nuevo: sección principal solo EP-ADMIN
   if (isIngresoNuevo) filtered = filtered.filter(r => _TIPOS_EP_ADMIN.includes(r.tipo));
   else if (!isReemplazo && _asigStockTipo !== 'Todos') filtered = filtered.filter(r => r.tipo === _asigStockTipo);
+  // Filtro por almacén
+  const almacenes = ['Todos', ...new Set(stock.map(r => r.ubicacion).filter(Boolean))];
+  if (_asigStockAlmacen !== 'Todos') filtered = filtered.filter(r => r.ubicacion === _asigStockAlmacen);
   if (_asigStockSearch) {
     const s = _asigStockSearch.toLowerCase();
     filtered = filtered.filter(r => r.codigo.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) || r.serie.toLowerCase().includes(s) || r.marca.toLowerCase().includes(s));
@@ -3168,7 +3185,7 @@ function _renderAsignacionModal(fresh) {
 
   // Build stock table rows
   const stockRowsHTML = pageItems.length === 0
-    ? `<tr><td colspan="${_stockEsLaptop ? 6 : 5}" style="padding:20px;text-align:center;color:#94a3b8;font-size:12px">No hay equipos disponibles</td></tr>`
+    ? `<tr><td colspan="${_stockEsLaptop ? 8 : 7}" style="padding:20px;text-align:center;color:#94a3b8;font-size:12px">No hay equipos disponibles</td></tr>`
     : pageItems.map((r, pi) => {
         const gi = pgStart + pi;
         const isSel = selSet.has(r.activoId + '||' + r.serie);
@@ -3180,10 +3197,11 @@ function _renderAsignacionModal(fresh) {
             <input type="${inputType}" name="reemNew" ${isSel ? 'checked' : ''} onclick="event.stopPropagation();_asigToggleStock(${gi})">
           </td>
           <td style="padding:6px 8px;font-family:monospace;font-size:11px;font-weight:700">${esc(r.codigo)}</td>
+          <td style="padding:6px 8px;font-size:11px">${esc(r.equipo || r.tipo)}</td>
           <td style="padding:6px 8px">${esc(r.marca)} ${esc(r.modelo)}</td>
           <td style="padding:6px 8px;font-family:monospace;font-size:11px">${esc(r.serie || '—')}</td>
-          <td style="padding:6px 8px;font-size:11px;color:#64748b">${esc(r.ubicacion)}</td>
           ${_stockEsLaptop ? `<td style="padding:6px 8px;font-size:11px;color:#64748b">${esc(r.gama || '—')}</td>` : ''}
+          <td style="padding:6px 8px;font-size:11px;color:#64748b">${esc(r.ubicacion)}</td>
         </tr>`;
       }).join('');
 
@@ -3343,9 +3361,10 @@ function _renderAsignacionModal(fresh) {
             <thead><tr style="background:#fefce8">
               <th style="padding:8px 6px;width:36px;text-align:center;border-bottom:1px solid #e2e8f0"></th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Código</th>
-              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Tipo</th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Equipo</th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Marca / Modelo</th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Serie</th>
+              ${_reemHasLaptop ? '<th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#92400e;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Gama</th>' : ''}
             </tr></thead>
             <tbody>${reemAsigHTML}</tbody>
           </table>
@@ -3372,6 +3391,9 @@ function _renderAsignacionModal(fresh) {
           <select id="asigStockTipoFilter" onchange="_asigStockTipo=this.value;_asigStockPage=0;_renderAsignacionModal()" style="border:1px solid #e2e8f0;border-radius:8px;padding:0 10px;font-size:11px;color:#334155;height:36px;min-width:130px;cursor:pointer">
             ${tipos.map(t => `<option value="${esc(t)}" ${_asigStockTipo===t?'selected':''}>${esc(t)}${t!=='Todos'?' ('+filtered.filter(r=>r.tipo===t).length+')':' ('+stock.length+')'}</option>`).join('')}
           </select>` : isIngresoNuevo ? `<span style="font-size:11px;color:#64748b;padding:0 10px;display:flex;align-items:center;background:#f0fdf4;border:1px solid #a7f3d0;border-radius:8px;height:36px">LAPTOP / DESKTOP</span>` : ''}
+          <select onchange="_asigStockAlmacen=this.value;_asigStockPage=0;_renderAsignacionModal()" style="border:1px solid #e2e8f0;border-radius:8px;padding:0 10px;font-size:11px;color:#334155;height:36px;min-width:140px;cursor:pointer">
+            ${almacenes.map(a => `<option value="${esc(a)}" ${_asigStockAlmacen===a?'selected':''}>${a === 'Todos' ? 'Todos los almacenes' : esc(a)}</option>`).join('')}
+          </select>
         </div>
 
         <div style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
@@ -3381,10 +3403,11 @@ function _renderAsignacionModal(fresh) {
                 ${(!isReemplazo && !isIngresoNuevo) ? `<input type="checkbox" onchange="_asigTogglePageAll(this.checked)" ${pageAllSel ? 'checked' : ''}>` : ''}
               </th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Código</th>
-              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Modelo</th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Equipo</th>
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Marca / Modelo</th>
               <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Serie</th>
-              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Ubicación</th>
               ${_stockEsLaptop ? '<th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Gama</th>' : ''}
+              <th style="padding:8px 8px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:0.3px;border-bottom:1px solid #e2e8f0">Ubicación</th>
             </tr></thead>
             <tbody>${stockRowsHTML}</tbody>
           </table>
@@ -3705,21 +3728,23 @@ function _renderReemplazoModal() {
     if (asigs.length === 0) {
       equiposHTML = '<div style="padding:20px;text-align:center;color:#9a3412;font-size:12px">Este colaborador no tiene activos asignados.</div>';
     } else {
+      const _wizHasLaptop = asigs.some(a => { const ax = activos.find(x => x.id === a.activoId); return ax && (ax.tipo||'').toUpperCase() === 'LAPTOP'; });
       equiposHTML = `
         <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px">
           <table style="width:100%;font-size:12px;border-collapse:collapse">
             <thead><tr style="background:#f8fafc">
               <th style="padding:8px 10px;width:40px"></th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Código</th>
-              <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Tipo</th>
+              <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Equipo</th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Marca / Modelo</th>
               <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Serie</th>
-              <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Estado</th>
+              ${_wizHasLaptop ? '<th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Gama</th>' : ''}
             </tr></thead>
             <tbody>
               ${asigs.map(a => {
                 const act = activos.find(x => x.id === a.activoId);
                 const sel = oldA && oldA.id === a.id;
+                const esLaptop = act && (act.tipo||'').toUpperCase() === 'LAPTOP';
                 return `<tr onclick="_reemSelectOld(${a.id})" style="cursor:pointer;background:${sel ? '#fff7ed' : ''};border-bottom:1px solid #f1f5f9"
                   onmouseover="if(!${sel})this.style.background='#f8fafc'" onmouseout="if(!${sel})this.style.background=''">
                   <td style="padding:8px 10px;text-align:center">
@@ -3728,10 +3753,10 @@ function _renderReemplazoModal() {
                     </div>
                   </td>
                   <td style="padding:8px 10px;font-family:monospace;font-size:11px">${act ? esc(act.codigo) : '—'}</td>
-                  <td style="padding:8px 10px">${act ? esc(act.tipo) : '—'}</td>
+                  <td style="padding:8px 10px">${act ? esc(act.equipo || act.tipo) : '—'}</td>
                   <td style="padding:8px 10px;font-weight:600">${act ? esc(act.marca) + ' ' + esc(act.modelo) : '—'}</td>
                   <td style="padding:8px 10px;font-family:monospace;font-size:11px">${esc(a.serieAsignada || '—')}</td>
-                  <td style="padding:8px 10px"><span style="padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;background:#dcfce7;color:#166534">${esc(act ? act.estadoEquipo || 'OPERATIVO' : '—')}</span></td>
+                  ${_wizHasLaptop ? `<td style="padding:8px 10px;font-size:11px;color:#64748b">${esLaptop ? esc(act.gama || '—') : '—'}</td>` : ''}
                 </tr>`;
               }).join('')}
             </tbody>
@@ -3757,39 +3782,47 @@ function _renderReemplazoModal() {
       (a.series || []).forEach(s => {
         const key = a.id + '||' + (s.serie || '').toUpperCase().trim();
         if (!seriesAsignadas.has(key)) {
-          stock.push({ activoId: a.id, tipo: a.tipo, marca: a.marca, modelo: a.modelo, serie: s.serie || '', codInventario: s.codInventario || '', ubicacion: a.ubicacion || '', codigo: a.codigo || '' });
+          stock.push({ activoId: a.id, tipo: a.tipo, equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie || '', codInventario: s.codInventario || '', ubicacion: a.ubicacion || '', codigo: a.codigo || '', gama: a.gama || '' });
         }
       });
     });
 
-    // Búsqueda
+    // Búsqueda y filtro almacén
     const searchVal = (document.getElementById('reemStockSearch') || {}).value || '';
+    const _reemAlmacenVal = (document.getElementById('reemStockAlmacen') || {}).value || 'Todos';
+    const _reemAlmacenes = ['Todos', ...new Set(stock.map(r => r.ubicacion).filter(Boolean))];
+    const _reemEsLaptop = tipoFiltro === 'LAPTOP';
     let filtered = stock;
+    if (_reemAlmacenVal !== 'Todos') filtered = filtered.filter(r => r.ubicacion === _reemAlmacenVal);
     if (searchVal) {
       const s = searchVal.toLowerCase();
-      filtered = stock.filter(r => r.codigo.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) || r.serie.toLowerCase().includes(s) || r.marca.toLowerCase().includes(s));
+      filtered = filtered.filter(r => r.codigo.toLowerCase().includes(s) || r.modelo.toLowerCase().includes(s) || r.serie.toLowerCase().includes(s) || r.marca.toLowerCase().includes(s));
     }
 
     stockHTML = `
-      <div style="margin-bottom:8px">
-        <div class="search-box" style="margin:0">
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div class="search-box" style="margin:0;flex:1">
           <span class="search-icon">🔍</span>
           <input type="text" id="reemStockSearch" placeholder="Buscar por código, modelo o serie..." value="${esc(searchVal)}" oninput="_reemRefreshStock()">
         </div>
+        <select id="reemStockAlmacen" onchange="_reemRefreshStock()" style="border:1px solid #e2e8f0;border-radius:8px;padding:0 10px;font-size:11px;color:#334155;height:36px;min-width:140px;cursor:pointer">
+          ${_reemAlmacenes.map(a => `<option value="${esc(a)}" ${_reemAlmacenVal===a?'selected':''}>${a === 'Todos' ? 'Todos los almacenes' : esc(a)}</option>`).join('')}
+        </select>
       </div>
       <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;max-height:200px;overflow-y:auto">
         <table style="width:100%;font-size:12px;border-collapse:collapse">
           <thead style="position:sticky;top:0"><tr style="background:#f8fafc">
             <th style="padding:8px 10px;width:40px"></th>
             <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Código</th>
-            <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Tipo</th>
+            <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Equipo</th>
             <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Marca / Modelo</th>
             <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Serie</th>
+            ${_reemEsLaptop ? '<th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Gama</th>' : ''}
             <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Ubicación</th>
           </tr></thead>
           <tbody>
             ${filtered.length === 0
-              ? '<tr><td colspan="6" style="padding:16px;text-align:center;color:#94a3b8;font-size:12px">No hay equipos disponibles de este tipo</td></tr>'
+              ? `<tr><td colspan="${_reemEsLaptop ? 8 : 7}" style="padding:16px;text-align:center;color:#94a3b8;font-size:12px">No hay equipos disponibles de este tipo</td></tr>`
               : filtered.slice(0, 50).map((r, i) => {
                 const sel = newI && newI.activoId === r.activoId && newI.serie === r.serie;
                 return `<tr onclick="_reemSelectNew(${i})" style="cursor:pointer;background:${sel ? '#eff6ff' : ''};border-bottom:1px solid #f1f5f9"
@@ -3800,9 +3833,10 @@ function _renderReemplazoModal() {
                     </div>
                   </td>
                   <td style="padding:8px 10px;font-family:monospace;font-size:11px">${esc(r.codigo)}</td>
-                  <td style="padding:8px 10px">${esc(r.tipo)}</td>
+                  <td style="padding:8px 10px">${esc(r.equipo || r.tipo)}</td>
                   <td style="padding:8px 10px;font-weight:600">${esc(r.marca)} ${esc(r.modelo)}</td>
                   <td style="padding:8px 10px;font-family:monospace;font-size:11px">${esc(r.serie || '—')}</td>
+                  ${_reemEsLaptop ? `<td style="padding:8px 10px;font-size:11px;color:#64748b">${esc(r.gama || '—')}</td>` : ''}
                   <td style="padding:8px 10px;font-size:11px">${esc(r.ubicacion)}</td>
                 </tr>`;
               }).join('')}
@@ -6091,7 +6125,20 @@ function openTiendaDetalle(id) {
    CMDB - INVENTARIO
    ═══════════════════════════════════════════════════════ */
 let invSearch = '';
+let _invFilterCMDB = 'Todos';
 let _invSearchTimer = null;
+// Filtros dinámicos del inventario CMDB
+const _INV_FILTER_OPTIONS = [
+  { key: 'estadoCMDB',    label: 'Estado CMDB' },
+  { key: 'sede',           label: 'Sede / Almacén' },
+  { key: 'tipo',           label: 'Tipo Equipo' },
+  { key: 'marca',          label: 'Marca' },
+  { key: 'estadoEquipo',   label: 'Estado Equipo' },
+  { key: 'areaTrabajo',    label: 'Área Trabajo' },
+  { key: 'usoEquipo',      label: 'Uso Equipo' },
+];
+let _invActiveFilters = { estadoCMDB: 'Todos' }; // estadoCMDB activo por defecto
+let _invFilterMenuOpen = false;
 
 function _buildInventarioRows() {
   const activos = DB.get('activos');
@@ -6426,11 +6473,84 @@ function renderInventario(el) {
         <span id="invSearchClear" onclick="_clearInvSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${invSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
       </div>
     </div>
+    <div id="invFiltersBar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap"></div>
 
     <div id="invTableWrap"></div>
   `;
+  _renderInvFiltersBar();
   _renderInvTable();
 }
+
+function _renderInvFiltersBar() {
+  const bar = document.getElementById('invFiltersBar');
+  if (!bar) return;
+  const rows = _buildInventarioRows();
+
+  // Dropdowns de filtros activos
+  let html = Object.keys(_invActiveFilters).map(key => {
+    const opt = _INV_FILTER_OPTIONS.find(o => o.key === key);
+    if (!opt) return '';
+    const values = ['Todos', ...new Set(rows.map(r => r[key]).filter(Boolean))].sort((a, b) => a === 'Todos' ? -1 : b === 'Todos' ? 1 : a.localeCompare(b));
+    const current = _invActiveFilters[key] || 'Todos';
+    return `<div style="display:flex;align-items:center;gap:0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:34px;background:#fff">
+      <select onchange="_invActiveFilters['${key}']=this.value;resetPage('inventario');_renderInvTable()" style="border:none;padding:0 8px 0 10px;font-size:11px;color:#334155;height:100%;cursor:pointer;background:transparent;min-width:120px">
+        ${values.map(v => `<option value="${esc(v)}" ${current===v?'selected':''}>${v === 'Todos' ? esc(opt.label) + ': Todos' : esc(v)}</option>`).join('')}
+      </select>
+      <button onclick="_invRemoveFilter('${key}')" style="border:none;background:none;cursor:pointer;padding:0 6px;color:#94a3b8;font-size:14px;height:100%;display:flex;align-items:center" onmouseover="this.style.color='#dc2626'" onmouseout="this.style.color='#94a3b8'" title="Quitar filtro">✕</button>
+    </div>`;
+  }).join('');
+
+  // Botón "+" para agregar filtros
+  const inactiveFilters = _INV_FILTER_OPTIONS.filter(o => !_invActiveFilters.hasOwnProperty(o.key));
+  if (inactiveFilters.length > 0) {
+    html += `<div id="invFilterAddWrap" style="position:relative;display:inline-block">
+      <button id="invFilterAddBtn" style="width:34px;height:34px;border-radius:8px;border:1px dashed #cbd5e1;background:#f8fafc;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;transition:all .15s" onmouseover="this.style.borderColor='#2563eb';this.style.color='#2563eb'" onmouseout="this.style.borderColor='#cbd5e1';this.style.color='#64748b'" title="Agregar filtro">+</button>
+      <div id="invFilterAddMenu" style="display:${_invFilterMenuOpen ? 'block' : 'none'};position:absolute;top:38px;left:0;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px 0;z-index:999;min-width:180px">
+        <div style="padding:4px 12px 6px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Agregar filtro</div>
+        ${inactiveFilters.map(o => `<div onclick="event.stopPropagation();_invAddFilter('${o.key}')" style="padding:7px 12px;font-size:12px;color:#334155;cursor:pointer;display:flex;align-items:center;gap:8px" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background=''">
+          <span style="color:#2563eb;font-size:14px">+</span> ${esc(o.label)}
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  bar.innerHTML = html;
+
+  // Bind click en botón "+" después de insertar HTML
+  const addBtn = document.getElementById('invFilterAddBtn');
+  if (addBtn) {
+    addBtn.onclick = function(e) {
+      e.stopPropagation();
+      _invFilterMenuOpen = !_invFilterMenuOpen;
+      const menu = document.getElementById('invFilterAddMenu');
+      if (menu) menu.style.display = _invFilterMenuOpen ? 'block' : 'none';
+    };
+  }
+}
+
+function _invAddFilter(key) {
+  _invActiveFilters[key] = 'Todos';
+  _invFilterMenuOpen = false;
+  resetPage('inventario');
+  _renderInvFiltersBar();
+  _renderInvTable();
+}
+
+function _invRemoveFilter(key) {
+  delete _invActiveFilters[key];
+  _invFilterMenuOpen = false;
+  resetPage('inventario');
+  _renderInvFiltersBar();
+  _renderInvTable();
+}
+
+// Cerrar menú filtros al hacer click fuera
+document.addEventListener('click', function(e) {
+  if (_invFilterMenuOpen && !e.target.closest('#invFiltersBar')) {
+    _invFilterMenuOpen = false;
+    _renderInvFiltersBar();
+  }
+});
 
 function _onInvSearch(val) {
   invSearch = val;
@@ -6457,6 +6577,10 @@ function _renderInvTable() {
 
   const rows = _buildInventarioRows();
   const filtered = rows.filter(r => {
+    // Filtros dinámicos activos
+    for (const [key, val] of Object.entries(_invActiveFilters)) {
+      if (val !== 'Todos' && r[key] !== val) return false;
+    }
     if (!invSearch) return true;
     const s = invSearch.toLowerCase();
     return r.sede.toLowerCase().includes(s) ||
@@ -8450,7 +8574,7 @@ const PARAM_TABS = [
   { key: 'sistemasOS',    label: 'Sistemas OS' },
   { key: 'opcionesRAM',   label: 'RAM' },
   { key: 'opcionesAlmacenamiento', label: 'Almacenamiento' },
-  { key: 'ubicaciones',   label: 'Ubicaciones' },
+  { key: 'ubicaciones',   label: 'Almacenes' },
   { key: 'areas',         label: 'Áreas' },
   { key: 'regiones',      label: 'Regiones' },
   { key: 'departamentos', label: 'Departamentos' },
@@ -8492,8 +8616,8 @@ function renderParametros(el) {
         <div class="card-header"><h3>⚠️ Zona de Peligro</h3></div>
         <div class="card-body" style="display:flex;align-items:center;justify-content:space-between">
           <div>
-            <div style="font-size:14px;font-weight:600;color:var(--danger)">Resetear todos los datos</div>
-            <div style="font-size:13px;color:var(--text-secondary);margin-top:2px">Eliminar todos los datos y restablecer valores por defecto</div>
+            <div style="font-size:14px;font-weight:600;color:var(--danger)">Resetear datos operativos</div>
+            <div style="font-size:13px;color:var(--text-secondary);margin-top:2px">Eliminar equipos, colaboradores, asignaciones, CMDB, movimientos y bajas</div>
           </div>
           <button class="btn btn-danger" onclick="resetAllData()">Resetear Todo</button>
         </div>
@@ -8654,8 +8778,18 @@ function addParamItem(key, label) {
 }
 
 function removeParamItem(key, idx) {
-  if (!confirm('¿Eliminar este valor?')) return;
   const items = DB.getConfig(key, []);
+  const val = items[idx];
+  // Validar que el almacén no tenga equipos asignados
+  if (key === 'ubicaciones') {
+    const activos = DB.get('activos');
+    const enUso = activos.filter(a => (a.ubicacion || '').toUpperCase() === (val || '').toUpperCase());
+    if (enUso.length > 0) {
+      showToast(`No se puede eliminar "${val}" porque tiene ${enUso.length} equipo(s) registrado(s)`, 'error');
+      return;
+    }
+  }
+  if (!confirm('¿Eliminar este valor?')) return;
   items.splice(idx, 1);
   DB.setConfig(key, items);
   showToast('Valor eliminado');
@@ -8663,21 +8797,24 @@ function removeParamItem(key, idx) {
 }
 
 function resetAllData() {
-  if (!confirm('¿ESTÁ SEGURO? Se eliminarán TODOS los datos del sistema. Deberá iniciar sesión nuevamente.')) return;
+  if (!confirm('¿ESTÁ SEGURO? Se eliminarán los datos de equipos, colaboradores, asignaciones, CMDB, movimientos y bajas.')) return;
   if (!confirm('Esta acción es irreversible. ¿Continuar?')) return;
 
-  Object.keys(localStorage).filter(k => k.startsWith('ati_')).forEach(k => localStorage.removeItem(k));
-  initSampleData();
-  currentUser = null;
-  showToast('Datos restablecidos correctamente. Iniciando sesión...', 'info');
-  setTimeout(() => {
-    document.getElementById('appWrapper').style.display = 'none';
-    document.getElementById('loginScreen').style.display = 'flex';
-    document.getElementById('loginUser').value = '';
-    document.getElementById('loginPass').value = '';
-    currentSection = 'dashboards';
-    currentPage = 'dashboard1';
-  }, 1000);
+  // Solo resetear datos operativos (no configuración, usuarios, sesión, etc.)
+  const keysToReset = [
+    'activos',
+    'colaboradores',
+    'asignaciones',
+    'movimientos',
+    'bajasPendientes',
+    'historialBajas',
+    'bitacoraMovimientos',
+    'bitacoraArchivos'
+  ];
+  keysToReset.forEach(k => localStorage.removeItem('ati_' + k));
+
+  showToast('Datos operativos eliminados correctamente.', 'info');
+  setTimeout(() => renderPage(), 500);
 }
 
 /* ═══════════════════════════════════════════════════════
