@@ -304,6 +304,7 @@ function doLogin() {
   buildSidebar();
   updateBreadcrumb();
   renderPage();
+  _startNotifUpdater();
 }
 
 function doLogout() {
@@ -333,6 +334,7 @@ function checkSession() {
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('appWrapper').style.display = 'flex';
         updateSidebarUser();
+        _startNotifUpdater();
         return true;
       }
     } catch { /* invalid session */ }
@@ -513,6 +515,7 @@ function navigateTo(section, page) {
   buildSidebar();
   updateBreadcrumb();
   renderPage();
+  _updateNotifBadge();
 }
 
 function updateBreadcrumb() {
@@ -541,6 +544,198 @@ function showToast(msg, type = 'success') {
     toast.style.transition = '0.3s ease';
     setTimeout(() => toast.remove(), 300);
   }, 3000);
+}
+
+/* ═══════════════════════════════════════════════════════
+   NOTIFICACIONES (CAMPANA)
+   ═══════════════════════════════════════════════════════ */
+let _notifPanelOpen = false;
+
+function _buildNotifications() {
+  const notifs = [];
+  const colaboradores = DB.get('colaboradores');
+  const asignaciones = DB.get('asignaciones');
+
+  // 1. Colaboradores nuevos sin activos asignados
+  const colabsActivos = colaboradores.filter(c => (c.estado || '').toUpperCase() === 'ACTIVO');
+  const colabsConAsig = new Set(asignaciones.filter(a => a.estado === 'Vigente').map(a => (a.correoColab || '').toUpperCase()));
+  const colabsSinActivos = colabsActivos.filter(c => !colabsConAsig.has((c.correo || c.email || '').toUpperCase()));
+
+  if (colabsSinActivos.length > 0) {
+    notifs.push({
+      type: 'new-colab',
+      icon: '👤',
+      iconBg: '#dbeafe',
+      iconColor: '#2563eb',
+      title: colabsSinActivos.length === 1
+        ? '1 colaborador sin activos'
+        : colabsSinActivos.length + ' colaboradores sin activos',
+      desc: colabsSinActivos.slice(0, 3).map(c => c.nombre || c.correo || '').join(', ') + (colabsSinActivos.length > 3 ? ' y ' + (colabsSinActivos.length - 3) + ' más...' : ''),
+      action: 'colab-sin-activos',
+      count: colabsSinActivos.length
+    });
+  }
+
+  // 2. Ceses pendientes (colaboradores cesados con activos vigentes)
+  const colabsCesados = colaboradores.filter(c => (c.estado || '').toUpperCase() === 'CESADO' || (c.estado || '').toUpperCase() === 'INACTIVO');
+  const cesesPendientes = [];
+  colabsCesados.forEach(c => {
+    const correo = (c.correo || c.email || '').toUpperCase();
+    const asigVigentes = asignaciones.filter(a => a.estado === 'Vigente' && (a.correoColab || '').toUpperCase() === correo);
+    if (asigVigentes.length > 0) {
+      cesesPendientes.push({ colab: c, activos: asigVigentes.length });
+    }
+  });
+
+  if (cesesPendientes.length > 0) {
+    notifs.push({
+      type: 'cese-pendiente',
+      icon: '⚠️',
+      iconBg: '#fef3c7',
+      iconColor: '#d97706',
+      title: cesesPendientes.length === 1
+        ? '1 cese pendiente de retorno'
+        : cesesPendientes.length + ' ceses pendientes de retorno',
+      desc: cesesPendientes.slice(0, 3).map(cp => (cp.colab.nombre || '') + ' (' + cp.activos + ' activos)').join(', ') + (cesesPendientes.length > 3 ? ' y ' + (cesesPendientes.length - 3) + ' más...' : ''),
+      action: 'ceses-pendientes',
+      count: cesesPendientes.length
+    });
+  }
+
+  // 3. Pendientes de retorno
+  const pendRetorno = asignaciones.filter(a => a.pendienteRetorno === true && a.estado !== 'Devuelto');
+  if (pendRetorno.length > 0) {
+    notifs.push({
+      type: 'pend-retorno',
+      icon: '🔄',
+      iconBg: '#fce7f3',
+      iconColor: '#db2777',
+      title: pendRetorno.length === 1
+        ? '1 retorno pendiente'
+        : pendRetorno.length + ' retornos pendientes',
+      desc: 'Equipos marcados para retorno que aún no han sido devueltos',
+      action: 'pend-retorno',
+      count: pendRetorno.length
+    });
+  }
+
+  // 4. Actas de asignación pendientes
+  const bitMovs = DB.get('bitacoraMovimientos');
+  const actasPend = bitMovs.filter(m => (m.estadoAsignacion || '').toUpperCase() === 'PENDIENTE');
+  if (actasPend.length > 0) {
+    notifs.push({
+      type: 'actas-pend',
+      icon: '📎',
+      iconBg: '#ede9fe',
+      iconColor: '#7c3aed',
+      title: actasPend.length === 1
+        ? '1 acta de asignación pendiente'
+        : actasPend.length + ' actas de asignación pendientes',
+      desc: 'Movimientos de bitácora sin acta adjunta',
+      action: 'actas-pendientes',
+      count: actasPend.length
+    });
+  }
+
+  return notifs;
+}
+
+function _updateNotifBadge() {
+  const notifs = _buildNotifications();
+  const totalCount = notifs.reduce((sum, n) => sum + (n.count || 1), 0);
+  const countEl = document.getElementById('notifCount');
+  const pulseEl = document.getElementById('notifPulse');
+  if (!countEl) return;
+
+  if (totalCount > 0) {
+    countEl.textContent = totalCount > 99 ? '99+' : totalCount;
+    countEl.style.display = 'flex';
+    if (pulseEl) pulseEl.style.display = 'block';
+  } else {
+    countEl.style.display = 'none';
+    if (pulseEl) pulseEl.style.display = 'none';
+  }
+}
+
+function _toggleNotifPanel() {
+  _notifPanelOpen = !_notifPanelOpen;
+  const panel = document.getElementById('notifPanel');
+  if (!panel) return;
+
+  if (_notifPanelOpen) {
+    const notifs = _buildNotifications();
+    const totalCount = notifs.reduce((sum, n) => sum + (n.count || 1), 0);
+
+    let itemsHTML = '';
+    if (notifs.length === 0) {
+      itemsHTML = '<div class="notif-empty"><div class="notif-empty-icon">✅</div><p>Sin notificaciones pendientes</p></div>';
+    } else {
+      itemsHTML = notifs.map(n => {
+        return '<div class="notif-item" onclick="_notifAction(\'' + n.action + '\')">'
+          + '<div class="notif-item-icon" style="background:' + n.iconBg + ';color:' + n.iconColor + '">' + n.icon + '</div>'
+          + '<div class="notif-item-content">'
+          + '<div class="notif-item-title">' + esc(n.title) + '</div>'
+          + '<div class="notif-item-desc">' + esc(n.desc) + '</div>'
+          + '</div>'
+          + '</div>';
+      }).join('');
+    }
+
+    panel.innerHTML = '<div class="notif-panel-header">'
+      + '<span>Notificaciones' + (totalCount > 0 ? ' (' + totalCount + ')' : '') + '</span>'
+      + '<button onclick="_toggleNotifPanel()" style="background:none;border:none;cursor:pointer;font-size:16px;color:var(--text-muted)">✕</button>'
+      + '</div>'
+      + '<div class="notif-panel-body">' + itemsHTML + '</div>';
+    panel.style.display = 'block';
+
+    // Cerrar al hacer clic fuera
+    setTimeout(() => {
+      document.addEventListener('click', _closeNotifOutside);
+    }, 10);
+  } else {
+    panel.style.display = 'none';
+    document.removeEventListener('click', _closeNotifOutside);
+  }
+}
+
+function _closeNotifOutside(e) {
+  const panel = document.getElementById('notifPanel');
+  const btn = document.getElementById('notifBellBtn');
+  if (panel && !panel.contains(e.target) && btn && !btn.contains(e.target)) {
+    _notifPanelOpen = false;
+    panel.style.display = 'none';
+    document.removeEventListener('click', _closeNotifOutside);
+  }
+}
+
+function _notifAction(action) {
+  _notifPanelOpen = false;
+  const panel = document.getElementById('notifPanel');
+  if (panel) panel.style.display = 'none';
+  document.removeEventListener('click', _closeNotifOutside);
+
+  switch (action) {
+    case 'colab-sin-activos':
+      navigateTo('colaboradores', 'listaColaboradores');
+      break;
+    case 'ceses-pendientes':
+      navigateTo('asignacion', 'pendientesRetorno');
+      break;
+    case 'pend-retorno':
+      navigateTo('asignacion', 'pendientesRetorno');
+      break;
+    case 'actas-pendientes':
+      navigateTo('bitacora', 'movimientos');
+      break;
+  }
+}
+
+// Actualizar notificaciones periódicamente
+let _notifInterval = null;
+function _startNotifUpdater() {
+  _updateNotifBadge();
+  if (_notifInterval) clearInterval(_notifInterval);
+  _notifInterval = setInterval(_updateNotifBadge, 30000); // cada 30 segundos
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -7595,11 +7790,41 @@ function _ejecutarRetorno() {
     rec.denunciaRoboFecha = today();
   }
 
-  // Actualizar activo
+  // Actualizar activo y serie específica
   const activo = activos.find(a => a.id === rec.activoId);
   if (activo) {
-    activo.estado = _retornoCmdb;
-    activo.estadoEquipo = _retornoEstadoEq;
+    // Marcar la serie específica retornada
+    const _serieRet = (rec.serieAsignada || '').toUpperCase().trim();
+    if (_serieRet && activo.series && activo.series.length > 0) {
+      const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === _serieRet);
+      if (serieObj) {
+        serieObj.estadoSerie = _retornoCmdb;
+        serieObj.estadoEquipoSerie = _retornoEstadoEq;
+        if (_esRoboRet) serieObj.motivoBaja = 'ROBO';
+        else if (_retornoCmdb === 'Baja') serieObj.motivoBaja = _retornoEstadoEq;
+      }
+    }
+
+    // Solo cambiar estado global del activo si TODAS las series están en baja o no vigentes
+    if (activo.series && activo.series.length > 1) {
+      const seriesVigentes = asignaciones.filter(a => a.activoId === activo.id && a.estado === 'Vigente' && a.id !== rec.id);
+      const todasSeriesBaja = activo.series.every(s => (s.estadoSerie || '').toUpperCase() === 'BAJA');
+      if (todasSeriesBaja) {
+        activo.estado = 'Baja';
+        activo.estadoEquipo = _retornoEstadoEq;
+      } else if (seriesVigentes.length === 0) {
+        // No hay series vigentes, pero no todas en baja → mixto, mantener como estaba o Disponible
+        const seriesBaja = activo.series.filter(s => (s.estadoSerie || '').toUpperCase() === 'BAJA').length;
+        if (seriesBaja > 0 && seriesBaja < activo.series.length) {
+          activo.estado = 'Disponible'; // Parcialmente en baja, el activo sigue disponible para las otras series
+        }
+      }
+    } else {
+      // Activo con 1 sola serie o sin series → cambiar estado global
+      activo.estado = _retornoCmdb;
+      activo.estadoEquipo = _retornoEstadoEq;
+    }
+
     activo.obsRetorno = obs.trim();
     if (!_esRoboRet) activo.ubicacion = almacen;
     if (partes.length) activo.partesAfectadas = partes.join(', ');
@@ -7616,8 +7841,16 @@ function _ejecutarRetorno() {
 
   // Auto-registrar en bitácora
   if (activo) {
+    const _esBajaRet = _retornoCmdb === 'Baja';
+    const _motivoOrig = (rec.tipoAsignacion || rec.motivo || '').toUpperCase();
+    let _motivoBit = '';
+    if (_esRoboRet) _motivoBit = 'REPOSICIÓN ROBO';
+    else if (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes(_motivoOrig)) _motivoBit = rec.tipoAsignacion || rec.motivo;
+    else if (_esBajaRet) _motivoBit = 'BAJA — ' + (_retornoEstadoEq || 'DESTRUCCIÓN');
+    else _motivoBit = 'RETORNO';
+
     _autoBitacora({
-      movimiento: _esRoboRet ? 'BAJA' : 'INGRESO',
+      movimiento: (_esRoboRet || _esBajaRet) ? 'BAJA' : 'INGRESO',
       almacen: _esRoboRet ? 'N/A — ROBO' : (almacen || 'Almacen TI'),
       tipoEquipo: activo.tipo || rec.activoTipo || '',
       equipo: activo.equipo || activo.tipo || '',
@@ -7625,7 +7858,7 @@ function _ejecutarRetorno() {
       serie: rec.serieAsignada || '',
       inv: activo.codInventario || '',
       correo: rec.correoColab || '',
-      motivo: _esRoboRet ? 'REPOSICIÓN ROBO' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((rec.tipoAsignacion || rec.motivo || '').toUpperCase())) ? (rec.tipoAsignacion || rec.motivo) : ''
+      motivo: _motivoBit
     });
   }
 
@@ -7644,15 +7877,9 @@ let _bajasSearchTimer = null;
 function _buildBajasRows() {
   const activos = DB.get('activos');
   const asignaciones = DB.get('asignaciones');
+  const historial = DB.get('historialBajas') || [];
   const rows = [];
   activos.forEach(a => {
-    const eUp = (a.estado || '').toUpperCase();
-    if (eUp !== 'BAJA' && eUp !== 'DADO DE BAJA') return;
-    // Verificar que no esté ya ejecutado (en historial)
-    const historial = DB.get('historialBajas');
-    const yaEjecutado = historial.some(h => h.activoId === a.id && h.estadoBaja === 'Ejecutada');
-    if (yaEjecutado) return;
-
     // Buscar última asignación para obtener responsable
     const ultimaAsig = asignaciones.filter(x => x.activoId === a.id).sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0];
 
@@ -7668,8 +7895,26 @@ function _buildBajasRows() {
     }
 
     const tieneValor = a.costo && parseFloat(a.costo) > 0;
+    const eUp = (a.estado || '').toUpperCase();
+    const _seriesList = (a.series && a.series.length > 0) ? a.series : [{}];
 
-    (a.series || [{}]).forEach(s => {
+    _seriesList.forEach(s => {
+      // Determinar si esta serie específica está en baja
+      const serieEstado = (s.estadoSerie || '').toUpperCase();
+      const esBajaSerie = serieEstado === 'BAJA' || serieEstado === 'DADO DE BAJA';
+      const esBajaGlobal = eUp === 'BAJA' || eUp === 'DADO DE BAJA';
+
+      // Solo incluir si: la serie individual está en baja, O el activo global está en baja (activos con 1 sola serie o sin series)
+      if (!esBajaSerie && !esBajaGlobal) return;
+      // Si el activo tiene múltiples series y el estado global es baja pero esta serie no, verificar
+      if (_seriesList.length > 1 && !esBajaSerie && esBajaGlobal) return;
+
+      // Verificar que no esté ya ejecutado (en historial)
+      const _serieKey = (s.serie || '').toUpperCase().trim();
+      const yaEjecutado = historial.some(h => h.activoId === a.id && (h.estadoBaja === 'Ejecutada') &&
+        (!_serieKey || (h.serie || '').toUpperCase().trim() === _serieKey));
+      if (yaEjecutado) return;
+
       rows.push({
         activoId: a.id,
         codigo: a.codigo || '',
@@ -7680,13 +7925,13 @@ function _buildBajasRows() {
         modelo: a.modelo || '',
         serie: s.serie || '',
         codInventario: s.codInventario || '',
-        estadoCmdb: a.estado || 'Baja',
-        estadoEquipo: a.estadoEquipo || '',
+        estadoCmdb: s.estadoSerie || a.estado || 'Baja',
+        estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
         antiguedad,
         fechaCompra: a.fechaCompra || '',
         costo: a.costo || 0,
         valorizado: tieneValor,
-        motivoBaja: a.motivoBaja || a.obsRetorno || '',
+        motivoBaja: s.motivoBaja || a.motivoBaja || a.obsRetorno || '',
         responsable: ultimaAsig ? (ultimaAsig.colaboradorNombre || '') : (a.responsable || ''),
         observaciones: a.obsRetorno || a.observaciones || '',
         origenEquipo: a.origenEquipo || '',
@@ -8088,7 +8333,22 @@ function _confirmarEjecucionBajas() {
   selRows.forEach(r => {
     const activo = activos.find(a => a.id === r.activoId);
     if (activo) {
-      activo.estado = 'Dado de Baja';
+      // Marcar serie específica como dada de baja
+      const _serieKey = (r.serie || '').toUpperCase().trim();
+      if (_serieKey && activo.series && activo.series.length > 1) {
+        const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === _serieKey);
+        if (serieObj) {
+          serieObj.estadoSerie = 'Dado de Baja';
+          serieObj.fechaBajaEjecutada = fechaSalida;
+        }
+        // Solo marcar activo global si TODAS las series están dadas de baja
+        const todasDadas = activo.series.every(s => (s.estadoSerie || '').toUpperCase() === 'DADO DE BAJA');
+        if (todasDadas) {
+          activo.estado = 'Dado de Baja';
+        }
+      } else {
+        activo.estado = 'Dado de Baja';
+      }
       activo.fechaBajaEjecutada = fechaSalida;
       activo.guiaSalida = numGuia;
       activo.guiaSalidaArchivo = window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '';
@@ -8567,8 +8827,10 @@ const PARAM_TABS = [
   { key: 'tipos',         label: 'Tipo de Equipos', hier: true },
   { key: 'marcas',        label: 'Marcas' },
   { key: 'gamas',         label: 'Gamas' },
-  { key: 'estados',       label: 'Estado CMDB' },
-  { key: 'estadosEquipo', label: 'Estado Equipo' },
+  // Estado CMDB oculto — los estados son parte de la lógica interna (Disponible, Asignado, Baja, etc.)
+  // { key: 'estados',       label: 'Estado CMDB' },
+  // Estado Equipo oculto — valores fijos del sistema (NUEVO, BUENO, REGULAR, MALO, OBSOLETO)
+  // { key: 'estadosEquipo', label: 'Estado Equipo' },
   { key: 'origenes',      label: 'Orígenes' },
   { key: 'tipoDocumento', label: 'Tipo Documento' },
   { key: 'sistemasOS',    label: 'Sistemas OS' },

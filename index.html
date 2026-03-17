@@ -111,7 +111,8 @@
         </div>
       </div>
       <div class="topbar-right">
-        <button class="topbar-btn" title="Notificaciones">🔔<span class="badge"></span></button>
+        <button class="topbar-btn" id="notifBellBtn" title="Notificaciones" onclick="_toggleNotifPanel()" style="position:relative">🔔<span class="notif-count" id="notifCount" style="display:none"></span><span class="notif-pulse" id="notifPulse" style="display:none"></span></button>
+        <div class="notif-panel" id="notifPanel" style="display:none"></div>
         <button class="topbar-btn" title="Configuración" onclick="navigateTo('configuracion','parametros')">⚙️</button>
       </div>
     </div>
