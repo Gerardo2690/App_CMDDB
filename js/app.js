@@ -145,7 +145,7 @@ function initSampleData() {
   if (!DB.getConfig('marcas', null))
     DB.setConfig('marcas', ['DELL', 'HP', 'LENOVO', 'APPLE', 'SAMSUNG', 'CISCO', 'ASUS', 'ACER', 'MICROSOFT']);
   if (!DB.getConfig('estados', null))
-    DB.setConfig('estados', ['Disponible', 'Asignado', 'En Mantenimiento', 'Dado de Baja']);
+    DB.setConfig('estados', ['Disponible', 'Asignado', 'Mantenimiento', 'Dado de Baja']);
   if (!DB.getConfig('ubicaciones', null))
     DB.setConfig('ubicaciones', ['ALMACÉN SAN BORJA', 'ALMACÉN NORTE', 'ALMACÉN SUR', 'ALMACÉN CENTRAL', 'DATA CENTER', 'ALMACEN TI PR']);
   if (!DB.getConfig('areas', null))
@@ -1041,7 +1041,7 @@ function renderDashboard1(el) {
   const estadoColors = {
     'Disponible': '#10b981',
     'Asignado': '#3b82f6',
-    'En Mantenimiento': '#f59e0b',
+    'Mantenimiento': '#f59e0b',
     'Dado de Baja': '#ef4444'
   };
 
@@ -1074,7 +1074,7 @@ function renderDashboard1(el) {
       </div>
       <div class="stat-card">
         <div class="stat-header"><div class="stat-icon orange">🔧</div></div>
-        <div class="stat-value">${byEstado['En Mantenimiento'] || 0}</div>
+        <div class="stat-value">${byEstado['Mantenimiento'] || 0}</div>
         <div class="stat-label">En mantenimiento</div>
       </div>
       <div class="stat-card">
@@ -3296,7 +3296,7 @@ function _renderAsignacionModal(fresh) {
   const stock = [];
   activos.forEach(a => {
     const e = (a.estado||'').toUpperCase();
-    if (e === 'BAJA' || e === 'NO RECUPERABLE' || e === 'DADO DE BAJA' || e === 'EN MANTENIMIENTO') return;
+    if (e === 'BAJA' || e === 'NO RECUPERABLE' || e === 'DADO DE BAJA' || e === 'MANTENIMIENTO') return;
     // En reemplazo con equipo seleccionado, filtrar por mismo tipo
     if (isReemplazo && reemTipoFiltro && (a.tipo||'').toUpperCase().trim() !== reemTipoFiltro) return;
     (a.series||[]).forEach(s => {
@@ -3972,7 +3972,7 @@ function _renderReemplazoModal() {
     const stock = [];
     activos.forEach(a => {
       const estadoUp = (a.estado || '').toUpperCase();
-      if (estadoUp === 'BAJA' || estadoUp === 'NO RECUPERABLE' || estadoUp === 'DADO DE BAJA' || estadoUp === 'EN MANTENIMIENTO') return;
+      if (estadoUp === 'BAJA' || estadoUp === 'NO RECUPERABLE' || estadoUp === 'DADO DE BAJA' || estadoUp === 'MANTENIMIENTO') return;
       if (tipoFiltro && (a.tipo || '').toUpperCase().trim() !== tipoFiltro) return;
       (a.series || []).forEach(s => {
         const key = a.id + '||' + (s.serie || '').toUpperCase().trim();
@@ -4335,9 +4335,9 @@ function openStockModal() {
   );
   const stock = [];
   activos.forEach(a => {
-    // Skip activos en Baja, No Recuperable, Dado de Baja, En Mantenimiento
+    // Skip activos en Baja, No Recuperable, Dado de Baja, Mantenimiento
     const estadoUp = (a.estado || '').toUpperCase();
-    if (estadoUp === 'BAJA' || estadoUp === 'NO RECUPERABLE' || estadoUp === 'DADO DE BAJA' || estadoUp === 'EN MANTENIMIENTO') return;
+    if (estadoUp === 'BAJA' || estadoUp === 'NO RECUPERABLE' || estadoUp === 'DADO DE BAJA' || estadoUp === 'MANTENIMIENTO') return;
     const series = a.series || [];
     // Solo mostrar activos que tengan series con stock
     if (series.length === 0) return;
@@ -5262,23 +5262,61 @@ function _ejecutarDevSingle(asigId) {
         case 'DISPONIBLE':
           activo.estado = 'Disponible'; activo.estadoEquipo = subDestino || 'USADO'; activo.responsable = ''; break;
         case 'MANTENIMIENTO':
-          activo.estado = 'En Mantenimiento'; activo.estadoEquipo = subDestino || 'REPARACIÓN'; activo.responsable = ''; break;
+          activo.estado = 'Mantenimiento'; activo.estadoEquipo = subDestino || 'REPARACIÓN'; activo.responsable = ''; break;
         case 'BAJA':
           activo.estado = 'Dado de Baja'; activo.motivoBaja = subDestino || ''; activo.responsable = ''; break;
         case 'NO RECUPERABLE':
-          break;
+          activo.estado = 'Dado de Baja'; activo.motivoBaja = 'CESE-NO RECUPERABLE'; activo.responsable = ''; break;
       }
+    }
+    // Marcar serie específica como Dado de Baja si es NO RECUPERABLE
+    if (destino === 'NO RECUPERABLE' && a.serieAsignada && activo.series && activo.series.length > 0) {
+      const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (a.serieAsignada || '').toUpperCase().trim());
+      if (serieObj) serieObj.estadoSerie = 'Dado de Baja';
     }
   }
 
   DB.set('asignaciones', asig);
   DB.set('activos', activos);
+
+  // Si es NO RECUPERABLE: registrar directo en historial de bajas
+  if (destino === 'NO RECUPERABLE' && activo) {
+    const historial = DB.get('historialBajas');
+    historial.unshift({
+      id: nextId(historial),
+      activoId: activo.id,
+      activoCodigo: activo.codigo || a.activoCodigo,
+      activoTipo: activo.equipo || activo.tipo || a.activoTipo,
+      marca: activo.marca || '',
+      modelo: activo.modelo || '',
+      serie: a.serieAsignada || '',
+      codInventario: activo.codInventario || '',
+      almacen: activo.ubicacion || '',
+      estadoEquipo: 'NO RECUPERABLE',
+      motivoBaja: 'CESE-NO RECUPERABLE',
+      costo: activo.costo || 0,
+      fechaCompra: activo.fechaCompra || '',
+      antiguedad: '',
+      responsable: a.colaboradorNombre || '',
+      observaciones: 'Equipo no recuperable por cese de colaborador',
+      fechaSalida: today(),
+      numGuia: '',
+      guiaArchivo: '',
+      etapaBaja: '',
+      estadoBaja: 'Ejecutada',
+      fechaAprobacion: today(),
+      solicitante: currentUser ? currentUser.nombre : 'Sistema'
+    });
+    DB.set('historialBajas', historial);
+  }
+
   addMovimiento('Devolución', `${a.activoCodigo} → ${destino}${subDestino ? ' (' + subDestino + ')' : ''} — devuelto por ${a.colaboradorNombre}`);
 
-  // Auto-registrar en bitácora: INGRESO (equipo devuelto regresa a almacén)
+  // Auto-registrar en bitácora
   if (activo) {
+    const _bitMotivo = destino === 'NO RECUPERABLE' ? 'CESE-NO RECUPERABLE' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((a.tipoAsignacion || a.motivo || '').toUpperCase())) ? (a.tipoAsignacion || a.motivo) : '';
     _autoBitacora({
-      movimiento: 'INGRESO',
+      movimiento: destino === 'NO RECUPERABLE' ? 'BAJA' : 'INGRESO',
       almacen: (activo.ubicacion || 'Almacen TI'),
       tipoEquipo: activo.tipo || a.activoTipo || '',
       equipo: activo.equipo || activo.tipo || '',
@@ -5286,7 +5324,7 @@ function _ejecutarDevSingle(asigId) {
       serie: a.serieAsignada || '',
       inv: activo.codInventario || '',
       correo: a.correoColab || '',
-      motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((a.tipoAsignacion || a.motivo || '').toUpperCase())) ? (a.tipoAsignacion || a.motivo) : ''
+      motivo: _bitMotivo
     });
   }
 
@@ -5639,18 +5677,29 @@ function _ejecutarDevolucion(colabId) {
   const activos = DB.get('activos');
   const resumen = [];
 
+  const _nrItems = []; // Para registrar NO RECUPERABLE después
+
   items.forEach((item, i) => {
     const destino = document.getElementById('devDest_' + i).value;
     const subSel = document.getElementById('devSub_' + i);
     const subDestino = subSel && subSel.value ? subSel.value : '';
+    item.destino = destino; // guardar para bitácora
 
     // Marcar asignación como devuelta
     const a = asig.find(x => x.id === item.asigId);
     if (a) a.estado = 'Devuelto';
 
-    // Actualizar activo según destino (solo si no quedan más series vigentes)
+    // Actualizar activo según destino
     const activo = activos.find(x => x.id === item.activoId);
     if (!activo) return;
+
+    // Marcar serie específica si aplica
+    if (item.serie && activo.series && activo.series.length > 0) {
+      const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (item.serie || '').toUpperCase().trim());
+      if (serieObj && destino === 'NO RECUPERABLE') {
+        serieObj.estadoSerie = 'Dado de Baja';
+      }
+    }
 
     const otrasVigentes = asig.filter(o => o.activoId === item.activoId && o.estado === 'Vigente').length;
 
@@ -5665,7 +5714,7 @@ function _ejecutarDevolucion(colabId) {
         break;
       case 'MANTENIMIENTO':
         if (otrasVigentes === 0) {
-          activo.estado = 'En Mantenimiento';
+          activo.estado = 'Mantenimiento';
           activo.estadoEquipo = subDestino || 'REPARACIÓN';
           activo.responsable = '';
         }
@@ -5680,6 +5729,12 @@ function _ejecutarDevolucion(colabId) {
         resumen.push(`${item.codigo} → BAJA (${subDestino})`);
         break;
       case 'NO RECUPERABLE':
+        if (otrasVigentes === 0) {
+          activo.estado = 'Dado de Baja';
+          activo.motivoBaja = 'CESE-NO RECUPERABLE';
+          activo.responsable = '';
+        }
+        _nrItems.push({ item, activo });
         resumen.push(`${item.codigo} → NO RECUPERABLE`);
         break;
     }
@@ -5689,14 +5744,48 @@ function _ejecutarDevolucion(colabId) {
   DB.set('activos', activos);
 
   const c = DB.get('colaboradores').find(x => x.id === colabId);
+
+  // Registrar NO RECUPERABLE directo en historial de bajas
+  if (_nrItems.length > 0) {
+    const histBajas = DB.get('historialBajas');
+    _nrItems.forEach(({ item, activo }) => {
+      histBajas.unshift({
+        id: nextId(histBajas),
+        activoId: item.activoId,
+        activoCodigo: item.codigo,
+        activoTipo: activo.equipo || activo.tipo || '',
+        marca: activo.marca || '',
+        modelo: activo.modelo || '',
+        serie: item.serie || '',
+        codInventario: activo.codInventario || '',
+        almacen: activo.ubicacion || '',
+        estadoEquipo: 'NO RECUPERABLE',
+        motivoBaja: 'CESE-NO RECUPERABLE',
+        costo: activo.costo || 0,
+        fechaCompra: activo.fechaCompra || '',
+        antiguedad: '',
+        responsable: c ? c.nombre : '',
+        observaciones: 'Equipo no recuperable por cese de colaborador',
+        fechaSalida: today(),
+        numGuia: '',
+        guiaArchivo: '',
+        etapaBaja: '',
+        estadoBaja: 'Ejecutada',
+        fechaAprobacion: today(),
+        solicitante: currentUser ? currentUser.nombre : 'Sistema'
+      });
+    });
+    DB.set('historialBajas', histBajas);
+  }
   addMovimiento('Devolución Cese', `${items.length} activo(s) procesados de ${c ? c.nombre : 'colaborador'}: ${resumen.join('; ')}`);
 
-  // Auto-registrar en bitácora: INGRESO por cada equipo devuelto
+  // Auto-registrar en bitácora por cada equipo devuelto
   items.forEach(item => {
     const _devActivo = activos.find(x => x.id === item.activoId);
     if (_devActivo) {
+      const _isNR = item.destino === 'NO RECUPERABLE';
       _autoBitacora({
-        movimiento: 'INGRESO',
+        movimiento: _isNR ? 'BAJA' : 'INGRESO',
         almacen: (_devActivo.ubicacion || 'Almacen TI'),
         tipoEquipo: _devActivo.tipo || '',
         equipo: _devActivo.equipo || _devActivo.tipo || '',
@@ -5704,7 +5793,7 @@ function _ejecutarDevolucion(colabId) {
         serie: item.serie || '',
         inv: _devActivo.codInventario || '',
         correo: c ? (c.email || '') : '',
-        motivo: (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((item.motivo || '').toUpperCase())) ? item.motivo : ''
+        motivo: _isNR ? 'CESE-NO RECUPERABLE' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((item.motivo || '').toUpperCase())) ? item.motivo : ''
       });
     }
   });
@@ -6342,6 +6431,10 @@ function _buildInventarioRows() {
   const rows = [];
 
   activos.forEach(a => {
+    // Excluir activos dados de baja definitiva
+    const _eUp = (a.estado || '').toUpperCase();
+    if (_eUp === 'DADO DE BAJA') return;
+
     const series = a.series || [];
     if (series.length === 0) {
       // Activo sin series — una fila
@@ -6370,6 +6463,9 @@ function _buildInventarioRows() {
       });
     } else {
       series.forEach(s => {
+        // Excluir series dadas de baja ejecutada
+        const _serieEstado = (s.estadoSerie || '').toUpperCase();
+        if (_serieEstado === 'DADO DE BAJA') return;
         // Buscar asignación vigente para ESTA serie específica (case-insensitive)
         const serieUp = (s.serie || '').toUpperCase().trim();
         const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (x.serieAsignada || '').toUpperCase().trim() === serieUp);
@@ -6386,8 +6482,8 @@ function _buildInventarioRows() {
           fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
           motivo: asig ? asig.motivo || '' : '',
           actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
-          estadoCMDB: asig ? 'Asignado' : (a.estado || 'Disponible'),
-          estadoEquipo: a.estadoEquipo || '',
+          estadoCMDB: asig ? 'Asignado' : (s.estadoSerie || a.estado || 'Disponible'),
+          estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
           usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
           areaTrabajo: colab ? colab.area || '' : '',
           correo: colab ? colab.email || '' : '',
@@ -6444,7 +6540,14 @@ function verDetalleSerie(activoId, serie) {
       ${_f('Cod. Inventario', serieObj.codInventario, {mono:true})}
       ${_f('Tipo de Equipo', activo.tipo)}
       ${_f('Equipo', activo.equipo || activo.tipo)}
-      ${_f('Estado Equipo', activo.estadoEquipo + (activo.obsRetorno ? ' - ' + activo.obsRetorno : ''), {color: activo.estadoEquipo === 'NUEVO' ? '#16a34a' : activo.estadoEquipo === 'BUENO' ? '#2563eb' : '#d97706'})}
+      ${(() => {
+        const _eqEst = serieObj.estadoEquipoSerie || activo.estadoEquipo || '';
+        const _eqPartes = serieObj.partesAfectadas || activo.partesAfectadas || '';
+        const _eqObs = serieObj.obsRetorno || activo.obsRetorno || '';
+        const _eqFull = _eqEst + (_eqPartes ? ' — ' + _eqPartes : '') + (_eqObs ? ' — ' + _eqObs : '');
+        const _eqColor = _eqEst === 'NUEVO' ? '#16a34a' : _eqEst === 'BUENO' || _eqEst === 'USADO' ? '#2563eb' : '#d97706';
+        return _f('Estado Equipo', _eqFull, {color: _eqColor});
+      })()}
       ${_f('Origen', activo.origenEquipo)}
       ${_f('Gama', activo.gama)}
       ${_f('Fecha Ingreso', formatDate(activo.fechaIngreso))}
@@ -6502,21 +6605,30 @@ function verDetalleSerie(activoId, serie) {
   ` : '';
 
   // ── TAB: Almacén (si disponible) ──
+  const _almEstado = (serieObj.estadoSerie || activo.estado || 'Disponible');
+  const _almEsMant = _almEstado.toUpperCase().includes('MANTENIMIENTO');
+  const _almEsBaja = _almEstado.toUpperCase() === 'BAJA' || _almEstado.toUpperCase() === 'DADO DE BAJA';
   const tabAlmacen = !esAsignado ? `
-    <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,#f0fdf4,#dcfce7);border-radius:12px;margin-bottom:14px">
-      <div style="width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,#10b981,#059669);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0">🏢</div>
+    <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,${_almEsMant ? '#fefce8,#fef9c3' : _almEsBaja ? '#fef2f2,#fee2e2' : '#f0fdf4,#dcfce7'});border-radius:12px;margin-bottom:14px">
+      <div style="width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,${_almEsMant ? '#f59e0b,#d97706' : _almEsBaja ? '#ef4444,#dc2626' : '#10b981,#059669'});display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0">${_almEsMant ? '🔧' : _almEsBaja ? '⛔' : '🏢'}</div>
       <div style="flex:1">
-        <div style="font-size:16px;font-weight:800;color:#14532d">${esc(activo.ubicacion || 'Sin ubicación')}</div>
-        <div style="font-size:12px;color:#64748b;margin-top:2px">Equipo disponible en almacén</div>
+        <div style="font-size:16px;font-weight:800;color:${_almEsMant ? '#92400e' : _almEsBaja ? '#991b1b' : '#14532d'}">${esc(activo.ubicacion || 'Sin ubicación')}</div>
+        <div style="font-size:12px;color:#64748b;margin-top:2px">${_almEsMant ? 'Equipo en mantenimiento' : _almEsBaja ? 'Equipo dado de baja' : 'Equipo disponible en almacén'}</div>
       </div>
-      <span style="padding:4px 10px;border-radius:16px;font-size:10px;font-weight:700;background:#dcfce7;color:#166534">EN STOCK</span>
+      <span style="padding:4px 10px;border-radius:16px;font-size:10px;font-weight:700;${_almEsMant ? 'background:#fef3c7;color:#92400e' : _almEsBaja ? 'background:#fef2f2;color:#991b1b' : 'background:#dcfce7;color:#166534'}">${_almEsMant ? 'MANTENIMIENTO' : _almEsBaja ? 'BAJA' : 'EN STOCK'}</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       ${_f('Sede / Ubicación', activo.ubicacion, {bg:'#f0fdf4', border:'#bbf7d0'})}
       ${_f('Ubicación Almacén', activo.ubicacionAlmacen, {bg:'#f0fdf4', border:'#bbf7d0'})}
       ${_f('Fecha Ingreso', formatDate(activo.fechaIngreso))}
       ${_f('Fecha Compra', formatDate(activo.fechaCompra))}
-      ${_f('Estado Equipo', activo.estadoEquipo)}
+      ${(() => {
+        const _aeEst = serieObj.estadoEquipoSerie || activo.estadoEquipo || '';
+        const _aePartes = serieObj.partesAfectadas || activo.partesAfectadas || '';
+        const _aeObs = serieObj.obsRetorno || activo.obsRetorno || '';
+        const _aeFull = _aeEst + (_aePartes ? ' — ' + _aePartes : '') + (_aeObs ? ' — ' + _aeObs : '');
+        return _f('Estado Equipo', _aeFull);
+      })()}
       ${_f('Origen', activo.origenEquipo)}
     </div>
     ${activo.observaciones ? `<div style="margin-top:10px;padding:10px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px">
@@ -6570,11 +6682,21 @@ function verDetalleSerie(activoId, serie) {
           <div style="font-size:12px;color:#64748b;margin-top:3px">${esc(activo.tipo)} &middot; S/N: <strong style="font-family:monospace;color:#334155">${esc(serie)}</strong></div>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px">
-          <span style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.3px;${esAsignado
-            ? 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd'
-            : 'background:#dcfce7;color:#166534;border:1px solid #86efac'
-          }">${esAsignado ? 'ASIGNADO' : 'DISPONIBLE'}</span>
-          ${activo.estadoEquipo ? `<span style="padding:3px 10px;border-radius:16px;font-size:10px;font-weight:600;background:#f1f5f9;color:#475569">${esc(activo.estadoEquipo)}</span>` : ''}
+          ${(() => {
+            const _estadoSerie = serieObj.estadoSerie || activo.estado || 'Disponible';
+            const _esMantenimiento = (_estadoSerie || '').toUpperCase().includes('MANTENIMIENTO');
+            const _esBaja = (_estadoSerie || '').toUpperCase() === 'BAJA' || (_estadoSerie || '').toUpperCase() === 'DADO DE BAJA';
+            const _badgeStyle = esAsignado ? 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd'
+              : _esMantenimiento ? 'background:#fef3c7;color:#92400e;border:1px solid #fde68a'
+              : _esBaja ? 'background:#fef2f2;color:#991b1b;border:1px solid #fecaca'
+              : 'background:#dcfce7;color:#166534;border:1px solid #86efac';
+            const _badgeLabel = esAsignado ? 'ASIGNADO' : _esMantenimiento ? 'MANTENIMIENTO' : _esBaja ? 'BAJA' : 'DISPONIBLE';
+            return '<span style="padding:5px 14px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.3px;' + _badgeStyle + '">' + _badgeLabel + '</span>';
+          })()}
+          ${(() => {
+            const _eqSerie = serieObj.estadoEquipoSerie || activo.estadoEquipo || '';
+            return _eqSerie ? '<span style="padding:3px 10px;border-radius:16px;font-size:10px;font-weight:600;background:#f1f5f9;color:#475569">' + esc(_eqSerie) + '</span>' : '';
+          })()}
         </div>
       </div>
 
@@ -6829,7 +6951,7 @@ function _renderInvTable() {
                   const estadoBadge = r.estadoCMDB === 'Disponible' ? 'badge-success' :
                     r.estadoCMDB === 'Asignado' ? 'badge-info' :
                     r.estadoCMDB === 'Pendiente Retorno' ? 'badge-warning' :
-                    r.estadoCMDB === 'En Mantenimiento' ? 'badge-warning' : 'badge-danger';
+                    r.estadoCMDB === 'Mantenimiento' ? 'badge-warning' : 'badge-danger';
                   return `
                     <tr>
                       <td style="${tdStyle}">${esc(r.sede || '—')}</td>
@@ -6885,24 +7007,65 @@ let _bitFilterEstado = 'Todos';
 let _bitSearchTimer = null;
 
 // Almacén de archivos adjuntos (base64) - persistido en localStorage
+// ── IndexedDB para archivos de bitácora (sin límite de localStorage) ──
 const _bitArchivos = {
-  get() { return DB.get('bitacoraArchivos'); },
-  set(data) { DB.set('bitacoraArchivos', data); },
-  save(movId, fileData) {
-    const arch = this.get();
-    arch.push({ movId, ...fileData });
-    this.set(arch);
+  _dbName: 'ati_archivos_db',
+  _storeName: 'bitacoraArchivos',
+  _open() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(this._dbName, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(this._storeName)) {
+          db.createObjectStore(this._storeName, { keyPath: 'movId' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
   },
-  find(movId) { return this.get().find(a => a.movId === movId); }
+  async save(movId, fileData) {
+    try {
+      const db = await this._open();
+      const tx = db.transaction(this._storeName, 'readwrite');
+      tx.objectStore(this._storeName).put({ movId, ...fileData });
+      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+      db.close();
+    } catch(e) { showToast('Error al guardar archivo', 'error'); console.error(e); }
+  },
+  async find(movId) {
+    try {
+      const db = await this._open();
+      const tx = db.transaction(this._storeName, 'readonly');
+      const req = tx.objectStore(this._storeName).get(movId);
+      const result = await new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = rej; });
+      db.close();
+      return result || null;
+    } catch(e) { console.error(e); return null; }
+  },
+  // Migrar datos viejos de localStorage a IndexedDB (una sola vez)
+  async migrate() {
+    try {
+      const old = DB.get('bitacoraArchivos');
+      if (old && old.length > 0) {
+        const db = await this._open();
+        const tx = db.transaction(this._storeName, 'readwrite');
+        const store = tx.objectStore(this._storeName);
+        old.forEach(item => store.put(item));
+        await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+        db.close();
+        localStorage.removeItem('ati_bitacoraArchivos');
+      }
+    } catch(e) { console.error('Error migrando archivos:', e); }
+  }
 };
 
 function _initBitacoraData() {
   if (!localStorage.getItem('ati_bitacoraMovimientos')) {
     DB.set('bitacoraMovimientos', []);
   }
-  if (!localStorage.getItem('ati_bitacoraArchivos')) {
-    DB.set('bitacoraArchivos', []);
-  }
+  // Migrar archivos viejos de localStorage a IndexedDB
+  _bitArchivos.migrate();
 }
 
 // Limpia el campo almacén: solo deja el nombre del almacén sin rutas ni usuarios
@@ -7088,8 +7251,9 @@ function _renderBitTable() {
                     ? `<span class="badge badge-success bit-badge-estado">ATENDIDO</span>`
                     : `<span class="badge badge-warning bit-badge-estado">PENDIENTE</span>`;
 
-                  const actaHTML = isCancelado
-                    ? `<button class="btn bit-btn-cargar" disabled style="opacity:0.5;cursor:not-allowed">📎 Cargar acta</button>`
+                  const _isBajaNR = (m.movimiento || '').toUpperCase() === 'BAJA' && (m.motivo || '').toUpperCase() === 'CESE-NO RECUPERABLE';
+                  const actaHTML = (isCancelado || _isBajaNR)
+                    ? `<button class="btn bit-btn-cargar" disabled style="opacity:0.5;cursor:not-allowed" title="${_isBajaNR ? 'No aplica acta para baja no recuperable' : ''}">📎 Cargar acta</button>`
                     : m.actaCorrelativo
                     ? `<span class="bit-acta-link" onclick="verActaAdjunta(${m.id})" title="Ver acta adjunta">${esc(m.actaCorrelativo)}</span>`
                     : `<button class="btn bit-btn-cargar" onclick="cargarActaBitacora(${m.id})">📎 Cargar acta</button>`;
@@ -7358,11 +7522,12 @@ function _onBitFileSelected(input, movId) {
     `;
     document.getElementById('bitUploadBtn').disabled = false;
   };
+  reader.onerror = function() { showToast('Error al leer el archivo', 'error'); };
   reader.readAsDataURL(file);
 }
 
-function _confirmActaUpload(movId) {
-  if (!_bitPendingFile) return;
+async function _confirmActaUpload(movId) {
+  if (!_bitPendingFile) { showToast('No hay archivo seleccionado', 'error'); return; }
 
   const movs = DB.get('bitacoraMovimientos');
   const idx = movs.findIndex(m => m.id === movId);
@@ -7370,8 +7535,8 @@ function _confirmActaUpload(movId) {
 
   const correlativo = _nextActaCorrelativo();
 
-  // Guardar archivo
-  _bitArchivos.save(movId, {
+  // Guardar archivo en IndexedDB
+  await _bitArchivos.save(movId, {
     correlativo,
     name: _bitPendingFile.name,
     type: _bitPendingFile.type,
@@ -7385,7 +7550,7 @@ function _confirmActaUpload(movId) {
   const _refFecha = (ref.fechaRegistro || '').split('T')[0];
   const _relatedIds = [];
 
-  movs.forEach((m, i) => {
+  for (const m of movs) {
     const mTicket = (m.ticket || '').toUpperCase().trim();
     const mCorreo = (m.correo || '').toUpperCase().trim();
     const mFecha = (m.fechaRegistro || '').split('T')[0];
@@ -7395,7 +7560,7 @@ function _confirmActaUpload(movId) {
       _relatedIds.push(m.id);
       // Guardar el mismo archivo para cada movimiento relacionado
       if (m.id !== movId) {
-        _bitArchivos.save(m.id, {
+        await _bitArchivos.save(m.id, {
           correlativo,
           name: _bitPendingFile.name,
           type: _bitPendingFile.type,
@@ -7403,7 +7568,7 @@ function _confirmActaUpload(movId) {
         });
       }
     }
-  });
+  }
 
   // Si no se encontraron relacionados por ticket (fallback), actualizar solo el actual
   if (_relatedIds.length === 0) {
@@ -7441,8 +7606,8 @@ function _confirmActaUpload(movId) {
   renderPage();
 }
 
-function verActaAdjunta(movId) {
-  const archivo = _bitArchivos.find(movId);
+async function verActaAdjunta(movId) {
+  const archivo = await _bitArchivos.find(movId);
   if (!archivo) {
     showToast('No se encontro el archivo adjunto', 'error');
     return;
@@ -7636,7 +7801,7 @@ function confirmarRetorno(asigId, motivo) {
             style="flex:1;padding:10px;border-radius:8px;border:2px solid #e2e8f0;background:#fff;font-weight:600;font-size:12px;cursor:pointer;transition:all .15s">
             <div style="font-size:16px;margin-bottom:2px">✅</div>DISPONIBLE
           </button>
-          <button type="button" class="btn btn-sm" onclick="_retornoSelectCmdb('En Mantenimiento')" id="retCmdb_Mantenimiento"
+          <button type="button" class="btn btn-sm" onclick="_retornoSelectCmdb('Mantenimiento')" id="retCmdb_Mantenimiento"
             style="flex:1;padding:10px;border-radius:8px;border:2px solid #e2e8f0;background:#fff;font-weight:600;font-size:12px;cursor:pointer;transition:all .15s">
             <div style="font-size:16px;margin-bottom:2px">🔧</div>MANTENIMIENTO
           </button>
@@ -7691,7 +7856,7 @@ let _retornoDenunciaFile = null;
 
 const _RETORNO_ESTADOS = {
   'Disponible':       ['NUEVO', 'USADO'],
-  'En Mantenimiento': ['GARANTÍA', 'REPARACIÓN'],
+  'Mantenimiento': ['GARANTÍA', 'REPARACIÓN'],
   'Baja':             ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN', 'ROBO']
 };
 
@@ -7724,9 +7889,9 @@ function _retornoSelectCmdb(val) {
   document.querySelectorAll('#retornoCmdbBtns button').forEach(b => {
     b.style.borderColor = '#e2e8f0'; b.style.background = '#fff'; b.style.color = '#334155';
   });
-  const colors = { 'Disponible': '#10b981', 'En Mantenimiento': '#f59e0b', 'Baja': '#ef4444' };
-  const bg = { 'Disponible': '#f0fdf4', 'En Mantenimiento': '#fffbeb', 'Baja': '#fef2f2' };
-  const key = val === 'En Mantenimiento' ? 'Mantenimiento' : val;
+  const colors = { 'Disponible': '#10b981', 'Mantenimiento': '#f59e0b', 'Baja': '#ef4444' };
+  const bg = { 'Disponible': '#f0fdf4', 'Mantenimiento': '#fffbeb', 'Baja': '#fef2f2' };
+  const key = val === 'Mantenimiento' ? 'Mantenimiento' : val;
   const btn = document.getElementById('retCmdb_' + key);
   if (btn) { btn.style.borderColor = colors[val]; btn.style.background = bg[val]; btn.style.color = colors[val]; }
 
@@ -7800,6 +7965,8 @@ function _ejecutarRetorno() {
       if (serieObj) {
         serieObj.estadoSerie = _retornoCmdb;
         serieObj.estadoEquipoSerie = _retornoEstadoEq;
+        if (partes.length) serieObj.partesAfectadas = partes.join(', ');
+        serieObj.obsRetorno = obs.trim();
         if (_esRoboRet) serieObj.motivoBaja = 'ROBO';
         else if (_retornoCmdb === 'Baja') serieObj.motivoBaja = _retornoEstadoEq;
       }
@@ -7894,7 +8061,6 @@ function _buildBajasRows() {
       antiguedad = diffYears > 0 ? `${diffYears}a ${diffMonths}m` : `${diffMonths}m`;
     }
 
-    const tieneValor = a.costo && parseFloat(a.costo) > 0;
     const eUp = (a.estado || '').toUpperCase();
     const _seriesList = (a.series && a.series.length > 0) ? a.series : [{}];
 
@@ -7930,7 +8096,8 @@ function _buildBajasRows() {
         antiguedad,
         fechaCompra: a.fechaCompra || '',
         costo: a.costo || 0,
-        valorizado: tieneValor,
+        valorizado: s.valorizado || a.valorizado || 'PENDIENTE',
+        etapaBaja: s.etapaBaja || a.etapaBaja || '',
         motivoBaja: s.motivoBaja || a.motivoBaja || a.obsRetorno || '',
         responsable: ultimaAsig ? (ultimaAsig.colaboradorNombre || '') : (a.responsable || ''),
         observaciones: a.obsRetorno || a.observaciones || '',
@@ -7948,8 +8115,8 @@ function _buildBajasRows() {
 
 function renderBajasPendientes(el) {
   const rows = _buildBajasRows();
-  const totalValorizados = rows.filter(r => r.valorizado).length;
-  const totalSinValorizar = rows.filter(r => !r.valorizado).length;
+  const totalValorizados = rows.filter(r => r.valorizado === 'VALOR <=0').length;
+  const totalSinValorizar = rows.filter(r => r.valorizado === 'PENDIENTE').length;
   const totalCosto = rows.reduce((s, r) => s + (parseFloat(r.costo) || 0), 0);
 
   // Filtrar por búsqueda
@@ -7971,7 +8138,7 @@ function renderBajasPendientes(el) {
   const selCount = _bajasSeleccionadas.size;
   const selAptos = [..._bajasSeleccionadas].filter(k => {
     const r = rows.find(x => (x.activoId + '||' + x.serie) === k);
-    return r && r.valorizado;
+    return r && r.valorizado === 'VALOR <=0';
   }).length;
 
   el.innerHTML = `
@@ -7982,6 +8149,7 @@ function renderBajasPendientes(el) {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-secondary" onclick="_exportBajasPendientes()" ${rows.length === 0 ? 'disabled' : ''}>📥 Exportar Reporte</button>
+        <button class="btn btn-success" onclick="_openValorizarModal()" ${totalSinValorizar === 0 ? 'disabled' : ''} style="background:#16a34a;color:#fff">💰 Valorizar</button>
         <button class="btn btn-primary" onclick="openBajaModal()">+ Solicitar Baja</button>
       </div>
     </div>
@@ -7996,12 +8164,12 @@ function renderBajasPendientes(el) {
       <div class="stat-card">
         <div class="stat-header"><div class="stat-icon green">✅</div></div>
         <div class="stat-value">${totalValorizados}</div>
-        <div class="stat-label">Valorizados (aptos)</div>
+        <div class="stat-label">Valorizados (VALOR &lt;=0)</div>
       </div>
       <div class="stat-card">
         <div class="stat-header"><div class="stat-icon" style="background:#fffbeb;color:#d97706">⚠️</div></div>
         <div class="stat-value">${totalSinValorizar}</div>
-        <div class="stat-label">Sin valorizar</div>
+        <div class="stat-label">Pendientes de valorizar</div>
       </div>
       <div class="stat-card">
         <div class="stat-header"><div class="stat-icon blue">💰</div></div>
@@ -8021,8 +8189,8 @@ function renderBajasPendientes(el) {
       <div style="display:flex;align-items:center;gap:8px">
         ${selCount > 0 ? `
           <span style="font-size:12px;font-weight:600;color:#334155">${selCount} seleccionado(s)</span>
-          ${selAptos < selCount ? `<span style="font-size:11px;color:#d97706" title="Algunos ítems no tienen valorización">⚠️ ${selCount - selAptos} sin valorizar</span>` : ''}
-          <button class="btn btn-danger" onclick="_ejecutarBajasMasivas()" ${selAptos === 0 ? 'disabled title="Ningún ítem seleccionado tiene valorización"' : ''} style="font-weight:700">
+          ${selAptos < selCount ? `<span style="font-size:11px;color:#d97706" title="Algunos ítems están pendientes de valorizar">⚠️ ${selCount - selAptos} pendientes</span>` : ''}
+          <button class="btn btn-danger" onclick="_ejecutarBajasMasivas()" ${selAptos === 0 ? 'disabled title="Solo se pueden ejecutar bajas con valorización VALOR <=0"' : ''} style="font-weight:700">
             ⛔ Ejecutar Bajas (${selAptos})
           </button>
         ` : `
@@ -8095,13 +8263,13 @@ function _renderBajasTable() {
               : pageItems.map(r => {
                   const key = r.activoId + '||' + r.serie;
                   const isSel = _bajasSeleccionadas.has(key);
-                  const canSelect = r.valorizado;
+                  const canSelect = r.valorizado === 'VALOR <=0';
                   const chk = canSelect
                     ? '<input type="checkbox" ' + (isSel ? 'checked' : '') + ' onchange="_bajasToggleItem(\'' + key.replace(/'/g, "\\'") + '\')">'
-                    : '<input type="checkbox" disabled title="Sin valorización — no se puede ejecutar" style="opacity:.4;cursor:not-allowed">';
-                  const valTd = r.valorizado
-                    ? '<span style="color:#10b981;font-weight:700;font-size:12px" title="S/ ' + (parseFloat(r.costo)||0).toFixed(2) + '">SÍ</span>'
-                    : '<span style="color:#d97706;font-weight:700;font-size:12px" title="Falta información de costo">NO</span>';
+                    : '<input type="checkbox" disabled title="Pendiente de valorización — no se puede ejecutar" style="opacity:.4;cursor:not-allowed">';
+                  const valTd = r.valorizado === 'VALOR <=0'
+                    ? '<span style="color:#10b981;font-weight:700;font-size:11px" title="Valorizado — ' + esc(r.etapaBaja || '') + '">VALOR &lt;=0</span>'
+                    : '<span style="color:#d97706;font-weight:700;font-size:11px">PENDIENTE</span>';
                   return '<tr style="background:' + (isSel ? '#fef2f2' : '') + '">'
                     + '<td style="text-align:center">' + chk + '</td>'
                     + '<td style="font-size:12px">' + esc(r.almacen || '—') + '</td>'
@@ -8146,7 +8314,7 @@ function _bajasTogglePageAll(checked) {
   }
   const pageItems = pagSlice(filtered, 'bajasP');
   pageItems.forEach(r => {
-    if (!r.valorizado) return; // Skip non-valorized
+    if (r.valorizado !== 'VALOR <=0') return; // Skip non-valorized
     const key = r.activoId + '||' + r.serie;
     if (checked) _bajasSeleccionadas.add(key);
     else _bajasSeleccionadas.delete(key);
@@ -8215,7 +8383,8 @@ function _exportBajasPendientes() {
     'N° DOCUMENTO': r.nDocumento,
     'TIPO DOCUMENTO': r.tipoDocumento,
     'COSTO (S/)': parseFloat(r.costo) || 0,
-    'VALORIZADO': r.valorizado ? 'SÍ' : 'NO',
+    'VALORIZADO': r.valorizado,
+    'ETAPA_BAJA': r.etapaBaja || '',
     'ÚLTIMO RESPONSABLE': r.responsable,
     'UBICACIÓN': r.almacen,
     'OBSERVACIONES': r.observaciones
@@ -8230,8 +8399,8 @@ function _exportBajasPendientes() {
 
 function _ejecutarBajasMasivas() {
   const rows = _buildBajasRows();
-  const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado);
-  if (selRows.length === 0) { showToast('No hay ítems válidos seleccionados', 'error'); return; }
+  const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado === 'VALOR <=0');
+  if (selRows.length === 0) { showToast('No hay ítems válidos seleccionados (solo se ejecutan valorizados)', 'error'); return; }
 
   const seriesResumen = selRows.map(r => r.serie || r.codigo).join(', ');
 
@@ -8324,7 +8493,7 @@ function _confirmarEjecucionBajas() {
   if (!confirm('¿Está seguro de ejecutar la baja definitiva de los equipos seleccionados? Esta acción es irreversible.')) return;
 
   const rows = _buildBajasRows();
-  const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado);
+  const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado === 'VALOR <=0');
   if (selRows.length === 0) { showToast('No hay ítems válidos', 'error'); return; }
 
   const activos = DB.get('activos');
@@ -8374,6 +8543,7 @@ function _confirmarEjecucionBajas() {
       fechaSalida: fechaSalida,
       numGuia: numGuia,
       guiaArchivo: window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '',
+      etapaBaja: r.etapaBaja || '',
       estadoBaja: 'Ejecutada',
       fechaAprobacion: today(),
       solicitante: currentUser ? currentUser.nombre : 'Sistema'
@@ -8406,6 +8576,208 @@ function _confirmarEjecucionBajas() {
   window._bajaPendGuiaFile = null;
   closeModal();
   showToast(`${selRows.length} equipo(s) dados de baja definitiva correctamente`);
+  renderBajasPendientes(document.getElementById('contentArea'));
+}
+
+/* --- Valorizar bajas pendientes --- */
+function _openValorizarModal() {
+  const rows = _buildBajasRows().filter(r => r.valorizado === 'PENDIENTE');
+  if (rows.length === 0) { showToast('No hay equipos pendientes de valorizar', 'info'); return; }
+  window._valorizarRows = rows;
+
+  openModal('💰 Valorizar Equipos en Baja', `
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;font-size:12px;color:#92400e;display:flex;align-items:center;gap:8px">
+        <span style="font-size:18px">💰</span>
+        <span>Cargue las series valorizadas por Finanzas y adjunte la documentación sustentatoria. Las series encontradas cambiarán a <strong>VALOR &lt;=0</strong>.</span>
+      </div>
+
+      <!-- Etapa y fecha -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div>
+          <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Nombre de Etapa <span class="required">*</span></label>
+          <input class="form-control" id="valEtapaNombre" placeholder="Ej: BAJA 2026-1" style="height:38px;font-size:12px">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Fecha de valorización</label>
+          <input type="date" class="form-control" id="valFecha" value="${today()}" style="height:38px;font-size:12px">
+        </div>
+      </div>
+
+      <!-- 1. Series masivas -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div>
+            <div style="font-size:13px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">📋 Adjuntar series valorizadas <span class="required">*</span></div>
+            <div style="font-size:11px;color:#64748b;margin-top:2px">Descargue el formato, complete las series valorizadas y súbalo aquí</div>
+          </div>
+          <button class="btn btn-sm btn-secondary" onclick="_descargarFormatoValorizacion()" style="font-size:11px;white-space:nowrap">📥 Descargar formato</button>
+        </div>
+        <div id="valSeriesWrap" style="border:2px dashed #cbd5e1;border-radius:8px;padding:14px;text-align:center;background:#fff;cursor:pointer;transition:all .15s"
+          onclick="document.getElementById('valSeriesInput').click()"
+          onmouseover="this.style.borderColor='#2563eb';this.style.background='#eff6ff'"
+          onmouseout="this.style.borderColor='#cbd5e1';this.style.background='#fff'">
+          <input type="file" id="valSeriesInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="_onValSeriesUpload(this)">
+          <div id="valSeriesLabel" style="color:#94a3b8;font-size:12px">
+            <div style="font-size:24px;margin-bottom:4px">📋</div>
+            Haga clic para subir el Excel con las series valorizadas<br>
+            <span style="font-size:10px;color:#cbd5e1">XLSX, XLS, CSV — máx. 10MB</span>
+          </div>
+        </div>
+        <div id="valSeriesResult" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <!-- 2. Documentación sustentatoria -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px">
+        <div style="margin-bottom:10px">
+          <div style="font-size:13px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">📎 Documentación sustentatoria <span class="required">*</span></div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px">Certificado de baja, informe de Finanzas u otro documento de respaldo (PDF, Excel)</div>
+        </div>
+        <div id="valDocWrap" style="border:2px dashed #cbd5e1;border-radius:8px;padding:14px;text-align:center;background:#fff;cursor:pointer;transition:all .15s"
+          onclick="document.getElementById('valDocInput').click()"
+          onmouseover="this.style.borderColor='#2563eb';this.style.background='#eff6ff'"
+          onmouseout="this.style.borderColor='#cbd5e1';this.style.background='#fff'">
+          <input type="file" id="valDocInput" accept=".pdf,.xlsx,.xls,.doc,.docx,.jpg,.jpeg,.png" style="display:none" onchange="_onValDocChange(this)">
+          <div id="valDocLabel" style="color:#94a3b8;font-size:12px">
+            <div style="font-size:24px;margin-bottom:4px">📎</div>
+            Haga clic para adjuntar documentación sustentatoria<br>
+            <span style="font-size:10px;color:#cbd5e1">PDF, XLSX, DOC, JPG, PNG — máx. 10MB</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-success" onclick="_confirmarValorizacion()" style="background:#16a34a;color:#fff;font-weight:700">💰 Confirmar Valorización</button>
+  `, 'modal-lg');
+
+  window._valSeriesFile = null;
+  window._valDocFile = null;
+  window._valSeriesMatched = [];
+}
+
+function _descargarFormatoValorizacion() {
+  const rows = window._valorizarRows || _buildBajasRows().filter(r => r.valorizado === 'PENDIENTE');
+  const data = rows.map(r => ({ 'SERIE': r.serie }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  ws['!cols'] = [{ wch: 24 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Series Pendientes');
+  XLSX.writeFile(wb, 'Formato_Valorizacion_' + today().replace(/-/g, '') + '.xlsx');
+  showToast('Formato descargado. Deje solo las series valorizadas y vuelva a subir el archivo.');
+}
+
+function _onValSeriesUpload(input) {
+  const file = input.files && input.files[0];
+  const label = document.getElementById('valSeriesLabel');
+  const wrap = document.getElementById('valSeriesWrap');
+  const resultDiv = document.getElementById('valSeriesResult');
+  if (!file) { window._valSeriesFile = null; window._valSeriesMatched = []; if (resultDiv) resultDiv.style.display = 'none'; return; }
+  if (file.size > 10 * 1024 * 1024) { showToast('El archivo excede 10MB', 'error'); input.value = ''; return; }
+
+  window._valSeriesFile = file;
+  if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">✅</div><strong>' + esc(file.name) + '</strong><br><span style="font-size:10px;color:#10b981">Archivo cargado — clic para cambiar</span>';
+  if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
+
+  // Leer Excel y buscar series
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const data = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+      // Buscar columna SERIE y VALORIZADO
+      const pendRows = window._valorizarRows || [];
+      const pendMap = {};
+      pendRows.forEach(r => { pendMap[(r.serie || '').toUpperCase().trim()] = r; });
+
+      const matched = [];
+      const notFound = [];
+      data.forEach(row => {
+        const serie = String(row.SERIE || row.serie || row.Serie || '').toUpperCase().trim();
+        if (!serie) return;
+        if (pendMap[serie]) matched.push(pendMap[serie]);
+        else notFound.push(serie);
+      });
+
+      window._valSeriesMatched = matched;
+      if (resultDiv) {
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = `
+          <div style="display:flex;gap:12px;flex-wrap:wrap">
+            <span style="font-size:12px;font-weight:700;color:#16a34a">✅ ${matched.length} serie(s) encontrada(s)</span>
+            ${notFound.length > 0 ? `<span style="font-size:12px;color:#d97706">⚠️ ${notFound.length} serie(s) no encontrada(s) en pendientes</span>` : ''}
+          </div>
+          ${matched.length > 0 ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;padding:6px">
+            ${matched.map(r => `<span style="display:inline-block;background:#dcfce7;border:1px solid #a7f3d0;border-radius:4px;padding:2px 8px;margin:2px;font-family:monospace;font-size:10px">${esc(r.codigo)} — ${esc(r.serie)}</span>`).join('')}
+          </div>` : ''}
+          ${notFound.length > 0 ? `<div style="margin-top:6px;font-size:10px;color:#d97706">No encontradas: ${notFound.map(s => '<code>' + esc(s) + '</code>').join(', ')}</div>` : ''}
+        `;
+      }
+    } catch (err) {
+      showToast('Error al leer el archivo: ' + err.message, 'error');
+      window._valSeriesMatched = [];
+      if (resultDiv) { resultDiv.style.display = 'block'; resultDiv.innerHTML = '<span style="color:#dc2626;font-size:12px">Error al procesar el archivo</span>'; }
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function _onValDocChange(input) {
+  const file = input.files && input.files[0];
+  const label = document.getElementById('valDocLabel');
+  const wrap = document.getElementById('valDocWrap');
+  if (!file) { window._valDocFile = null; return; }
+  if (file.size > 10 * 1024 * 1024) { showToast('El archivo excede 10MB', 'error'); input.value = ''; return; }
+  window._valDocFile = file;
+  if (label) label.innerHTML = '<div style="font-size:24px;margin-bottom:4px">✅</div><strong>' + esc(file.name) + '</strong><br><span style="font-size:10px;color:#10b981">Documento adjunto — clic para cambiar</span>';
+  if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
+}
+
+function _confirmarValorizacion() {
+  const etapa = ((document.getElementById('valEtapaNombre') || {}).value || '').trim();
+  const fecha = ((document.getElementById('valFecha') || {}).value || '').trim();
+  if (!etapa) { showToast('Ingrese el nombre de la etapa de baja', 'error'); return; }
+  if (!window._valSeriesFile) { showToast('Debe subir el Excel con las series valorizadas', 'error'); return; }
+  if (!window._valDocFile) { showToast('Debe adjuntar la documentación sustentatoria', 'error'); return; }
+  const matched = window._valSeriesMatched || [];
+  if (matched.length === 0) { showToast('No se encontraron series pendientes en el archivo. Verifique que la columna SERIE contenga series válidas.', 'error'); return; }
+
+  if (!confirm(`Se valorizarán ${matched.length} serie(s) en la etapa "${etapa}". ¿Continuar?`)) return;
+
+  const activos = DB.get('activos');
+  let count = 0;
+
+  matched.forEach(r => {
+    const activo = activos.find(a => a.id === r.activoId);
+    if (!activo) return;
+
+    if (r.serie && activo.series && activo.series.length > 0) {
+      const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (r.serie || '').toUpperCase().trim());
+      if (serieObj) {
+        serieObj.valorizado = 'VALOR <=0';
+        serieObj.etapaBaja = etapa;
+        serieObj.fechaValorizacion = fecha;
+        serieObj.archivoSeries = window._valSeriesFile.name;
+        serieObj.archivoSustento = window._valDocFile.name;
+        count++;
+      }
+    } else {
+      activo.valorizado = 'VALOR <=0';
+      activo.etapaBaja = etapa;
+      activo.fechaValorizacion = fecha;
+      activo.archivoSeries = window._valSeriesFile.name;
+      activo.archivoSustento = window._valDocFile.name;
+      count++;
+    }
+  });
+
+  DB.set('activos', activos);
+  addMovimiento('Valorización de Bajas', `${count} equipo(s) valorizados — Etapa: ${etapa} — Series: ${window._valSeriesFile.name} — Sustento: ${window._valDocFile.name}`);
+
+  closeModal();
+  showToast(`${count} equipo(s) valorizados correctamente en etapa "${etapa}"`);
   renderBajasPendientes(document.getElementById('contentArea'));
 }
 
@@ -8509,21 +8881,23 @@ function renderHistorialBajas(el) {
     <div class="table-container">
       <div class="table-scroll">
         <table>
-          <thead><tr><th>ID</th><th>Activo</th><th>Tipo</th><th>Motivo</th><th>Solicitante</th><th>F. Solicitud</th><th>F. Resolución</th><th>Estado</th></tr></thead>
+          <thead><tr><th>ID</th><th>Activo</th><th>Tipo</th><th>Serie</th><th>Etapa Baja</th><th>Motivo</th><th>Solicitante</th><th>F. Salida</th><th>Guía</th><th>Estado</th></tr></thead>
           <tbody>
             ${historial.length === 0
-              ? '<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">📂</div><h3>Sin historial</h3><p>No hay registros de bajas</p></div></td></tr>'
+              ? '<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">📂</div><h3>Sin historial</h3><p>No hay registros de bajas</p></div></td></tr>'
               : pagSlice(historial, 'histBajas').map(b => `
                   <tr>
                     <td>${b.id}</td>
                     <td><strong>${esc(b.activoCodigo)}</strong></td>
                     <td>${esc(b.activoTipo)}</td>
-                    <td>${esc(b.motivo)}</td>
+                    <td style="font-family:monospace;font-size:11px">${esc(b.serie || '—')}</td>
+                    <td><span style="background:#eff6ff;color:#1d4ed8;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600">${esc(b.etapaBaja || '—')}</span></td>
+                    <td>${esc(b.motivoBaja || b.motivo || '')}</td>
                     <td>${esc(b.solicitante)}</td>
-                    <td>${formatDate(b.fecha)}</td>
-                    <td>${formatDate(b.fechaAprobacion)}</td>
+                    <td>${formatDate(b.fechaSalida || b.fecha)}</td>
+                    <td style="font-size:11px">${esc(b.numGuia || '—')}</td>
                     <td>
-                      <span class="badge ${b.estadoBaja === 'Aprobada' ? 'badge-success' : 'badge-danger'}">
+                      <span class="badge ${b.estadoBaja === 'Ejecutada' ? 'badge-success' : b.estadoBaja === 'Aprobada' ? 'badge-success' : 'badge-danger'}">
                         <span class="badge-dot"></span>${esc(b.estadoBaja)}
                       </span>
                     </td>

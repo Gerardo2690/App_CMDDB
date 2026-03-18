@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(node -c c:/App_CMDDB/js/app.js)",
-      "Bash(node -c js/app.js)"
+      "Bash(node -c js/app.js)",
+      "Bash(node -c /c/App_CMDDB/js/app.js)",
+      "Bash(node -e \"const fs = require\\(''fs''\\); const code = fs.readFileSync\\(''/c/App_CMDDB/js/app.js'', ''utf8''\\); try { new Function\\(code\\); console.log\\(''OK''\\); } catch\\(e\\) { console.log\\(''ERROR:'', e.message\\); }\")",
+      "Bash(node -e \"const fs = require\\(''fs''\\); const code = fs.readFileSync\\(''c:/App_CMDDB/js/app.js'', ''utf8''\\); try { new Function\\(code\\); console.log\\(''OK''\\); } catch\\(e\\) { console.log\\(''ERROR at approx pos:'', e.message\\); }\")",
+      "Bash(node -e \":*)"
     ]
   }
 }
