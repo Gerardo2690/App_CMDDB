@@ -56,6 +56,8 @@ function initSampleData() {
     DB.set('activos', activos);
   }
 
+  if (!DB.get('sitiosMoviles') || !Array.isArray(DB.get('sitiosMoviles'))) DB.set('sitiosMoviles', []);
+
   if (DB.get('colaboradores').length === 0) {
     const nombres = [
       'Juan Pérez', 'María García', 'Carlos López', 'Ana Martínez',
@@ -99,7 +101,7 @@ function initSampleData() {
           activoTipo: a.tipo,
           activoMarca: a.marca,
           colaboradorId: c.id,
-          colaboradorNombre: c.nombre,
+          colaboradorNombre: _fullName(c),
           area: c.area,
           fechaAsignacion: a.fechaIngreso,
           estado: 'Vigente',
@@ -570,7 +572,7 @@ function _buildNotifications() {
       title: colabsSinActivos.length === 1
         ? '1 colaborador sin activos'
         : colabsSinActivos.length + ' colaboradores sin activos',
-      desc: colabsSinActivos.slice(0, 3).map(c => c.nombre || c.correo || '').join(', ') + (colabsSinActivos.length > 3 ? ' y ' + (colabsSinActivos.length - 3) + ' más...' : ''),
+      desc: colabsSinActivos.slice(0, 3).map(c => _fullName(c) || c.correo || '').join(', ') + (colabsSinActivos.length > 3 ? ' y ' + (colabsSinActivos.length - 3) + ' más...' : ''),
       action: 'colab-sin-activos',
       count: colabsSinActivos.length
     });
@@ -596,7 +598,7 @@ function _buildNotifications() {
       title: cesesPendientes.length === 1
         ? '1 cese pendiente de retorno'
         : cesesPendientes.length + ' ceses pendientes de retorno',
-      desc: cesesPendientes.slice(0, 3).map(cp => (cp.colab.nombre || '') + ' (' + cp.activos + ' activos)').join(', ') + (cesesPendientes.length > 3 ? ' y ' + (cesesPendientes.length - 3) + ' más...' : ''),
+      desc: cesesPendientes.slice(0, 3).map(cp => (_fullName(cp.colab)) + ' (' + cp.activos + ' activos)').join(', ') + (cesesPendientes.length > 3 ? ' y ' + (cesesPendientes.length - 3) + ' más...' : ''),
       action: 'ceses-pendientes',
       count: cesesPendientes.length
     });
@@ -852,8 +854,16 @@ function esc(s) {
   return String(s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Helper: nombre completo del colaborador (nombre + apellido)
+function _fullName(c) {
+  if (!c) return '';
+  const n = (c.nombre || '').trim();
+  const a = (c.apellido || '').trim();
+  return a ? (n + ' ' + a) : n;
+}
+
 // Convierte todos los valores string de un objeto a MAYÚSCULAS (excepto campos de fecha, email y password)
-const _SKIP_UPPER = ['email','password','usuario','correoColab','fechaIngreso','fechaCompra','fechaAsignacion','fechaCese','fechaApertura','adendaFechaInicio','adendaFechaFin','fecha','fechaAprobacion','estado'];
+const _SKIP_UPPER = ['email','password','usuario','correoColab','correoSupervisor','fechaIngreso','fechaCompra','fechaAsignacion','fechaCese','fechaApertura','adendaFechaInicio','adendaFechaFin','fecha','fechaAprobacion','estado'];
 function upperFields(obj) {
   const result = {};
   for (const k in obj) {
@@ -2543,12 +2553,34 @@ let padronSearch = '';
 let padronFilterArea = 'Todos';
 let padronFilterEstado = 'Todos';
 
+const _PADRON_FILTER_OPTIONS = [
+  { key: 'estado',               label: 'Estado' },
+  { key: 'modalidadContratacion', label: 'Mod. Contratación' },
+  { key: 'area',                 label: 'Área' },
+  { key: 'vicepresidencia',      label: 'Vicepresidencia' },
+  { key: 'ubicacionFisica',      label: 'Ubicación Física' },
+  { key: 'puesto',               label: 'Puesto' },
+  { key: 'centroCosto',          label: 'Centro de Costo' }
+];
+let _padronActiveFilters = {};
+let _padronFilterMenuOpen = false;
+
+let _padronTab = 'empleados'; // 'empleados' | 'sitios'
+
+function _switchPadronTab(tab) {
+  _padronTab = tab;
+  renderPadron(document.getElementById('contentArea'));
+}
+
 function renderPadron(el) {
+  if (_padronTab === 'sitios') { renderSitiosMoviles(el); return; }
+
   const colabs = DB.get('colaboradores');
-  const estados = ['Todos', 'Activo', 'Cesado'];
 
   const totalActivos = colabs.filter(c => c.estado === 'Activo').length;
   const totalCesados = colabs.filter(c => c.estado === 'Cesado').length;
+
+  const _tabStyle = (active) => 'padding:10px 24px;font-size:13px;font-weight:600;border:none;cursor:pointer;border-bottom:3px solid ' + (active ? '#2563eb' : 'transparent') + ';color:' + (active ? '#2563eb' : '#64748b') + ';background:none;transition:all .15s';
 
   el.innerHTML = `
     <div class="page-header">
@@ -2560,6 +2592,12 @@ function renderPadron(el) {
         <button class="btn" onclick="openCargaMasivaColabModal()" style="font-size:13px">📥 Carga Masiva</button>
         <button class="btn btn-primary" onclick="openColabModal()">+ Nuevo Colaborador</button>
       </div>
+    </div>
+
+    <!-- Tabs Empleados / Sitios Móviles -->
+    <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:20px">
+      <button onclick="_switchPadronTab('empleados')" style="${_tabStyle(true)}">👥 Empleados</button>
+      <button onclick="_switchPadronTab('sitios')" style="${_tabStyle(false)}">📍 Sitios Móviles</button>
     </div>
 
     <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
@@ -2581,25 +2619,19 @@ function renderPadron(el) {
     </div>
 
     <div class="table-toolbar">
-      <div class="search-box">
+      <div class="search-box" style="position:relative">
         <span class="search-icon">🔍</span>
-        <input type="text" id="padronSearchInput" placeholder="Buscar por nombre, DNI, email, cargo, ubicación..."
+        <input type="text" id="padronSearchInput" placeholder="Buscar por nombre, DNI, email, puesto, ubicación..."
                value="${esc(padronSearch)}"
                oninput="_onPadronSearch(this.value)">
-      </div>
-      <div class="filter-chips">
-        ${estados.map(e => `
-          <span class="filter-chip ${padronFilterEstado === e ? 'active' : ''}"
-                onclick="padronFilterEstado='${e}';resetPage('padron');_renderPadronTable()">
-            ${e}
-          </span>
-        `).join('')}
+        <span id="padronSearchClear" onclick="_clearPadronSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${padronSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
       </div>
     </div>
-
+    <div id="padronFiltersBar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap"></div>
 
     <div id="padronTableWrap"></div>
   `;
+  _renderPadronFiltersBar();
   _renderPadronTable();
 }
 
@@ -2607,10 +2639,91 @@ let _padronSearchTimer = null;
 let padronFilterPerfil = 'Todos';
 function _onPadronSearch(val) {
   padronSearch = val;
+  const clearBtn = document.getElementById('padronSearchClear');
+  if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
   resetPage('padron');
   clearTimeout(_padronSearchTimer);
   _padronSearchTimer = setTimeout(_renderPadronTable, 120);
 }
+
+function _clearPadronSearch() {
+  padronSearch = '';
+  const input = document.getElementById('padronSearchInput');
+  if (input) { input.value = ''; input.focus(); }
+  const clearBtn = document.getElementById('padronSearchClear');
+  if (clearBtn) clearBtn.style.display = 'none';
+  resetPage('padron');
+  _renderPadronTable();
+}
+
+function _renderPadronFiltersBar() {
+  const bar = document.getElementById('padronFiltersBar');
+  if (!bar) return;
+  const colabs = DB.get('colaboradores');
+
+  let html = Object.keys(_padronActiveFilters).map(key => {
+    const opt = _PADRON_FILTER_OPTIONS.find(o => o.key === key);
+    if (!opt) return '';
+    const values = ['Todos', ...new Set(colabs.map(c => c[key] || c[opt.key] || '').filter(Boolean))].sort((a, b) => a === 'Todos' ? -1 : b === 'Todos' ? 1 : a.localeCompare(b));
+    const current = _padronActiveFilters[key] || 'Todos';
+    return '<div style="display:flex;align-items:center;gap:0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:34px;background:#fff">'
+      + '<select onchange="_padronActiveFilters[\'' + key + '\']=this.value;resetPage(\'padron\');_renderPadronTable()" style="border:none;padding:0 8px 0 10px;font-size:11px;color:#334155;height:100%;cursor:pointer;background:transparent;min-width:120px">'
+      + values.map(v => '<option value="' + esc(v) + '" ' + (current === v ? 'selected' : '') + '>' + (v === 'Todos' ? esc(opt.label) + ': Todos' : esc(v)) + '</option>').join('')
+      + '</select>'
+      + '<button onclick="_padronRemoveFilter(\'' + key + '\')" style="border:none;background:none;cursor:pointer;padding:0 6px;color:#94a3b8;font-size:14px;height:100%;display:flex;align-items:center" onmouseover="this.style.color=\'#dc2626\'" onmouseout="this.style.color=\'#94a3b8\'" title="Quitar filtro">✕</button>'
+      + '</div>';
+  }).join('');
+
+  // Botón "+"
+  const inactiveFilters = _PADRON_FILTER_OPTIONS.filter(o => !_padronActiveFilters.hasOwnProperty(o.key));
+  if (inactiveFilters.length > 0) {
+    html += '<div id="padronFilterAddWrap" style="position:relative;display:inline-block">'
+      + '<button id="padronFilterAddBtn" style="width:34px;height:34px;border-radius:8px;border:1px dashed #cbd5e1;background:#f8fafc;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;transition:all .15s" onmouseover="this.style.borderColor=\'#2563eb\';this.style.color=\'#2563eb\'" onmouseout="this.style.borderColor=\'#cbd5e1\';this.style.color=\'#64748b\'" title="Agregar filtro">+</button>'
+      + '<div id="padronFilterAddMenu" style="display:' + (_padronFilterMenuOpen ? 'block' : 'none') + ';position:absolute;top:38px;left:0;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px 0;z-index:999;min-width:200px">'
+      + '<div style="padding:4px 12px 6px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Agregar filtro</div>'
+      + inactiveFilters.map(o => '<div onclick="event.stopPropagation();_padronAddFilter(\'' + o.key + '\')" style="padding:7px 12px;font-size:12px;color:#334155;cursor:pointer;display:flex;align-items:center;gap:8px" onmouseover="this.style.background=\'#f1f5f9\'" onmouseout="this.style.background=\'\'">'
+        + '<span style="color:#2563eb;font-size:14px">+</span> ' + esc(o.label)
+        + '</div>').join('')
+      + '</div></div>';
+  }
+
+  bar.innerHTML = html;
+
+  const addBtn = document.getElementById('padronFilterAddBtn');
+  if (addBtn) {
+    addBtn.onclick = function(e) {
+      e.stopPropagation();
+      _padronFilterMenuOpen = !_padronFilterMenuOpen;
+      const menu = document.getElementById('padronFilterAddMenu');
+      if (menu) menu.style.display = _padronFilterMenuOpen ? 'block' : 'none';
+    };
+  }
+}
+
+function _padronAddFilter(key) {
+  _padronActiveFilters[key] = 'Todos';
+  _padronFilterMenuOpen = false;
+  resetPage('padron');
+  _renderPadronFiltersBar();
+  _renderPadronTable();
+}
+
+function _padronRemoveFilter(key) {
+  delete _padronActiveFilters[key];
+  _padronFilterMenuOpen = false;
+  resetPage('padron');
+  _renderPadronFiltersBar();
+  _renderPadronTable();
+}
+
+// Cerrar menú filtros padrón al hacer click fuera
+document.addEventListener('click', function(e) {
+  if (_padronFilterMenuOpen && !e.target.closest('#padronFiltersBar')) {
+    _padronFilterMenuOpen = false;
+    const menu = document.getElementById('padronFilterAddMenu');
+    if (menu) menu.style.display = 'none';
+  }
+});
 
 function _renderPadronTable() {
   const wrap = document.getElementById('padronTableWrap');
@@ -2618,19 +2731,24 @@ function _renderPadronTable() {
   const colabs = DB.get('colaboradores');
 
   const filtered = colabs.filter(c => {
-    if (padronFilterArea !== 'Todos' && c.area !== padronFilterArea) return false;
-    if (padronFilterEstado !== 'Todos' && c.estado !== padronFilterEstado) return false;
-    if (padronFilterPerfil !== 'Todos' && (c.perfil || '') !== padronFilterPerfil) return false;
+    // Filtros avanzados dinámicos
+    for (const [key, val] of Object.entries(_padronActiveFilters)) {
+      if (val && val !== 'Todos') {
+        const cVal = (c[key] || '').toUpperCase();
+        if (cVal !== val.toUpperCase()) return false;
+      }
+    }
     if (padronSearch) {
       const s = padronSearch.toLowerCase();
-      return (c.nombre || '').toLowerCase().includes(s) ||
+      return _fullName(c).toLowerCase().includes(s) ||
              (c.dni || '').toLowerCase().includes(s) ||
              (c.email || '').toLowerCase().includes(s) ||
-             (c.cargo || '').toLowerCase().includes(s) ||
+             (c.puesto || c.tipoPuesto || '').toLowerCase().includes(s) ||
              (c.telefono || '').toLowerCase().includes(s) ||
-             (c.perfil || '').toLowerCase().includes(s) ||
-             (c.ubicacion || '').toLowerCase().includes(s) ||
-             (c.tipoPuesto || '').toLowerCase().includes(s);
+             (c.modalidadContratacion || c.perfil || '').toLowerCase().includes(s) ||
+             (c.ubicacionFisica || c.ubicacion || '').toLowerCase().includes(s) ||
+             (c.vicepresidencia || '').toLowerCase().includes(s) ||
+             (c.centroCosto || '').toLowerCase().includes(s);
     }
     return true;
   });
@@ -2645,12 +2763,13 @@ function _renderPadronTable() {
               <th>Nombre</th>
               <th>Email</th>
               <th>DNI</th>
-              <th>Perfil</th>
+              <th>Mod. Contratación</th>
               <th>Área</th>
-              <th>Ubicación</th>
-              <th>Tipo Puesto</th>
+              <th>Vicepresidencia</th>
+              <th>Centro Costo</th>
+              <th>Ubicación Física</th>
+              <th>Puesto</th>
               <th>Teléfono</th>
-              <th>Cargo</th>
               <th>Estado</th>
               <th>F. Ingreso</th>
               <th>Acciones</th>
@@ -2658,28 +2777,30 @@ function _renderPadronTable() {
           </thead>
           <tbody>
             ${filtered.length === 0
-              ? '<tr><td colspan="13"><div class="empty-state"><div class="empty-icon">👥</div><h3>Sin resultados</h3><p>No se encontraron colaboradores</p></div></td></tr>'
+              ? '<tr><td colspan="14"><div class="empty-state"><div class="empty-icon">👥</div><h3>Sin resultados</h3><p>No se encontraron colaboradores</p></div></td></tr>'
               : pagSlice(filtered, 'padron').map(c => {
-                  const perfilBadge = c.perfil === 'Empleado' ? 'badge-info' : c.perfil === 'Practicante' ? 'badge-warning' : c.perfil === 'Externo' ? 'badge-purple' : c.perfil === 'Intermediario' ? 'badge-success' : '';
+                  const _mod = c.modalidadContratacion || c.perfil || '';
+                  const perfilBadge = _mod === 'Empleado' ? 'badge-info' : _mod === 'Practicante' ? 'badge-warning' : _mod === 'Externo' ? 'badge-purple' : _mod === 'Intermediario' ? 'badge-success' : '';
                   return `
                     <tr>
                       <td style="font-size:12px;color:var(--text-light)">${c.id}</td>
                       <td>
                         <div style="display:flex;align-items:center;gap:10px">
                           <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#6366f1);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;flex-shrink:0">
-                            ${esc((c.nombre || '').split(' ').map(p => p[0]).slice(0, 2).join(''))}
+                            ${esc(_fullName(c).split(' ').map(p => p[0]).slice(0, 2).join(''))}
                           </div>
-                          <strong>${esc(c.nombre)}</strong>
+                          <strong>${esc(_fullName(c))}</strong>
                         </div>
                       </td>
                       <td style="font-size:12px">${esc(c.email || '—')}</td>
                       <td style="font-family:monospace;font-size:12px">${esc(c.dni)}</td>
-                      <td>${c.perfil ? `<span class="badge ${perfilBadge}" style="font-size:10px">${esc(c.perfil)}</span>` : '—'}</td>
+                      <td>${_mod ? `<span class="badge ${perfilBadge}" style="font-size:10px">${esc(_mod)}</span>` : '—'}</td>
                       <td style="font-size:12px">${esc(c.area || '—')}</td>
-                      <td style="font-size:12px">${esc(c.ubicacion || '—')}</td>
-                      <td style="font-size:12px">${esc(c.tipoPuesto || '—')}</td>
+                      <td style="font-size:12px">${esc(c.vicepresidencia || '—')}</td>
+                      <td style="font-size:11px;font-family:monospace">${esc(c.centroCosto || '—')}</td>
+                      <td style="font-size:12px">${esc(c.ubicacionFisica || c.ubicacion || '—')}</td>
+                      <td style="font-size:12px">${esc(c.puesto || c.tipoPuesto || '—')}</td>
                       <td style="font-size:12px">${esc(c.telefono || '—')}</td>
-                      <td style="font-size:12px">${esc(c.cargo || '—')}</td>
                       <td>
                         ${c.estado === 'Activo'
                           ? '<span class="badge badge-success" style="font-size:10px">Activo</span>'
@@ -2720,21 +2841,22 @@ function verColaborador(id) {
   const activos = DB.get('activos');
   const vigentes = asignaciones.filter(a => a.estado === 'Vigente');
 
-  const perfilBadge = c.perfil === 'Empleado' ? 'badge-info' : c.perfil === 'Practicante' ? 'badge-warning' : c.perfil === 'Externo' ? 'badge-purple' : c.perfil === 'Intermediario' ? 'badge-success' : '';
+  const _modC = c.modalidadContratacion || c.perfil || '';
+  const perfilBadge = _modC === 'Empleado' ? 'badge-info' : _modC === 'Practicante' ? 'badge-warning' : _modC === 'Externo' ? 'badge-purple' : _modC === 'Intermediario' ? 'badge-success' : '';
 
   openModal('Detalle de Colaborador', `
     <div style="display:flex;flex-direction:column;gap:20px">
       <div style="display:flex;align-items:center;gap:16px;padding-bottom:16px;border-bottom:1px solid var(--border)">
         <div style="width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#6366f1);display:flex;align-items:center;justify-content:center;color:#fff;font-size:20px;font-weight:700;flex-shrink:0">
-          ${esc((c.nombre || '').split(' ').map(p => p[0]).slice(0, 2).join(''))}
+          ${esc(_fullName(c).split(' ').map(p => p[0]).slice(0, 2).join(''))}
         </div>
         <div>
-          <h3 style="margin:0;font-size:18px">${esc(c.nombre)}</h3>
-          <div style="font-size:13px;color:var(--text-muted)">${esc(c.cargo || 'Sin cargo')} — ${esc(c.area || 'Sin área')}</div>
+          <h3 style="margin:0;font-size:18px">${esc(_fullName(c))}</h3>
+          <div style="font-size:13px;color:var(--text-muted)">${esc(c.puesto || c.tipoPuesto || 'Sin puesto')} — ${esc(c.area || 'Sin área')}</div>
         </div>
         <div style="margin-left:auto;display:flex;gap:8px">
           <span class="badge ${c.estado === 'Activo' ? 'badge-success' : 'badge-danger'}">${esc(c.estado)}</span>
-          ${c.perfil ? `<span class="badge ${perfilBadge}">${esc(c.perfil)}</span>` : ''}
+          ${_modC ? `<span class="badge ${perfilBadge}">${esc(_modC)}</span>` : ''}
         </div>
       </div>
 
@@ -2752,12 +2874,24 @@ function verColaborador(id) {
           <div style="font-size:14px">${esc(c.telefono || '—')}</div>
         </div>
         <div class="form-group">
-          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Ubicación</label>
-          <div style="font-size:14px">${esc(c.ubicacion || '—')}</div>
+          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Ubicación Física</label>
+          <div style="font-size:14px">${esc(c.ubicacionFisica || c.ubicacion || '—')}</div>
         </div>
         <div class="form-group">
-          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Tipo de Puesto</label>
-          <div style="font-size:14px">${esc(c.tipoPuesto || '—')}</div>
+          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Puesto</label>
+          <div style="font-size:14px">${esc(c.puesto || c.tipoPuesto || '—')}</div>
+        </div>
+        <div class="form-group">
+          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Vicepresidencia</label>
+          <div style="font-size:14px">${esc(c.vicepresidencia || '—')}</div>
+        </div>
+        <div class="form-group">
+          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Centro de Costo</label>
+          <div style="font-size:14px;font-family:monospace">${esc(c.centroCosto || '—')}</div>
+        </div>
+        <div class="form-group">
+          <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Correo Supervisor</label>
+          <div style="font-size:14px">${esc(c.correoSupervisor || '—')}</div>
         </div>
         <div class="form-group">
           <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Fecha Ingreso</label>
@@ -2806,17 +2940,20 @@ function verColaborador(id) {
    COLABORADORES - CARGA MASIVA PADRON
    ═══════════════════════════════════════════════════════ */
 const _CMP_COLUMNS = [
-  { excel: 'NOMBRE',        field: 'nombre',     required: true },
-  { excel: 'DNI',            field: 'dni',         required: true },
-  { excel: 'EMAIL',          field: 'email' },
-  { excel: 'TELEFONO',       field: 'telefono' },
-  { excel: 'PERFIL',         field: 'perfil',      required: true },
-  { excel: 'AREA',           field: 'area' },
-  { excel: 'UBICACION',      field: 'ubicacion' },
-  { excel: 'TIPO_PUESTO',    field: 'tipoPuesto' },
-  { excel: 'CARGO',          field: 'cargo' },
-  { excel: 'ESTADO',         field: 'estado' },
-  { excel: 'FECHA_INGRESO',  field: 'fechaIngreso' }
+  { excel: 'NOMBRE',                  field: 'nombre',                required: true },
+  { excel: 'APELLIDO',                field: 'apellido',              required: true },
+  { excel: 'DNI',                     field: 'dni',                   required: true },
+  { excel: 'EMAIL',                   field: 'email' },
+  { excel: 'TELEFONO',                field: 'telefono' },
+  { excel: 'MODALIDAD_CONTRATACION',  field: 'modalidadContratacion', required: true },
+  { excel: 'AREA',                    field: 'area' },
+  { excel: 'VICEPRESIDENCIA',         field: 'vicepresidencia' },
+  { excel: 'CENTRO_DE_COSTO',         field: 'centroCosto' },
+  { excel: 'UBICACION_FISICA',        field: 'ubicacionFisica' },
+  { excel: 'PUESTO',                  field: 'puesto' },
+  { excel: 'CORREO_SUPERVISOR',       field: 'correoSupervisor' },
+  { excel: 'ESTADO',                  field: 'estado' },
+  { excel: 'FECHA_DE_INGRESO',        field: 'fechaIngreso' }
 ];
 
 let _cargaMasivaColabData = [];
@@ -2850,8 +2987,9 @@ function openCargaMasivaColabModal() {
 function descargarPlantillaColab() {
   const headers = _CMP_COLUMNS.map(c => c.excel);
   const ejemplo = [
-    'Juan Pérez', '12345678', 'juan.perez@empresa.com', '987654321',
-    'Empleado', 'TI', 'Sede Central', 'Presencial', 'Analista', 'Activo', '15/01/2026'
+    'Juan', 'Pérez', '12345678', 'juan.perez@empresa.com', '987654321',
+    'Empleado', 'TI', 'B2C', '1000-03608-00', 'Sede Central', 'Presencial', 'pedro.ruiz@empresa.com',
+    'Activo', '15/01/2026'
   ];
   const ws = XLSX.utils.aoa_to_sheet([headers, ejemplo]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
@@ -2891,11 +3029,26 @@ function procesarExcelColab(file) {
         if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
         // Convertir a mayúsculas
         Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
+        // Compatibilidad: mapear campos viejos a nuevos
+        if (!mapped.modalidadContratacion && mapped.perfil) mapped.modalidadContratacion = mapped.perfil;
+        if (!mapped.apellido && mapped.nombre && mapped.nombre.includes(' ')) {
+          const parts = mapped.nombre.split(' ');
+          mapped.nombre = parts[0];
+          mapped.apellido = parts.slice(1).join(' ');
+        }
+        if (!mapped.ubicacionFisica && mapped.ubicacion) mapped.ubicacionFisica = mapped.ubicacion;
+        if (!mapped.puesto && mapped.tipoPuesto) mapped.puesto = mapped.tipoPuesto;
+        // Sync old/new fields
+        mapped.perfil = mapped.modalidadContratacion || mapped.perfil || '';
+        mapped.ubicacion = mapped.ubicacionFisica || mapped.ubicacion || '';
+        mapped.tipoPuesto = mapped.puesto || mapped.tipoPuesto || '';
+
         const errors = [];
         if (!mapped.nombre) errors.push('NOMBRE');
+        if (!mapped.apellido) errors.push('APELLIDO');
         if (!mapped.dni) errors.push('DNI');
-        if (!mapped.perfil) errors.push('PERFIL');
-        else if (!perfilesValidos.includes(mapped.perfil)) errors.push('PERFIL (valor inválido)');
+        if (!mapped.modalidadContratacion) errors.push('MODALIDAD CONTRATACIÓN');
+        else if (!perfilesValidos.includes(mapped.modalidadContratacion)) errors.push('MODALIDAD CONTRATACIÓN (valor inválido)');
         return { ...mapped, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
       });
 
@@ -2937,7 +3090,7 @@ function _renderCargaMasivaColabPreview() {
       </div>
     </div>
 
-    ${errores > 0 ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b">⚠️ Las filas con error (campos obligatorios: NOMBRE, DNI, PERFIL) no se importarán. PERFIL debe ser: Empleado, Practicante o Externo.</div>' : ''}
+    ${errores > 0 ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b">⚠️ Las filas con error (campos obligatorios: NOMBRE, APELLIDO, DNI, MODALIDAD CONTRATACIÓN) no se importarán.</div>' : ''}
 
     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px">
       <table style="width:100%;font-size:12px">
@@ -2945,14 +3098,13 @@ function _renderCargaMasivaColabPreview() {
           <tr>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">#</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Nombre *</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Apellido *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">DNI *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Email</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Teléfono</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Perfil *</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Mod. Contrat. *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Área</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Ubicación</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Tipo Puesto</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Cargo</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Ubic. Física</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Puesto</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Estado</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary);text-align:center">✓</th>
           </tr>
@@ -2962,14 +3114,13 @@ function _renderCargaMasivaColabPreview() {
             <tr style="${r._valid ? '' : 'background:#fef2f2'}">
               <td style="padding:6px;color:var(--text-light)">${r._row}</td>
               <td style="padding:6px;${!r.nombre ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.nombre || '⚠ vacío')}</td>
+              <td style="padding:6px;${!r.apellido ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.apellido || '⚠ vacío')}</td>
               <td style="padding:6px;font-family:monospace;${!r.dni ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.dni || '⚠ vacío')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.email || '—')}</td>
-              <td style="padding:6px;font-size:11px">${esc(r.telefono || '—')}</td>
-              <td style="padding:6px;${!r.perfil || r._errors.some(e => e.startsWith('PERFIL')) ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.perfil || '⚠ vacío')}</td>
+              <td style="padding:6px;${!r.modalidadContratacion || r._errors.some(e => e.startsWith('MODALIDAD')) ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.modalidadContratacion || '⚠ vacío')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.area || '—')}</td>
-              <td style="padding:6px;font-size:11px">${esc(r.ubicacion || '—')}</td>
-              <td style="padding:6px;font-size:11px">${esc(r.tipoPuesto || '—')}</td>
-              <td style="padding:6px;font-size:11px">${esc(r.cargo || '—')}</td>
+              <td style="padding:6px;font-size:11px">${esc(r.ubicacionFisica || '—')}</td>
+              <td style="padding:6px;font-size:11px">${esc(r.puesto || '—')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.estado || '—')}</td>
               <td style="padding:6px;text-align:center">${r._valid ? '<span style="color:#16a34a">✓</span>' : '<span style="color:#dc2626" title="Faltan: '+r._errors.join(', ')+'">✗</span>'}</td>
             </tr>
@@ -3015,14 +3166,20 @@ function ejecutarCargaMasivaColab() {
     colabs.push({
       id: id++,
       nombre: r.nombre,
+      apellido: r.apellido || '',
       dni: r.dni,
       email: r.email || '',
       telefono: r.telefono || '',
-      perfil: r.perfil,
+      modalidadContratacion: r.modalidadContratacion || r.perfil,
+      perfil: r.modalidadContratacion || r.perfil,
       area: r.area || '',
-      ubicacion: r.ubicacion || '',
-      tipoPuesto: r.tipoPuesto || '',
-      cargo: r.cargo || '',
+      vicepresidencia: r.vicepresidencia || '',
+      centroCosto: r.centroCosto || '',
+      ubicacionFisica: r.ubicacionFisica || r.ubicacion || '',
+      ubicacion: r.ubicacionFisica || r.ubicacion || '',
+      puesto: r.puesto || r.tipoPuesto || '',
+      tipoPuesto: r.puesto || r.tipoPuesto || '',
+      correoSupervisor: r.correoSupervisor || '',
       estado: r.estado || 'Activo',
       fechaIngreso: r.fechaIngreso || today()
     });
@@ -3042,6 +3199,8 @@ let asigSearch = '';
 let _asigSearchTimer = null;
 let _asigSelectedColab = null;
 let _asigSelectedActivos = [];
+let _asigTipoDestino = 'colaborador'; // 'colaborador' | 'sitio'
+let _asigSelectedSitio = null;
 
 function renderAsignacion(el) {
   const asig = DB.get('asignaciones');
@@ -3199,6 +3358,8 @@ let _asigReemOld = null; // asignación seleccionada para reemplazo
 
 function openAsignacionModal() {
   _asigSelectedColab = null;
+  _asigSelectedSitio = null;
+  _asigTipoDestino = 'colaborador';
   _asigSelectedActivos = [];
   _asigSelectedAccesorios = [];
   _asigStockSearch = '';
@@ -3483,18 +3644,50 @@ function _renderAsignacionModal(fresh) {
         </div>
       </div>
 
-      <!-- Row 3: Colaborador -->
+      <!-- Tipo destino -->
+      ${!isReemplazo ? `
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        <button onclick="_asigTipoDestino='colaborador';_asigSelectedSitio=null;_renderAsignacionModal()" style="flex:1;padding:10px;border-radius:8px;border:2px solid ${_asigTipoDestino === 'colaborador' ? '#2563eb' : '#e2e8f0'};background:${_asigTipoDestino === 'colaborador' ? '#eff6ff' : '#fff'};color:${_asigTipoDestino === 'colaborador' ? '#1d4ed8' : '#64748b'};font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s">
+          <span style="font-size:16px">👤</span> Colaborador
+        </button>
+        <button onclick="_asigTipoDestino='sitio';_asigSelectedColab=null;_renderAsignacionModal()" style="flex:1;padding:10px;border-radius:8px;border:2px solid ${_asigTipoDestino === 'sitio' ? '#f59e0b' : '#e2e8f0'};background:${_asigTipoDestino === 'sitio' ? '#fffbeb' : '#fff'};color:${_asigTipoDestino === 'sitio' ? '#92400e' : '#64748b'};font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s">
+          <span style="font-size:16px">📍</span> Sitio Móvil
+        </button>
+      </div>
+      ` : ''}
+
+      <!-- Row 3: Colaborador / Sitio -->
+      ${_asigTipoDestino === 'sitio' ? `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+        <div style="border:1px solid #fde68a;border-radius:10px;padding:12px;background:#fffbeb">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <span style="font-size:14px">📍</span>
+            <span style="font-size:12px;font-weight:700;color:#92400e">Sitio Móvil</span>
+          </div>
+          <select class="form-control" id="fAsigSitio" onchange="_onSitioAsigChange(this.value)" style="height:36px;font-size:12px">
+            <option value="">Seleccionar sitio...</option>
+            ${DB.get('sitiosMoviles').filter(s => s.estado === 'Activo' || (s.estado || '').toUpperCase() === 'ACTIVO').map(s =>
+              '<option value="' + s.id + '" ' + (_asigSelectedSitio && _asigSelectedSitio.id === s.id ? 'selected' : '') + '>' + esc(_buildSitioNombre(s)) + '</option>'
+            ).join('')}
+          </select>
+        </div>
+        <div style="border:1px solid ${_asigSelectedSitio ? '#fde68a' : '#e2e8f0'};border-radius:10px;padding:12px;background:${_asigSelectedSitio ? '#fffbeb' : '#fafafa'}">
+          ${_asigSelectedSitio ? '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:18px;height:18px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff">✓</span><span style="font-size:11px;font-weight:600;color:#334155">Sitio seleccionado:</span></div><div style="display:flex;align-items:center;gap:10px"><div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;flex-shrink:0">📍</div><div><div style="font-size:13px;font-weight:700;color:#0f172a">' + esc(_buildSitioNombre(_asigSelectedSitio)) + '</div><div style="font-size:11px;color:#64748b">' + esc(_asigSelectedSitio.area || '') + ' — ' + esc(_asigSelectedSitio.sede || '') + '</div></div></div>'
+          : '<div style="padding:12px;text-align:center;color:#94a3b8;font-size:12px">Seleccione un sitio móvil</div>'}
+        </div>
+      </div>
+      ` : `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
         <div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px">
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
             <span style="font-size:14px">📇</span>
             <span style="font-size:12px;font-weight:700;color:#334155">Colaborador</span>
-          </div>
+          </div>`}
           <div style="position:relative">
             <div style="display:flex;align-items:center;border:1px solid ${isIngresoNuevo ? '#fbbf24' : '#e2e8f0'};border-radius:8px;overflow:hidden;height:36px${isIngresoNuevo ? ';background:#fffbeb' : ''}">
               <span style="padding:0 8px;font-size:13px;color:#94a3b8">🔍</span>
               <input class="form-control" id="fAsigUserSearch" placeholder="${isIngresoNuevo ? 'Buscar colaborador sin equipo...' : 'Buscar por nombre, DNI o correo...'}"
-                oninput="_buscarColabAsig(this.value)" autocomplete="off" value="${c ? esc(c.nombre) : ''}"
+                oninput="_buscarColabAsig(this.value)" autocomplete="off" value="${c ? esc(_fullName(c)) : ''}"
                 style="border:none;border-radius:0;height:100%;font-size:12px;flex:1;${isIngresoNuevo ? 'background:transparent' : ''}">
               <span onclick="_toggleColabDropdown()" style="padding:0 10px;cursor:pointer;font-size:12px;color:#64748b;height:100%;display:flex;align-items:center;border-left:1px solid #e2e8f0;background:#f8fafc;user-select:none" title="Ver lista de colaboradores">▼</span>
             </div>
@@ -3508,10 +3701,10 @@ function _renderAsignacionModal(fresh) {
               <span style="font-size:11px;font-weight:600;color:#334155">Usuario seleccionado:</span>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
-              <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;flex-shrink:0">${esc((c.nombre||'').split(' ').map(p=>p[0]).slice(0,2).join(''))}</div>
+              <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;flex-shrink:0">${esc(_fullName(c).split(' ').map(p=>p[0]).slice(0,2).join(''))}</div>
               <div>
-                <div style="font-size:13px;font-weight:700;color:#0f172a">${esc(c.nombre)}</div>
-                <div style="font-size:11px;color:#64748b">${esc(c.area||'')} - ${esc(c.ubicacion||'')} &nbsp;|&nbsp; ${esc(c.cargo||'')}</div>
+                <div style="font-size:13px;font-weight:700;color:#0f172a">${esc(_fullName(c))}</div>
+                <div style="font-size:11px;color:#64748b">${esc(c.area||'')} - ${esc(c.ubicacionFisica || c.ubicacion || '')} &nbsp;|&nbsp; ${esc(c.puesto || c.tipoPuesto || '')}</div>
               </div>
             </div>
           ` : `
@@ -3795,6 +3988,14 @@ function _asigTogglePageAll(checked) {
 }
 
 let _buscarColabTimer = null;
+function _onSitioAsigChange(val) {
+  const id = parseInt(val);
+  if (!id) { _asigSelectedSitio = null; _renderAsignacionModal(); return; }
+  const sitios = DB.get('sitiosMoviles');
+  _asigSelectedSitio = sitios.find(s => s.id === id) || null;
+  _renderAsignacionModal();
+}
+
 function _buscarColabAsig(val) {
   clearTimeout(_buscarColabTimer);
   _buscarColabTimer = setTimeout(() => {
@@ -3809,7 +4010,7 @@ function _buscarColabAsig(val) {
     }
     const s = val.toLowerCase();
     const found = colabs.filter(c =>
-      (c.nombre || '').toLowerCase().includes(s) ||
+      _fullName(c).toLowerCase().includes(s) ||
       (c.dni || '').toLowerCase().includes(s) ||
       (c.email || '').toLowerCase().includes(s)
     ).slice(0, 8);
@@ -3828,7 +4029,7 @@ function _renderColabResults(box, found) {
            onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''"
            onclick="_selectColabAsig(${c.id})">
         <div>
-          <strong>${esc(c.nombre)}</strong>
+          <strong>${esc(_fullName(c))}</strong>
           <span style="color:var(--text-muted);margin-left:6px">DNI: ${esc(c.dni || '')}</span>
         </div>
         <div style="display:flex;align-items:center;gap:6px">
@@ -4106,12 +4307,12 @@ function _renderReemplazoModal() {
         <div style="font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;display:flex;align-items:center;gap:6px"><span style="background:${c ? '#10b981' : currentStep>=2 ? '#ea580c' : '#e2e8f0'};color:#fff;width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:800">${c ? '✓' : '2'}</span> Buscar Colaborador</div>
         <div style="display:flex;gap:10px;align-items:center">
           <div style="flex:1;position:relative">
-            <input class="form-control" id="reemUserSearch" placeholder="Buscar por nombre, DNI o correo..." oninput="_reemBuscarColab(this.value)" autocomplete="off" value="${c ? esc(c.nombre) : ''}" style="height:36px;font-size:12px">
+            <input class="form-control" id="reemUserSearch" placeholder="Buscar por nombre, DNI o correo..." oninput="_reemBuscarColab(this.value)" autocomplete="off" value="${c ? esc(_fullName(c)) : ''}" style="height:36px;font-size:12px">
             <div id="reemUserResults" style="position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;max-height:160px;overflow-y:auto;z-index:10;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.1)"></div>
           </div>
           ${c ? `<div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px">
-            <div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">${esc((c.nombre||'').split(' ').map(p=>p[0]).slice(0,2).join(''))}</div>
-            <div style="font-size:11px;line-height:1.3"><strong>${esc(c.nombre)}</strong><br><span style="color:#64748b">${esc(c.email||'')} · ${esc(c.area||'')}</span></div>
+            <div style="width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;font-weight:700">${esc(_fullName(c).split(' ').map(p=>p[0]).slice(0,2).join(''))}</div>
+            <div style="font-size:11px;line-height:1.3"><strong>${esc(_fullName(c))}</strong><br><span style="color:#64748b">${esc(c.email||'')} · ${esc(c.area||'')}</span></div>
           </div>` : ''}
         </div>
       </div>
@@ -4172,13 +4373,13 @@ function _reemBuscarColab(val) {
     if (!val || val.length < 2) { box.style.display = 'none'; return; }
     const colabs = DB.get('colaboradores').filter(c => c.estado === 'Activo');
     const s = val.toLowerCase();
-    const found = colabs.filter(c => (c.nombre||'').toLowerCase().includes(s) || (c.dni||'').toLowerCase().includes(s) || (c.email||'').toLowerCase().includes(s)).slice(0,8);
+    const found = colabs.filter(c => _fullName(c).toLowerCase().includes(s) || (c.dni||'').toLowerCase().includes(s) || (c.email||'').toLowerCase().includes(s)).slice(0,8);
     if (found.length === 0) {
       box.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--text-muted)">Sin coincidencias</div>';
     } else {
       box.innerHTML = found.map(c => `
         <div style="padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''" onclick="_reemSelectColab(${c.id})">
-          <div><strong>${esc(c.nombre)}</strong> <span style="color:#94a3b8;margin-left:4px">DNI: ${esc(c.dni)}</span></div>
+          <div><strong>${esc(_fullName(c))}</strong> <span style="color:#94a3b8;margin-left:4px">DNI: ${esc(c.dni)}</span></div>
           <span style="color:#64748b;font-size:11px">${esc(c.email||'')}</span>
         </div>`).join('');
     }
@@ -4260,7 +4461,7 @@ function _ejecutarReemplazo() {
       activoModelo: newActivo.modelo,
       serieAsignada: _reemNewItem.serie || '',
       colaboradorId: colab.id,
-      colaboradorNombre: colab.nombre,
+      colaboradorNombre: _fullName(colab),
       correoColab: colab.email || '',
       area: colab.area,
       fechaAsignacion: fecha,
@@ -4277,12 +4478,12 @@ function _ejecutarReemplazo() {
     if (totalSeries === 0 || seriesAsig >= totalSeries) {
       newActivo.estado = 'Asignado';
     }
-    newActivo.responsable = colab.nombre;
+    newActivo.responsable = _fullName(colab);
   }
 
   DB.set('activos', activos);
   DB.set('asignaciones', asig);
-  addMovimiento('Reemplazo', `${_reemOldAsig.serieAsignada || '—'} → ${_reemNewItem.serie || '—'} para ${colab.nombre} [${ticket}] — ${motivo}`);
+  addMovimiento('Reemplazo', `${_reemOldAsig.serieAsignada || '—'} → ${_reemNewItem.serie || '—'} para ${_fullName(colab)} [${ticket}] — ${motivo}`);
 
   // Auto-registrar en bitácora: INGRESO del equipo viejo devuelto
   const _oldAct = activos.find(a => a.id === (_reemOldAsig ? _reemOldAsig.activoId : 0));
@@ -4575,7 +4776,11 @@ function saveAsignacion() {
   const fechaFinPrestamo = isPrestamo ? ((document.getElementById('fAsigFechaPrestamo') || {}).value || _asigFechaPrestamo || '') : '';
 
   if (!ticket) { showToast('Ingrese el número de ticket', 'error'); return; }
-  if (!_asigSelectedColab) { showToast('Seleccione un colaborador', 'error'); return; }
+  if (_asigTipoDestino === 'sitio') {
+    if (!_asigSelectedSitio) { showToast('Seleccione un sitio móvil', 'error'); return; }
+  } else {
+    if (!_asigSelectedColab) { showToast('Seleccione un colaborador', 'error'); return; }
+  }
   if (!motivo) { showToast('Seleccione el motivo de asignación', 'error'); return; }
   if (isPrestamo && !fechaFinPrestamo) { showToast('Ingrese la fecha fin de préstamo', 'error'); return; }
   if (isPrestamo && fechaFinPrestamo < today()) { showToast('La fecha fin de préstamo debe ser mayor o igual a hoy', 'error'); return; }
@@ -4584,7 +4789,8 @@ function saveAsignacion() {
 
   const activos = DB.get('activos');
   const asig = DB.get('asignaciones');
-  const colab = _asigSelectedColab;
+  const colab = _asigTipoDestino === 'sitio' ? null : _asigSelectedColab;
+  const sitio = _asigTipoDestino === 'sitio' ? _asigSelectedSitio : null;
 
   // ── REEMPLAZO / RENOVACIÓN: marcar equipo viejo como pendiente de retorno ──
   if (isReemplazo && _asigReemOld) {
@@ -4610,10 +4816,13 @@ function saveAsignacion() {
       activoMarca: activo.marca,
       activoModelo: activo.modelo,
       serieAsignada: sel.serie || '',
-      colaboradorId: colab.id,
-      colaboradorNombre: colab.nombre,
-      correoColab: colab.email || '',
-      area: colab.area,
+      colaboradorId: colab ? colab.id : null,
+      colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
+      correoColab: colab ? (colab.email || '') : '',
+      area: colab ? colab.area : (sitio ? sitio.area : ''),
+      tipoDestino: sitio ? 'sitio' : 'colaborador',
+      sitioId: sitio ? sitio.id : null,
+      sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
       fechaAsignacion: fecha || today(),
       tipoAsignacion: motivo,
       motivo: motivo,
@@ -4634,7 +4843,7 @@ function saveAsignacion() {
     if (totalSeries === 0 || seriesAsignadas >= totalSeries) {
       activo.estado = 'Asignado';
     }
-    activo.responsable = colab.nombre;
+    activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
   });
 
   // ── INGRESO NUEVO: Validar máximo 1 accesorio por tipo ──
@@ -4666,10 +4875,13 @@ function saveAsignacion() {
         activoMarca: activo.marca,
         activoModelo: activo.modelo,
         serieAsignada: sel.serie || '',
-        colaboradorId: colab.id,
-        colaboradorNombre: colab.nombre,
-        correoColab: colab.email || '',
-        area: colab.area,
+        colaboradorId: colab ? colab.id : null,
+        colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
+        correoColab: colab ? (colab.email || '') : '',
+        area: colab ? colab.area : (sitio ? sitio.area : ''),
+        tipoDestino: sitio ? 'sitio' : 'colaborador',
+        sitioId: sitio ? sitio.id : null,
+        sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
         fechaAsignacion: fecha || today(),
         tipoAsignacion: motivo,
         motivo: motivo,
@@ -4690,7 +4902,7 @@ function saveAsignacion() {
       if (totalSeries === 0 || seriesAsignadas >= totalSeries) {
         activo.estado = 'Asignado';
       }
-      activo.responsable = colab.nombre;
+      activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
     });
   }
 
@@ -4698,14 +4910,15 @@ function saveAsignacion() {
   DB.set('asignaciones', asig);
 
   const _totalEquipos = _asigSelectedActivos.length + (isIngresoNuevo ? _asigSelectedAccesorios.length : 0);
+  const _destNombre = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
 
   if (isReemplazo) {
     const _movTipo = isReposicionRobo ? 'Reposición Robo' : isReposicionDano ? 'Reposición Daño Físico' : isRenovacion ? 'Renovación' : 'Reemplazo';
-    addMovimiento(_movTipo, `${_movTipo} de equipo para ${colab.nombre} [${ticket}]`);
+    addMovimiento(_movTipo, `${_movTipo} de equipo para ${_destNombre} [${ticket}]`);
   } else if (isIngresoNuevo) {
-    addMovimiento('Ingreso Nuevo', `${_totalEquipos} activo(s) asignados (kit inicial) a ${colab.nombre} [${ticket}]`);
+    addMovimiento('Ingreso Nuevo', `${_totalEquipos} activo(s) asignados (kit inicial) a ${_destNombre} [${ticket}]`);
   } else {
-    addMovimiento(isPrestamo ? 'Préstamo' : 'Asignación', isPrestamo ? `${_asigSelectedActivos.length} activo(s) en préstamo a ${colab.nombre} hasta ${formatDate(fechaFinPrestamo)} [${ticket}]` : `${_asigSelectedActivos.length} activo(s) asignados a ${colab.nombre} [${ticket}]`);
+    addMovimiento(isPrestamo ? 'Préstamo' : 'Asignación', isPrestamo ? `${_asigSelectedActivos.length} activo(s) en préstamo a ${_destNombre} hasta ${formatDate(fechaFinPrestamo)} [${ticket}]` : `${_asigSelectedActivos.length} activo(s) asignados a ${_destNombre} [${ticket}]`);
   }
 
   // Auto-registrar en bitácora estructurada (SALIDA por cada activo asignado)
@@ -4720,9 +4933,9 @@ function saveAsignacion() {
       modelo: _act.modelo || '',
       serie: sel.serie || '',
       inv: _act.codInventario || '',
-      correo: colab.email || '',
+      correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
       ticket: ticket || '',
-      motivo: _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO') || isReposicionDano || isReposicionRobo ? motivo : ''
+      motivo: _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO') || isReposicionDano || isReposicionRobo ? motivo : (sitio ? 'ASIGNACIÓN SITIO' : '')
     });
   });
 
@@ -4739,9 +4952,9 @@ function saveAsignacion() {
         modelo: _act.modelo || '',
         serie: sel.serie || '',
         inv: _act.codInventario || '',
-        correo: colab.email || '',
+        correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
         ticket: ticket || '',
-        motivo: ''
+        motivo: sitio ? 'ASIGNACIÓN SITIO' : ''
       });
     });
   }
@@ -4919,10 +5132,10 @@ function _buildActaPrintHTML(record, colab, grupo, activos, activoPrincipal, equ
     <div class="header-code">FORM-26A</div>
   </div>
   <table class="form-tbl">
-    <tr><td class="lbl">USUARIO:</td><td colspan="3">${esc(colab.nombre || record.colaboradorNombre)}</td><td class="lbl" style="width:100px">TICKET:</td><td style="width:160px;font-family:monospace">${esc(record.ticket || '')}</td></tr>
+    <tr><td class="lbl">USUARIO:</td><td colspan="3">${esc(_fullName(colab) || record.colaboradorNombre)}</td><td class="lbl" style="width:100px">TICKET:</td><td style="width:160px;font-family:monospace">${esc(record.ticket || '')}</td></tr>
     <tr><td class="lbl">EMAIL:</td><td colspan="3">${esc(colab.email || record.correoColab || '')}</td><td class="lbl">FECHA ENTREGA:</td><td>${fechaEntrega}</td></tr>
-    <tr><td class="lbl">CARGO:</td><td>${esc(colab.cargo || '')}</td><td class="lbl" style="width:60px">AREA:</td><td colspan="3">${esc(colab.area || record.area || '')}</td></tr>
-    <tr><td class="lbl">LOCAL:</td><td colspan="5">${esc(colab.ubicacion || '')}</td></tr>
+    <tr><td class="lbl">CARGO:</td><td>${esc(colab.puesto || colab.tipoPuesto || '')}</td><td class="lbl" style="width:60px">AREA:</td><td colspan="3">${esc(colab.area || record.area || '')}</td></tr>
+    <tr><td class="lbl">LOCAL:</td><td colspan="5">${esc(colab.ubicacionFisica || colab.ubicacion || '')}</td></tr>
     <tr><td class="lbl">JEFE/ RESPONSABLE:</td><td colspan="3"></td><td class="lbl">ING. DE SOP:</td><td></td></tr>
   </table>
   <div class="section-title">${isReposicion ? 'DATOS DEL EQUIPO ENTREGADO (EQUIPO NUEVO)' : 'DATOS DEL EQUIPO'}</div>
@@ -4946,7 +5159,7 @@ function _buildActaPrintHTML(record, colab, grupo, activos, activoPrincipal, equ
   </div>
   <div class="signature-row">
     <div class="signature-col"><div class="sig-line">Firma Usuario Entel</div></div>
-    <div class="signature-col"><div class="sig-line">Usuario / DNI</div><div class="sig-name">${esc(colab.nombre || record.colaboradorNombre)}</div></div>
+    <div class="signature-col"><div class="sig-line">Usuario / DNI</div><div class="sig-name">${esc(_fullName(colab) || record.colaboradorNombre)}</div></div>
   </div>
 </div>
 </body></html>`;
@@ -5003,8 +5216,18 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
   const _esPrest = _detTipoUp.includes('PRÉSTAMO') || _detTipoUp.includes('PRESTAMO');
   const _detTitle = _esReposRobo ? 'Detalle de Reposición por Robo' : _esReposDano ? 'Detalle de Reposición por Daño Físico' : _esRenov ? 'Detalle de Renovación' : _esReem ? 'Detalle de Reemplazo' : _esPrest ? 'Detalle de Préstamo' : 'Detalle de Asignación';
 
+  // Guardar datos para copiar al portapapeles
+  window._detAsigCopyData = { ticket: first.ticket, fecha: first.fechaAsignacion, colaborador: first.colaboradorNombre, correo: first.correoColab || '—', motivo: first.tipoAsignacion || first.motivo || '—', area: colab.area || first.area || '—', equipos: grupo };
+
   openModal(_detTitle, `
     <div style="display:flex;flex-direction:column;gap:16px">
+      <!-- Botón copiar -->
+      <button onclick="_copyDetalleAsignacion()" title="Copiar detalle para correo"
+        style="position:absolute;top:52px;right:16px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:6px 10px;cursor:pointer;display:flex;align-items:center;gap:5px;font-size:12px;color:#2563eb;font-weight:600;transition:all .15s;z-index:10"
+        onmouseover="this.style.background='#dbeafe';this.style.borderColor='#93c5fd'" onmouseout="this.style.background='#eff6ff';this.style.borderColor='#bfdbfe'"
+        id="btnCopyDetAsig">
+        <span style="font-size:14px">📋</span> Copiar
+      </button>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;background:var(--bg-secondary);padding:14px;border-radius:8px">
         <div>
           <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px">Ticket</div>
@@ -5124,6 +5347,80 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
     <button class="btn btn-primary" onclick="closeModal();previewActaEntrega(${first.id})">📄 Acta de Entrega</button>
   `, 'modal-lg');
+}
+
+function _copyDetalleAsignacion() {
+  const d = window._detAsigCopyData;
+  if (!d) return;
+
+  // Obtener cod inventario de cada equipo
+  const activos = DB.get('activos');
+
+  const cs = 'padding:4px 10px;font-size:12px;font-family:Calibri,Arial,sans-serif;border:1px solid #d0d5dd';
+  const ths = 'padding:6px 10px;font-size:12px;font-family:Calibri,Arial,sans-serif;border:1px solid #1e3a8a;text-align:left';
+
+  const equiposRowsHTML = d.equipos.map(a => {
+    const act = activos.find(x => x.id === a.activoId);
+    const inv = (act && act.codInventario) ? act.codInventario : '—';
+    return '<tr>'
+      + '<td style="' + cs + '">' + esc(a.activoTipo || '') + '</td>'
+      + '<td style="' + cs + '">' + esc(a.activoMarca || '') + '</td>'
+      + '<td style="' + cs + '">' + esc(a.activoModelo || '') + '</td>'
+      + '<td style="' + cs + '">' + esc(a.serieAsignada || '—') + '</td>'
+      + '<td style="' + cs + '">' + esc(inv) + '</td>'
+      + '</tr>';
+  }).join('');
+
+  const html = '<div style="font-family:Calibri,Arial,sans-serif;font-size:12px">'
+    + '<table style="border-collapse:collapse;margin-bottom:10px">'
+    + '<tr><td style="padding:2px 8px 2px 0;font-weight:700;color:#334155">Ticket:</td><td style="padding:2px 0">' + esc(d.ticket) + '</td></tr>'
+    + '<tr><td style="padding:2px 8px 2px 0;font-weight:700;color:#334155">Motivo:</td><td style="padding:2px 0">' + esc(d.motivo) + '</td></tr>'
+    + '<tr><td style="padding:2px 8px 2px 0;font-weight:700;color:#334155">Correo:</td><td style="padding:2px 0">' + esc(d.correo) + '</td></tr>'
+    + '</table>'
+    + '<div style="font-weight:700;margin-bottom:6px;color:#334155">Equipos asignados:</div>'
+    + '<table style="border-collapse:collapse">'
+    + '<tr bgcolor="#1e3a5f"><td bgcolor="#1e3a5f" style="' + ths + ';color:white;mso-style-textfill-fill-color:white"><b style="color:white"><font color="white" style="color:white">TIPO</font></b></td><td bgcolor="#1e3a5f" style="' + ths + ';color:white"><b style="color:white"><font color="white" style="color:white">MARCA</font></b></td><td bgcolor="#1e3a5f" style="' + ths + ';color:white"><b style="color:white"><font color="white" style="color:white">MODELO</font></b></td><td bgcolor="#1e3a5f" style="' + ths + ';color:white"><b style="color:white"><font color="white" style="color:white">SERIE</font></b></td><td bgcolor="#1e3a5f" style="' + ths + ';color:white"><b style="color:white"><font color="white" style="color:white">COD.INV</font></b></td></tr>'
+    + equiposRowsHTML
+    + '</table></div>';
+
+  const plainText = 'Ticket: ' + d.ticket + '\nMotivo: ' + d.motivo + '\nCorreo: ' + d.correo + '\n\nEquipos asignados:\n'
+    + d.equipos.map(a => {
+        const act = activos.find(x => x.id === a.activoId);
+        const inv = (act && act.codInventario) ? act.codInventario : '—';
+        return (a.activoTipo || '') + ' | ' + (a.activoMarca || '') + ' | ' + (a.activoModelo || '') + ' | ' + (a.serieAsignada || '—') + ' | ' + inv;
+      }).join('\n');
+
+  const _copyOk = () => {
+    const btn = document.getElementById('btnCopyDetAsig');
+    if (btn) {
+      btn.innerHTML = '<span style="font-size:14px">✅</span> Copiado';
+      btn.style.background = '#dcfce7';
+      btn.style.borderColor = '#86efac';
+      btn.style.color = '#16a34a';
+      setTimeout(() => {
+        if (btn) {
+          btn.innerHTML = '<span style="font-size:14px">📋</span> Copiar';
+          btn.style.background = '#eff6ff';
+          btn.style.borderColor = '#bfdbfe';
+          btn.style.color = '#2563eb';
+        }
+      }, 2000);
+    }
+    showToast('Detalle copiado al portapapeles');
+  };
+
+  try {
+    const blobHtml = new Blob([html], { type: 'text/html' });
+    const blobText = new Blob([plainText], { type: 'text/plain' });
+    navigator.clipboard.write([new ClipboardItem({
+      'text/html': blobHtml,
+      'text/plain': blobText
+    })]).then(_copyOk).catch(() => {
+      navigator.clipboard.writeText(plainText).then(_copyOk);
+    });
+  } catch (e) {
+    navigator.clipboard.writeText(plainText).then(_copyOk);
+  }
 }
 
 function deleteAsignacionGrupo(ticket, colabId, fecha) {
@@ -5314,7 +5611,7 @@ function _ejecutarDevSingle(asigId) {
 
   // Auto-registrar en bitácora
   if (activo) {
-    const _bitMotivo = destino === 'NO RECUPERABLE' ? 'CESE-NO RECUPERABLE' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((a.tipoAsignacion || a.motivo || '').toUpperCase())) ? (a.tipoAsignacion || a.motivo) : '';
+    const _bitMotivo = destino === 'NO RECUPERABLE' ? 'CESE-NO RECUPERABLE' : 'CESE';
     _autoBitacora({
       movimiento: destino === 'NO RECUPERABLE' ? 'BAJA' : 'INGRESO',
       almacen: (activo.ubicacion || 'Almacen TI'),
@@ -5331,6 +5628,451 @@ function _ejecutarDevSingle(asigId) {
   closeModal();
   showToast('Activo procesado correctamente');
   renderCeses(document.getElementById('contentArea'));
+}
+
+/* ═══════════════════════════════════════════════════════
+   COLABORADORES - SITIOS MÓVILES
+   ═══════════════════════════════════════════════════════ */
+let _sitioSearch = '';
+let _sitioSearchTimer = null;
+let _sitioActiveFilters = {};
+let _sitioFilterMenuOpen = false;
+
+const _SITIO_FILTER_OPTIONS = [
+  { key: 'estado', label: 'Estado' },
+  { key: 'sede',   label: 'Sede' },
+  { key: 'area',   label: 'Área' },
+  { key: 'piso',   label: 'Piso' }
+];
+
+function _buildSitioNombre(s) {
+  return (s.sede || '') + ' - Piso ' + (s.piso || '?') + ' - Ubicación ' + (s.ubicacion || '?');
+}
+
+function renderSitiosMoviles(el) {
+  const sitios = DB.get('sitiosMoviles');
+  const totalActivos = sitios.filter(s => (s.estado || '').toUpperCase() === 'ACTIVO').length;
+  const totalInactivos = sitios.filter(s => (s.estado || '').toUpperCase() !== 'ACTIVO').length;
+
+  const _tabStyle = (active) => 'padding:10px 24px;font-size:13px;font-weight:600;border:none;cursor:pointer;border-bottom:3px solid ' + (active ? '#2563eb' : 'transparent') + ';color:' + (active ? '#2563eb' : '#64748b') + ';background:none;transition:all .15s';
+
+  el.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Padrón de Colaboradores</h1>
+        <div class="subtitle">Directorio general de todos los colaboradores</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="_openCargaMasivaSitiosModal()" style="font-size:13px">📥 Carga Masiva</button>
+        <button class="btn btn-primary" onclick="openSitioModal()">+ Nuevo Sitio</button>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div style="display:flex;gap:0;border-bottom:2px solid #e2e8f0;margin-bottom:20px">
+      <button onclick="_switchPadronTab('empleados')" style="${_tabStyle(false)}">👥 Empleados</button>
+      <button onclick="_switchPadronTab('sitios')" style="${_tabStyle(true)}">📍 Sitios Móviles</button>
+    </div>
+
+    <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon blue">📍</div></div>
+        <div class="stat-value">${sitios.length}</div>
+        <div class="stat-label">Total sitios</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon green">✅</div></div>
+        <div class="stat-value">${totalActivos}</div>
+        <div class="stat-label">Activos</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-header"><div class="stat-icon red">⛔</div></div>
+        <div class="stat-value">${totalInactivos}</div>
+        <div class="stat-label">Inactivos</div>
+      </div>
+    </div>
+
+    <div class="table-toolbar">
+      <div class="search-box" style="position:relative">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="sitioSearchInput" placeholder="Buscar por sede, área, piso, ubicación..."
+               value="${esc(_sitioSearch)}"
+               oninput="_onSitioSearch(this.value)">
+        <span id="sitioSearchClear" onclick="_clearSitioSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${_sitioSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
+      </div>
+    </div>
+    <div id="sitioFiltersBar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap"></div>
+
+    <div id="sitioTableWrap"></div>
+  `;
+  _renderSitioFiltersBar();
+  _renderSitioTable();
+}
+
+function _onSitioSearch(val) {
+  _sitioSearch = val;
+  const cb = document.getElementById('sitioSearchClear');
+  if (cb) cb.style.display = val ? 'flex' : 'none';
+  resetPage('sitios');
+  clearTimeout(_sitioSearchTimer);
+  _sitioSearchTimer = setTimeout(_renderSitioTable, 120);
+}
+
+function _clearSitioSearch() {
+  _sitioSearch = '';
+  const input = document.getElementById('sitioSearchInput');
+  if (input) { input.value = ''; input.focus(); }
+  const cb = document.getElementById('sitioSearchClear');
+  if (cb) cb.style.display = 'none';
+  resetPage('sitios');
+  _renderSitioTable();
+}
+
+function _renderSitioFiltersBar() {
+  const bar = document.getElementById('sitioFiltersBar');
+  if (!bar) return;
+  const sitios = DB.get('sitiosMoviles');
+
+  let html = Object.keys(_sitioActiveFilters).map(key => {
+    const opt = _SITIO_FILTER_OPTIONS.find(o => o.key === key);
+    if (!opt) return '';
+    const values = ['Todos', ...new Set(sitios.map(s => s[key] || '').filter(Boolean))].sort((a, b) => a === 'Todos' ? -1 : b === 'Todos' ? 1 : String(a).localeCompare(String(b)));
+    const current = _sitioActiveFilters[key] || 'Todos';
+    return '<div style="display:flex;align-items:center;gap:0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:34px;background:#fff">'
+      + '<select onchange="_sitioActiveFilters[\'' + key + '\']=this.value;resetPage(\'sitios\');_renderSitioTable()" style="border:none;padding:0 8px 0 10px;font-size:11px;color:#334155;height:100%;cursor:pointer;background:transparent;min-width:120px">'
+      + values.map(v => '<option value="' + esc(v) + '" ' + (current === v ? 'selected' : '') + '>' + (v === 'Todos' ? esc(opt.label) + ': Todos' : esc(v)) + '</option>').join('')
+      + '</select>'
+      + '<button onclick="_sitioRemoveFilter(\'' + key + '\')" style="border:none;background:none;cursor:pointer;padding:0 6px;color:#94a3b8;font-size:14px;height:100%;display:flex;align-items:center" onmouseover="this.style.color=\'#dc2626\'" onmouseout="this.style.color=\'#94a3b8\'">✕</button>'
+      + '</div>';
+  }).join('');
+
+  const inactive = _SITIO_FILTER_OPTIONS.filter(o => !_sitioActiveFilters.hasOwnProperty(o.key));
+  if (inactive.length > 0) {
+    html += '<div style="position:relative;display:inline-block">'
+      + '<button id="sitioFilterAddBtn" style="width:34px;height:34px;border-radius:8px;border:1px dashed #cbd5e1;background:#f8fafc;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;transition:all .15s" onmouseover="this.style.borderColor=\'#2563eb\';this.style.color=\'#2563eb\'" onmouseout="this.style.borderColor=\'#cbd5e1\';this.style.color=\'#64748b\'" title="Agregar filtro">+</button>'
+      + '<div id="sitioFilterAddMenu" style="display:' + (_sitioFilterMenuOpen ? 'block' : 'none') + ';position:absolute;top:38px;left:0;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px 0;z-index:999;min-width:180px">'
+      + '<div style="padding:4px 12px 6px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Agregar filtro</div>'
+      + inactive.map(o => '<div onclick="event.stopPropagation();_sitioAddFilter(\'' + o.key + '\')" style="padding:7px 12px;font-size:12px;color:#334155;cursor:pointer;display:flex;align-items:center;gap:8px" onmouseover="this.style.background=\'#f1f5f9\'" onmouseout="this.style.background=\'\'">'
+        + '<span style="color:#2563eb;font-size:14px">+</span> ' + esc(o.label) + '</div>').join('')
+      + '</div></div>';
+  }
+  bar.innerHTML = html;
+  const addBtn = document.getElementById('sitioFilterAddBtn');
+  if (addBtn) {
+    addBtn.onclick = function(e) {
+      e.stopPropagation();
+      _sitioFilterMenuOpen = !_sitioFilterMenuOpen;
+      const menu = document.getElementById('sitioFilterAddMenu');
+      if (menu) menu.style.display = _sitioFilterMenuOpen ? 'block' : 'none';
+    };
+  }
+}
+
+function _sitioAddFilter(key) { _sitioActiveFilters[key] = 'Todos'; _sitioFilterMenuOpen = false; resetPage('sitios'); _renderSitioFiltersBar(); _renderSitioTable(); }
+function _sitioRemoveFilter(key) { delete _sitioActiveFilters[key]; _sitioFilterMenuOpen = false; resetPage('sitios'); _renderSitioFiltersBar(); _renderSitioTable(); }
+
+document.addEventListener('click', function(e) {
+  if (_sitioFilterMenuOpen && !e.target.closest('#sitioFiltersBar')) {
+    _sitioFilterMenuOpen = false;
+    const m = document.getElementById('sitioFilterAddMenu');
+    if (m) m.style.display = 'none';
+  }
+});
+
+function _renderSitioTable() {
+  const wrap = document.getElementById('sitioTableWrap');
+  if (!wrap) return;
+  const sitios = DB.get('sitiosMoviles');
+  const asignaciones = DB.get('asignaciones');
+
+  let filtered = sitios;
+
+  // Filtros dinámicos
+  for (const [key, val] of Object.entries(_sitioActiveFilters)) {
+    if (val && val !== 'Todos') {
+      filtered = filtered.filter(s => (s[key] || '').toUpperCase() === val.toUpperCase());
+    }
+  }
+
+  // Búsqueda
+  if (_sitioSearch) {
+    const s = _sitioSearch.toLowerCase();
+    filtered = filtered.filter(r =>
+      (r.sede || '').toLowerCase().includes(s) ||
+      (r.area || '').toLowerCase().includes(s) ||
+      (r.piso || '').toLowerCase().includes(s) ||
+      (r.ubicacion || '').toLowerCase().includes(s) ||
+      _buildSitioNombre(r).toLowerCase().includes(s)
+    );
+  }
+
+  const pageItems = pagSlice(filtered, 'sitios');
+
+  wrap.innerHTML = `
+    <div class="table-container">
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>ID</th>
+            <th>Nombre del Sitio</th>
+            <th>Sede</th>
+            <th>Área</th>
+            <th>Piso</th>
+            <th>Ubicación</th>
+            <th>Activos Asig.</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          </tr></thead>
+          <tbody>
+            ${filtered.length === 0
+              ? '<tr><td colspan="9"><div class="empty-state"><div class="empty-icon">📍</div><h3>Sin sitios móviles</h3><p>Crea un sitio para asignar activos a ubicaciones físicas</p></div></td></tr>'
+              : pageItems.map(s => {
+                  const nAsig = asignaciones.filter(a => a.estado === 'Vigente' && a.tipoDestino === 'sitio' && a.sitioId === s.id).length;
+                  return '<tr>'
+                    + '<td style="font-size:12px;color:var(--text-light)">' + s.id + '</td>'
+                    + '<td><div style="display:flex;align-items:center;gap:10px"><div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0">📍</div><strong>' + esc(_buildSitioNombre(s)) + '</strong></div></td>'
+                    + '<td style="font-size:12px">' + esc(s.sede || '—') + '</td>'
+                    + '<td style="font-size:12px">' + esc(s.area || '—') + '</td>'
+                    + '<td style="font-size:12px;text-align:center">' + esc(s.piso || '—') + '</td>'
+                    + '<td style="font-size:12px;text-align:center">' + esc(s.ubicacion || '—') + '</td>'
+                    + '<td style="text-align:center"><span class="badge badge-info" style="font-size:10px">' + nAsig + '</span></td>'
+                    + '<td>' + (s.estado === 'Activo'
+                      ? '<span class="badge badge-success" style="font-size:10px">Activo</span>'
+                      : '<span class="badge badge-danger" style="font-size:10px">Inactivo</span>') + '</td>'
+                    + '<td><div class="action-btns">'
+                      + '<button class="btn-icon" title="Ver detalle" onclick="_verDetalleSitio(' + s.id + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">👁️</button>'
+                      + '<button class="btn-icon" title="Editar" onclick="openSitioModal(' + s.id + ')" style="background:#fef3c7;color:#d97706;border:1px solid #fde68a">✏️</button>'
+                      + '<button class="btn-icon" title="Eliminar" onclick="_deleteSitio(' + s.id + ')" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca">🗑️</button>'
+                    + '</div></td>'
+                    + '</tr>';
+                }).join('')
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="table-footer">${pagFooter('sitios', filtered.length)}</div>
+    </div>
+  `;
+}
+
+function openSitioModal(id) {
+  const sitios = DB.get('sitiosMoviles');
+  const s = id ? sitios.find(x => x.id === id) : null;
+  const sedes = DB.getConfig('sedesAdmin', []);
+  const areas = DB.getConfig('areas', []);
+
+  openModal(s ? 'Editar Sitio Móvil' : 'Nuevo Sitio Móvil', `
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Sede <span class="required">*</span></label>
+        <select class="form-control" id="fSitSede">
+          <option value="">Seleccionar...</option>
+          ${optionsHTML(sedes, s?.sede)}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Área <span class="required">*</span></label>
+        <select class="form-control" id="fSitArea">
+          <option value="">Seleccionar...</option>
+          ${optionsHTML(areas, s?.area)}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Piso <span class="required">*</span></label>
+        <input class="form-control" id="fSitPiso" placeholder="Ej: 15" value="${esc(s?.piso || '')}">
+      </div>
+      <div class="form-group">
+        <label>Ubicación <span class="required">*</span></label>
+        <input class="form-control" id="fSitUbicacion" placeholder="Ej: 8" value="${esc(s?.ubicacion || '')}">
+      </div>
+      <div class="form-group">
+        <label>Estado</label>
+        <select class="form-control" id="fSitEstado">
+          <option value="Activo" ${!s || s.estado === 'Activo' ? 'selected' : ''}>Activo</option>
+          <option value="Inactivo" ${s?.estado === 'Inactivo' ? 'selected' : ''}>Inactivo</option>
+        </select>
+      </div>
+      <div class="form-group" style="grid-column:span 2">
+        <label>Observación</label>
+        <textarea class="form-control" id="fSitObs" rows="2" placeholder="Observación opcional...">${esc(s?.observacion || '')}</textarea>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="saveSitio(${id || 'null'})">${s ? 'Guardar' : 'Crear Sitio'}</button>
+  `);
+}
+
+function saveSitio(id) {
+  const sede = (document.getElementById('fSitSede') || {}).value || '';
+  const area = (document.getElementById('fSitArea') || {}).value || '';
+  const piso = (document.getElementById('fSitPiso') || {}).value.trim();
+  const ubicacion = (document.getElementById('fSitUbicacion') || {}).value.trim();
+  const estado = (document.getElementById('fSitEstado') || {}).value || 'Activo';
+  const observacion = (document.getElementById('fSitObs') || {}).value.trim();
+
+  if (!sede || !area || !piso || !ubicacion) {
+    showToast('Complete sede, área, piso y ubicación', 'error');
+    return;
+  }
+
+  const sitios = DB.get('sitiosMoviles');
+
+  // Validar duplicados (sede + piso + area + ubicacion)
+  const dup = sitios.find(s =>
+    (s.sede || '').toUpperCase() === sede.toUpperCase() &&
+    (s.area || '').toUpperCase() === area.toUpperCase() &&
+    (s.piso || '').toUpperCase() === piso.toUpperCase() &&
+    (s.ubicacion || '').toUpperCase() === ubicacion.toUpperCase() &&
+    s.id !== id
+  );
+  if (dup) {
+    showToast('Ya existe un sitio con esa combinación Sede + Área + Piso + Ubicación', 'error');
+    return;
+  }
+
+  const _data = upperFields({ sede, area, piso, ubicacion, estado, observacion });
+  _data.nombreVisible = _buildSitioNombre(_data);
+
+  if (id) {
+    const idx = sitios.findIndex(s => s.id === id);
+    if (idx >= 0) sitios[idx] = { ...sitios[idx], ..._data };
+  } else {
+    _data.id = nextId(sitios);
+    sitios.push(_data);
+    addMovimiento('Nuevo Sitio', 'Sitio móvil creado: ' + _data.nombreVisible);
+  }
+
+  DB.set('sitiosMoviles', sitios);
+  closeModal();
+  showToast(id ? 'Sitio actualizado' : 'Sitio creado');
+  renderSitiosMoviles(document.getElementById('contentArea'));
+}
+
+function _deleteSitio(id) {
+  const sitios = DB.get('sitiosMoviles');
+  const s = sitios.find(x => x.id === id);
+  if (!s) return;
+  const asigs = DB.get('asignaciones').filter(a => a.estado === 'Vigente' && a.tipoDestino === 'sitio' && a.sitioId === id);
+  if (asigs.length > 0) {
+    showToast('No se puede eliminar: tiene ' + asigs.length + ' activo(s) asignado(s)', 'error');
+    return;
+  }
+  if (!confirm('¿Eliminar el sitio "' + _buildSitioNombre(s) + '"?')) return;
+  DB.set('sitiosMoviles', sitios.filter(x => x.id !== id));
+  showToast('Sitio eliminado');
+  renderSitiosMoviles(document.getElementById('contentArea'));
+}
+
+function _verDetalleSitio(id) {
+  const sitios = DB.get('sitiosMoviles');
+  const s = sitios.find(x => x.id === id);
+  if (!s) return;
+  const asigs = DB.get('asignaciones').filter(a => a.estado === 'Vigente' && a.tipoDestino === 'sitio' && a.sitioId === id);
+  const activos = DB.get('activos');
+
+  const _f = (lbl, val) => val ? '<div style="padding:8px 12px;background:#f8fafc;border-radius:8px;border:1px solid #f1f5f9"><span style="font-size:10px;font-weight:600;text-transform:uppercase;color:#94a3b8;display:block;margin-bottom:2px">' + lbl + '</span><span style="font-size:14px;font-weight:700;color:#0f172a">' + esc(val) + '</span></div>' : '';
+
+  openModal('Detalle de Sitio Móvil', `
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,#fef3c7,#fde68a);border-radius:12px">
+        <div style="width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0">📍</div>
+        <div style="flex:1">
+          <div style="font-size:16px;font-weight:800;color:#92400e">${esc(_buildSitioNombre(s))}</div>
+          <div style="font-size:12px;color:#a16207;margin-top:2px">${esc(s.area || '')}</div>
+        </div>
+        <span style="padding:4px 10px;border-radius:16px;font-size:10px;font-weight:700;${s.estado === 'Activo' ? 'background:#dcfce7;color:#166534' : 'background:#fef2f2;color:#991b1b'}">${esc(s.estado)}</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${_f('Sede', s.sede)}
+        ${_f('Área', s.area)}
+        ${_f('Piso', s.piso)}
+        ${_f('Ubicación', s.ubicacion)}
+      </div>
+
+      ${s.observacion ? '<div style="padding:10px 14px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px"><span style="font-size:10px;font-weight:600;text-transform:uppercase;color:#92400e">Observación</span><p style="margin:4px 0 0;font-size:13px;color:#78350f">' + esc(s.observacion) + '</p></div>' : ''}
+
+      <div>
+        <div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:8px">Activos asignados (${asigs.length})</div>
+        ${asigs.length === 0
+          ? '<div style="padding:20px;text-align:center;color:#94a3b8;font-size:12px;background:#f8fafc;border-radius:8px">Sin activos asignados a este sitio</div>'
+          : '<table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr style="background:#f8fafc"><th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Equipo</th><th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Serie</th><th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Ticket</th></tr></thead><tbody>'
+            + asigs.map(a => {
+                const act = activos.find(x => x.id === a.activoId);
+                return '<tr style="border-bottom:1px solid #f1f5f9"><td style="padding:8px 10px;font-weight:600">' + esc(a.activoTipo || '') + ' ' + esc(a.activoMarca || '') + ' ' + esc(a.activoModelo || '') + '</td><td style="padding:8px 10px;font-family:monospace">' + esc(a.serieAsignada || '') + '</td><td style="padding:8px 10px;font-family:monospace;color:#7c3aed">' + esc(a.ticket || '') + '</td></tr>';
+              }).join('')
+            + '</tbody></table>'
+        }
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
+  `, 'modal-lg');
+}
+
+function _openCargaMasivaSitiosModal() {
+  openModal('Carga Masiva — Sitios Móviles', `
+    <div style="text-align:center;padding:20px 0">
+      <p style="margin-bottom:16px;color:var(--text-secondary)">Sube un archivo Excel con los sitios móviles a registrar.</p>
+      <div style="display:flex;gap:10px;justify-content:center;margin-bottom:20px">
+        <button class="btn btn-secondary" onclick="_descargarPlantillaSitios()" style="font-size:12px">📄 Descargar Plantilla</button>
+        <label class="btn btn-primary" style="font-size:12px;cursor:pointer">
+          📂 Seleccionar Archivo
+          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelSitios(this.files[0])">
+        </label>
+      </div>
+      <div id="sitiosCmpContainer"></div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
+  `, 'modal-lg');
+}
+
+function _descargarPlantillaSitios() {
+  const headers = ['SEDE', 'AREA', 'PISO', 'UBICACION', 'ESTADO', 'OBSERVACION'];
+  const ejemplo = ['Plaza República', 'Operaciones TI', '15', '8', 'Activo', ''];
+  const ws = XLSX.utils.aoa_to_sheet([headers, ejemplo]);
+  ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sitios');
+  XLSX.writeFile(wb, 'Plantilla_Sitios_Moviles.xlsx');
+  showToast('Plantilla descargada');
+}
+
+function _procesarExcelSitios(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (rows.length === 0) { showToast('Archivo vacío', 'error'); return; }
+
+      const sitios = DB.get('sitiosMoviles');
+      let added = 0, skipped = 0;
+      rows.forEach(r => {
+        const sede = String(r.SEDE || r.sede || '').trim().toUpperCase();
+        const area = String(r.AREA || r.area || '').trim().toUpperCase();
+        const piso = String(r.PISO || r.piso || '').trim().toUpperCase();
+        const ubi  = String(r.UBICACION || r.ubicacion || '').trim().toUpperCase();
+        if (!sede || !piso || !ubi) { skipped++; return; }
+        const dup = sitios.find(s => s.sede === sede && s.area === area && s.piso === piso && s.ubicacion === ubi);
+        if (dup) { skipped++; return; }
+        const _s = { id: nextId(sitios), sede, area, piso, ubicacion: ubi, estado: 'Activo', observacion: String(r.OBSERVACION || r.observacion || '').trim() };
+        _s.nombreVisible = _buildSitioNombre(_s);
+        sitios.push(_s);
+        added++;
+      });
+      DB.set('sitiosMoviles', sitios);
+      closeModal();
+      showToast(added + ' sitios importados' + (skipped > 0 ? ', ' + skipped + ' omitidos (duplicados o vacíos)' : ''));
+      renderSitiosMoviles(document.getElementById('contentArea'));
+    } catch (err) { showToast('Error: ' + err.message, 'error'); }
+  };
+  reader.readAsArrayBuffer(file);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -5416,12 +6158,12 @@ function _renderCesTable() {
   const filtered = cesados.filter(c => {
     if (cesSearch) {
       const s = cesSearch.toLowerCase();
-      return (c.nombre || '').toLowerCase().includes(s) ||
+      return _fullName(c).toLowerCase().includes(s) ||
              (c.dni || '').toLowerCase().includes(s) ||
              (c.area || '').toLowerCase().includes(s) ||
-             (c.cargo || '').toLowerCase().includes(s) ||
+             (c.puesto || c.tipoPuesto || '').toLowerCase().includes(s) ||
              (c.email || '').toLowerCase().includes(s) ||
-             (c.ubicacion || '').toLowerCase().includes(s);
+             (c.ubicacionFisica || c.ubicacion || '').toLowerCase().includes(s);
     }
     return true;
   });
@@ -5457,15 +6199,15 @@ function _renderCesTable() {
                       <td>
                         <div style="display:flex;align-items:center;gap:10px">
                           <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,${esProximo ? '#f59e0b,#d97706' : '#ef4444,#dc2626'});display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;flex-shrink:0">
-                            ${esc((c.nombre || '').split(' ').map(p => p[0]).slice(0, 2).join(''))}
+                            ${esc(_fullName(c).split(' ').map(p => p[0]).slice(0, 2).join(''))}
                           </div>
-                          <strong>${esc(c.nombre)}</strong>
+                          <strong>${esc(_fullName(c))}</strong>
                         </div>
                       </td>
                       <td style="font-family:monospace;font-size:12px">${esc(c.dni)}</td>
                       <td style="font-size:12px">${esc(c.area || '—')}</td>
-                      <td style="font-size:12px">${esc(c.ubicacion || '—')}</td>
-                      <td style="font-size:12px">${esc(c.cargo || '—')}</td>
+                      <td style="font-size:12px">${esc(c.ubicacionFisica || c.ubicacion || '—')}</td>
+                      <td style="font-size:12px">${esc(c.puesto || c.tipoPuesto || '—')}</td>
                       <td>
                         ${esProximo
                           ? '<span class="badge badge-warning" style="font-size:10px">Próximo Cese</span>'
@@ -5507,15 +6249,15 @@ function openDevolucionModal(colabId) {
   const asig = DB.get('asignaciones').filter(a => a.colaboradorId === colabId && a.estado === 'Vigente');
   const activos = DB.get('activos');
 
-  openModal('Devolución de Activos — ' + esc(c.nombre), `
+  openModal('Devolución de Activos — ' + esc(_fullName(c)), `
     <div style="display:flex;flex-direction:column;gap:16px">
       <div style="display:flex;align-items:center;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--border)">
         <div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#ef4444,#dc2626);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:700">
-          ${esc((c.nombre || '').split(' ').map(p => p[0]).slice(0, 2).join(''))}
+          ${esc(_fullName(c).split(' ').map(p => p[0]).slice(0, 2).join(''))}
         </div>
         <div>
-          <strong style="font-size:15px">${esc(c.nombre)}</strong>
-          <div style="font-size:12px;color:var(--text-muted)">${esc(c.cargo || '')} — ${esc(c.area || '')} | Cese: ${formatDate(c.fechaCese)}</div>
+          <strong style="font-size:15px">${esc(_fullName(c))}</strong>
+          <div style="font-size:12px;color:var(--text-muted)">${esc(c.puesto || c.tipoPuesto || '')} — ${esc(c.area || '')} | Cese: ${formatDate(c.fechaCese)}</div>
         </div>
       </div>
 
@@ -5595,7 +6337,7 @@ function confirmarDevolucion(colabId) {
           ${esc((c?.nombre || '').split(' ').map(p => p[0]).slice(0, 2).join(''))}
         </div>
         <div>
-          <strong>${esc(c?.nombre || '')}</strong>
+          <strong>${esc(_fullName(c))}</strong>
           <div style="font-size:11px;color:var(--text-muted)">${items.length} activo(s) a procesar</div>
         </div>
       </div>
@@ -5764,7 +6506,7 @@ function _ejecutarDevolucion(colabId) {
         costo: activo.costo || 0,
         fechaCompra: activo.fechaCompra || '',
         antiguedad: '',
-        responsable: c ? c.nombre : '',
+        responsable: c ? _fullName(c) : '',
         observaciones: 'Equipo no recuperable por cese de colaborador',
         fechaSalida: today(),
         numGuia: '',
@@ -5777,7 +6519,7 @@ function _ejecutarDevolucion(colabId) {
     });
     DB.set('historialBajas', histBajas);
   }
-  addMovimiento('Devolución Cese', `${items.length} activo(s) procesados de ${c ? c.nombre : 'colaborador'}: ${resumen.join('; ')}`);
+  addMovimiento('Devolución Cese', `${items.length} activo(s) procesados de ${c ? _fullName(c) : 'colaborador'}: ${resumen.join('; ')}`);
 
   // Auto-registrar en bitácora por cada equipo devuelto
   items.forEach(item => {
@@ -5793,7 +6535,7 @@ function _ejecutarDevolucion(colabId) {
         serie: item.serie || '',
         inv: _devActivo.codInventario || '',
         correo: c ? (c.email || '') : '',
-        motivo: _isNR ? 'CESE-NO RECUPERABLE' : (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes((item.motivo || '').toUpperCase())) ? item.motivo : ''
+        motivo: _isNR ? 'CESE-NO RECUPERABLE' : 'CESE'
       });
     }
   });
@@ -5809,14 +6551,18 @@ function openColabModal(id) {
   const c = id ? colabs.find(x => x.id === id) : null;
   const areas = DB.getConfig('areas', []);
   const sedes = DB.getConfig('sedesAdmin', []);
-  const tiposPuesto = DB.getConfig('tipoPuesto', []);
-  const perfiles = ['Empleado', 'Practicante', 'Externo', 'Intermediario'];
+  const puestos = DB.getConfig('tipoPuesto', []);
+  const modalidades = ['Empleado', 'Practicante', 'Externo', 'Intermediario'];
 
   openModal(c ? 'Editar Colaborador' : 'Nuevo Colaborador', `
     <div class="form-grid">
       <div class="form-group">
         <label>Nombre <span class="required">*</span></label>
-        <input class="form-control" id="fCNombre" value="${esc(c?.nombre || '')}">
+        <input class="form-control" id="fCNombre" value="${esc(_fullName(c))}">
+      </div>
+      <div class="form-group">
+        <label>Apellido <span class="required">*</span></label>
+        <input class="form-control" id="fCApellido" value="${esc(c?.apellido || '')}">
       </div>
       <div class="form-group">
         <label>DNI <span class="required">*</span></label>
@@ -5831,10 +6577,10 @@ function openColabModal(id) {
         <input class="form-control" id="fCTelefono" placeholder="987654321" value="${esc(c?.telefono || '')}">
       </div>
       <div class="form-group">
-        <label>Perfil <span class="required">*</span></label>
-        <select class="form-control" id="fCPerfil">
+        <label>Modalidad Contratación <span class="required">*</span></label>
+        <select class="form-control" id="fCModalidad">
           <option value="">Seleccionar...</option>
-          ${perfiles.map(p => `<option value="${p}" ${c?.perfil === p ? 'selected' : ''}>${p}</option>`).join('')}
+          ${modalidades.map(m => `<option value="${m}" ${(c?.modalidadContratacion || c?.perfil) === m ? 'selected' : ''}>${m}</option>`).join('')}
         </select>
       </div>
       <div class="form-group">
@@ -5842,16 +6588,24 @@ function openColabModal(id) {
         <select class="form-control" id="fCArea"><option value="">Seleccionar...</option>${optionsHTML(areas, c?.area)}</select>
       </div>
       <div class="form-group">
-        <label>Ubicación</label>
-        <select class="form-control" id="fCUbicacion"><option value="">Seleccionar...</option>${optionsHTML(sedes, c?.ubicacion)}</select>
+        <label>Vicepresidencia</label>
+        <input class="form-control" id="fCVicepresidencia" value="${esc(c?.vicepresidencia || '')}">
       </div>
       <div class="form-group">
-        <label>Tipo de Puesto</label>
-        <select class="form-control" id="fCTipoPuesto"><option value="">Seleccionar...</option>${optionsHTML(tiposPuesto, c?.tipoPuesto)}</select>
+        <label>Centro de Costo</label>
+        <input class="form-control" id="fCCentroCosto" value="${esc(c?.centroCosto || '')}">
       </div>
       <div class="form-group">
-        <label>Cargo</label>
-        <input class="form-control" id="fCCargo" value="${esc(c?.cargo || '')}">
+        <label>Ubicación Física</label>
+        <select class="form-control" id="fCUbicacion"><option value="">Seleccionar...</option>${optionsHTML(sedes, c?.ubicacionFisica || c?.ubicacion)}</select>
+      </div>
+      <div class="form-group">
+        <label>Puesto</label>
+        <input class="form-control" id="fCPuesto" placeholder="Ej: Analista, Coordinador..." value="${esc(c?.puesto || c?.tipoPuesto || '')}">
+      </div>
+      <div class="form-group">
+        <label>Correo Supervisor</label>
+        <input class="form-control" id="fCCorreoSupervisor" placeholder="supervisor@empresa.com" value="${esc(c?.correoSupervisor || '')}">
       </div>
       <div class="form-group">
         <label>Fecha Ingreso</label>
@@ -5866,36 +6620,40 @@ function openColabModal(id) {
 
 function saveColab(id) {
   const nombre = document.getElementById('fCNombre').value.trim();
+  const apellido = (document.getElementById('fCApellido') || {}).value || '';
   const dni = document.getElementById('fCDni').value.trim();
   const email = document.getElementById('fCEmail').value.trim();
   const telefono = document.getElementById('fCTelefono').value.trim();
-  const perfil = document.getElementById('fCPerfil').value;
+  const modalidadContratacion = (document.getElementById('fCModalidad') || {}).value || '';
   const area = document.getElementById('fCArea').value;
-  const ubicacion = document.getElementById('fCUbicacion').value;
-  const tipoPuesto = document.getElementById('fCTipoPuesto').value;
-  const cargo = document.getElementById('fCCargo').value.trim();
+  const vicepresidencia = (document.getElementById('fCVicepresidencia') || {}).value || '';
+  const centroCosto = (document.getElementById('fCCentroCosto') || {}).value || '';
+  const ubicacionFisica = (document.getElementById('fCUbicacion') || {}).value || '';
+  const puesto = (document.getElementById('fCPuesto') || {}).value || '';
+  const correoSupervisor = (document.getElementById('fCCorreoSupervisor') || {}).value || '';
   const fecha = document.getElementById('fCFecha').value;
 
-  if (!nombre || !dni) {
-    showToast('Complete nombre y DNI', 'error');
+  if (!nombre || !apellido || !dni) {
+    showToast('Complete nombre, apellido y DNI', 'error');
     return;
   }
-  if (!perfil) {
-    showToast('Seleccione un perfil', 'error');
+  if (!modalidadContratacion) {
+    showToast('Seleccione modalidad de contratación', 'error');
     return;
   }
 
   const colabs = DB.get('colaboradores');
+  const _data = { nombre, apellido, dni, email, telefono, modalidadContratacion, perfil: modalidadContratacion, area, vicepresidencia, centroCosto, ubicacionFisica, ubicacion: ubicacionFisica, puesto, tipoPuesto: puesto, correoSupervisor, fechaIngreso: fecha };
 
   if (id) {
     const idx = colabs.findIndex(c => c.id === id);
-    if (idx >= 0) colabs[idx] = { ...colabs[idx], ...upperFields({ nombre, dni, email, telefono, perfil, area, ubicacion, tipoPuesto, cargo, fechaIngreso: fecha }) };
+    if (idx >= 0) colabs[idx] = { ...colabs[idx], ...upperFields(_data) };
   } else {
     colabs.push(upperFields({
-      id: nextId(colabs), nombre, dni, email, telefono, perfil, area, ubicacion, tipoPuesto, cargo,
+      id: nextId(colabs), ..._data,
       estado: 'Activo', fechaIngreso: fecha || today()
     }));
-    addMovimiento('Ingreso Colaborador', `Nuevo colaborador: ${nombre.toUpperCase()}`);
+    addMovimiento('Ingreso Colaborador', `Nuevo colaborador: ${nombre.toUpperCase()} ${apellido.toUpperCase()}`);
   }
 
   DB.set('colaboradores', colabs);
@@ -5915,11 +6673,11 @@ function openCeseModal(id) {
     <div style="display:flex;flex-direction:column;gap:16px">
       <div style="display:flex;align-items:center;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--border)">
         <div style="width:44px;height:44px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#6366f1);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:700">
-          ${esc((c.nombre || '').split(' ').map(p => p[0]).slice(0, 2).join(''))}
+          ${esc(_fullName(c).split(' ').map(p => p[0]).slice(0, 2).join(''))}
         </div>
         <div>
-          <strong style="font-size:15px">${esc(c.nombre)}</strong>
-          <div style="font-size:12px;color:var(--text-muted)">${esc(c.cargo || '')} — ${esc(c.area || '')}</div>
+          <strong style="font-size:15px">${esc(_fullName(c))}</strong>
+          <div style="font-size:12px;color:var(--text-muted)">${esc(c.puesto || c.tipoPuesto || '')} — ${esc(c.area || '')}</div>
         </div>
       </div>
 
@@ -5960,7 +6718,7 @@ function confirmarCese(id) {
   DB.set('colaboradores', colabs);
 
   const esFuturo = fechaCese > today();
-  addMovimiento('Cese', `Colaborador ${c.nombre} — ${esFuturo ? 'próximo cese' : 'cesado'} el ${formatDate(fechaCese)}.`);
+  addMovimiento('Cese', `Colaborador ${_fullName(c)} — ${esFuturo ? 'próximo cese' : 'cesado'} el ${formatDate(fechaCese)}.`);
   closeModal();
   showToast(esFuturo ? 'Próximo cese registrado' : 'Colaborador cesado correctamente');
   renderPadron(document.getElementById('contentArea'));
@@ -6440,6 +7198,7 @@ function _buildInventarioRows() {
       // Activo sin series — una fila
       const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (!x.serieAsignada || x.serieAsignada === ''));
       const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
+      const _esSitio = asig && asig.tipoDestino === 'sitio';
       rows.push({
         activoId: a.id,
         sede: a.ubicacion || '',
@@ -6455,9 +7214,9 @@ function _buildInventarioRows() {
         estadoCMDB: asig ? 'Asignado' : (a.estado || 'Disponible'),
         estadoEquipo: a.estadoEquipo || '',
         usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
-        areaTrabajo: colab ? colab.area || '' : '',
-        correo: colab ? colab.email || '' : '',
-        colaborador: colab ? colab.nombre + (colab.cargo ? ' / ' + colab.cargo : '') : '',
+        areaTrabajo: _esSitio ? (asig.area || '') : (colab ? colab.area || '' : ''),
+        correo: _esSitio ? (asig.sitioNombre || '') : (colab ? colab.email || '' : ''),
+        colaborador: _esSitio ? ('📍 ' + (asig.sitioNombre || asig.colaboradorNombre || '')) : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
         jefe: asig ? asig.jefe || '' : '',
         ticket: asig ? asig.ticket || '' : ''
       });
@@ -6470,6 +7229,7 @@ function _buildInventarioRows() {
         const serieUp = (s.serie || '').toUpperCase().trim();
         const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (x.serieAsignada || '').toUpperCase().trim() === serieUp);
         const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
+        const _esSitio2 = asig && asig.tipoDestino === 'sitio';
         rows.push({
           activoId: a.id,
           sede: a.ubicacion || '',
@@ -6485,9 +7245,9 @@ function _buildInventarioRows() {
           estadoCMDB: asig ? 'Asignado' : (s.estadoSerie || a.estado || 'Disponible'),
           estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
           usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
-          areaTrabajo: colab ? colab.area || '' : '',
-          correo: colab ? colab.email || '' : '',
-          colaborador: colab ? colab.nombre + (colab.cargo ? ' / ' + colab.cargo : '') : '',
+          areaTrabajo: _esSitio2 ? (asig.area || '') : (colab ? colab.area || '' : ''),
+          correo: _esSitio2 ? (asig.sitioNombre || '') : (colab ? colab.email || '' : ''),
+          colaborador: _esSitio2 ? ('📍 ' + (asig.sitioNombre || asig.colaboradorNombre || '')) : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
           jefe: asig ? asig.jefe || '' : '',
           ticket: asig ? asig.ticket || '' : ''
         });
@@ -6576,11 +7336,11 @@ function verDetalleSerie(activoId, serie) {
   const tabUsuario = esAsignado ? `
     <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,#eff6ff,#dbeafe);border-radius:12px;margin-bottom:14px">
       <div style="width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;font-weight:800;flex-shrink:0">
-        ${esc((colab ? colab.nombre : asig.colaboradorNombre || '').split(' ').map(p => p[0]).slice(0,2).join(''))}
+        ${esc((colab ? _fullName(colab) : asig.colaboradorNombre || '').split(' ').map(p => p[0]).slice(0,2).join(''))}
       </div>
       <div style="flex:1">
-        <div style="font-size:16px;font-weight:800;color:#1e3a5f">${esc(colab ? colab.nombre : asig.colaboradorNombre)}</div>
-        <div style="font-size:12px;color:#64748b;margin-top:2px">${esc(colab ? (colab.cargo || '') : '')} ${colab && colab.area ? '— ' + esc(colab.area) : ''}</div>
+        <div style="font-size:16px;font-weight:800;color:#1e3a5f">${esc(colab ? _fullName(colab) : asig.colaboradorNombre)}</div>
+        <div style="font-size:12px;color:#64748b;margin-top:2px">${esc(colab ? (colab.puesto || colab.tipoPuesto || '') : '')} ${colab && colab.area ? '— ' + esc(colab.area) : ''}</div>
       </div>
       <span style="padding:4px 10px;border-radius:16px;font-size:10px;font-weight:700;${colab && colab.estado === 'Activo' ? 'background:#dcfce7;color:#166534' : 'background:#fef2f2;color:#991b1b'}">${esc(colab ? colab.estado : '')}</span>
     </div>
@@ -6588,9 +7348,9 @@ function verDetalleSerie(activoId, serie) {
       ${_f('DNI', colab ? colab.dni : '', {mono:true})}
       ${_f('Correo', colab ? colab.email : asig.correoColab)}
       ${_f('Área', colab ? colab.area : asig.area)}
-      ${_f('Cargo', colab ? colab.cargo : '')}
-      ${_f('Ubicación', colab ? colab.ubicacion : '')}
-      ${_f('Perfil', colab ? colab.perfil : '')}
+      ${_f('Puesto', colab ? (colab.puesto || colab.tipoPuesto) : '')}
+      ${_f('Ubicación Física', colab ? (colab.ubicacionFisica || colab.ubicacion) : '')}
+      ${_f('Mod. Contratación', colab ? (colab.modalidadContratacion || colab.perfil) : '')}
     </div>
     <div style="margin-top:14px;padding:1px 0;border-top:2px solid #e2e8f0"></div>
     <div style="margin-top:14px">
@@ -6719,8 +7479,13 @@ function verDetalleSerie(activoId, serie) {
 
     </div>
   `, `
+    ${esAsignado && asig ? `<button class="btn btn-warning" onclick="closeModal();_devolverDesdeDetalle(${asig.id})" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;font-weight:700">🔄 Devolver</button>` : ''}
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
+}
+
+function _devolverDesdeDetalle(asigId) {
+  confirmarRetorno(asigId, 'DEVOLUCIÓN');
 }
 
 function _switchDetalleTab(tabId) {
@@ -7945,7 +8710,7 @@ function _ejecutarRetorno() {
   rec.estado = 'Devuelto';
   rec.pendienteRetorno = false;
   rec.fechaCese = today();
-  rec.motivoCese = _retornoMotivo === 'REPOSICIÓN ROBO' ? 'REPOSICIÓN ROBO' : _retornoMotivo === 'REPOSICIÓN DAÑO FÍSICO' ? 'REPOSICIÓN DAÑO FÍSICO' : _retornoMotivo === 'REEMPLAZO' ? 'REEMPLAZO' : _retornoMotivo === 'RENOVACIÓN' ? 'RENOVACIÓN' : 'RETORNO POR CESE';
+  rec.motivoCese = _retornoMotivo === 'REPOSICIÓN ROBO' ? 'REPOSICIÓN ROBO' : _retornoMotivo === 'REPOSICIÓN DAÑO FÍSICO' ? 'REPOSICIÓN DAÑO FÍSICO' : _retornoMotivo === 'REEMPLAZO' ? 'REEMPLAZO' : _retornoMotivo === 'RENOVACIÓN' ? 'RENOVACIÓN' : _retornoMotivo === 'DEVOLUCIÓN' ? 'DEVOLUCIÓN' : 'RETORNO POR CESE';
   rec.retornoObs = obs.trim();
   rec.retornoEstadoCmdb = _retornoCmdb;
   rec.retornoEstadoEquipo = _retornoEstadoEq;
@@ -8014,7 +8779,8 @@ function _ejecutarRetorno() {
     if (_esRoboRet) _motivoBit = 'REPOSICIÓN ROBO';
     else if (['REEMPLAZO','RENOVACIÓN','RENOVACION','PRÉSTAMO','PRESTAMO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes(_motivoOrig)) _motivoBit = rec.tipoAsignacion || rec.motivo;
     else if (_esBajaRet) _motivoBit = 'BAJA — ' + (_retornoEstadoEq || 'DESTRUCCIÓN');
-    else _motivoBit = 'RETORNO';
+    else if ((_retornoMotivo || '').toUpperCase() === 'DEVOLUCIÓN' || (_retornoMotivo || '').toUpperCase() === 'DEVOLUCION') _motivoBit = 'DEVOLUCIÓN';
+    else _motivoBit = (rec.motivoCese || '').toUpperCase().includes('CESE') ? 'CESE' : 'RETORNO';
 
     _autoBitacora({
       movimiento: (_esRoboRet || _esBajaRet) ? 'BAJA' : 'INGRESO',
@@ -9216,7 +9982,8 @@ const PARAM_TABS = [
   { key: 'departamentos', label: 'Departamentos' },
   { key: 'tiposLocal',    label: 'Tipos de Local' },
   { key: 'sedesAdmin',    label: 'Sedes Administrativas' },
-  { key: 'tipoPuesto',    label: 'Tipo de Puesto', perfil: 'Administrativo' },
+  // Tipo de Puesto oculto — ahora es campo de texto libre "Puesto"
+  // { key: 'tipoPuesto',    label: 'Tipo de Puesto', perfil: 'Administrativo' },
   { key: 'tipoAsignacion', label: 'Tipo Asignación' }
 ];
 
