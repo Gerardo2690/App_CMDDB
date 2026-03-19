@@ -2557,6 +2557,16 @@ let _repSearch = '';
 let _repPage = 1;
 const _REP_PAGE_SIZE = 15;
 
+const _REP_FILTER_OPTIONS = [
+  { key: 'almacen',       label: 'Almacén' },
+  { key: 'equipo',        label: 'Equipo' },
+  { key: 'marca',         label: 'Marca' },
+  { key: 'estadoEquipo',  label: 'Estado Equipo' },
+  { key: 'partNumber',    label: 'PartNumber' }
+];
+let _repActiveFilters = {};
+let _repFilterMenuOpen = false;
+
 function renderRepuestos(el) {
   el.innerHTML = `
     <div class="page-header">
@@ -2570,41 +2580,144 @@ function renderRepuestos(el) {
       </div>
     </div>
     <div class="table-toolbar">
-      <div class="search-box">
+      <div class="search-box" style="position:relative">
         <span class="search-icon">🔍</span>
         <input type="text" id="repSearchInput" placeholder="Buscar por equipo, marca, modelo, serie, partnumber..."
-               value="${esc(_repSearch)}" oninput="_repSearch=this.value;_repPage=1;_renderRepTable()">
+               value="${esc(_repSearch)}" oninput="_onRepSearch(this.value)">
+        <span id="repSearchClear" onclick="_clearRepSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${_repSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
       </div>
     </div>
+    <div id="repFiltersBar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap"></div>
     <div id="repTableWrap"></div>
   `;
+  _renderRepFiltersBar();
   _renderRepTable();
+}
+
+function _onRepSearch(val) {
+  _repSearch = val;
+  const cb = document.getElementById('repSearchClear');
+  if (cb) cb.style.display = val ? 'flex' : 'none';
+  _repPage = 1;
+  _renderRepTable();
+}
+
+function _clearRepSearch() {
+  _repSearch = '';
+  const input = document.getElementById('repSearchInput');
+  if (input) { input.value = ''; input.focus(); }
+  const cb = document.getElementById('repSearchClear');
+  if (cb) cb.style.display = 'none';
+  _repPage = 1;
+  _renderRepTable();
+}
+
+function _renderRepFiltersBar() {
+  const bar = document.getElementById('repFiltersBar');
+  if (!bar) return;
+  const groups = _buildRepGroups();
+
+  let html = Object.keys(_repActiveFilters).map(key => {
+    const opt = _REP_FILTER_OPTIONS.find(o => o.key === key);
+    if (!opt) return '';
+    const values = ['Todos', ...new Set(groups.map(g => g[key] || '').filter(Boolean))].sort((a, b) => a === 'Todos' ? -1 : b === 'Todos' ? 1 : a.localeCompare(b));
+    const current = _repActiveFilters[key] || 'Todos';
+    return '<div style="display:flex;align-items:center;gap:0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:34px;background:#fff">'
+      + '<select onchange="_repActiveFilters[\'' + key + '\']=this.value;_repPage=1;_renderRepTable()" style="border:none;padding:0 8px 0 10px;font-size:11px;color:#334155;height:100%;cursor:pointer;background:transparent;min-width:120px">'
+      + values.map(v => '<option value="' + esc(v) + '" ' + (current === v ? 'selected' : '') + '>' + (v === 'Todos' ? esc(opt.label) + ': Todos' : esc(v)) + '</option>').join('')
+      + '</select>'
+      + '<button onclick="_repRemoveFilter(\'' + key + '\')" style="border:none;background:none;cursor:pointer;padding:0 6px;color:#94a3b8;font-size:14px;height:100%;display:flex;align-items:center" onmouseover="this.style.color=\'#dc2626\'" onmouseout="this.style.color=\'#94a3b8\'">✕</button>'
+      + '</div>';
+  }).join('');
+
+  const inactive = _REP_FILTER_OPTIONS.filter(o => !_repActiveFilters.hasOwnProperty(o.key));
+  if (inactive.length > 0) {
+    html += '<div style="position:relative;display:inline-block">'
+      + '<button id="repFilterAddBtn" style="width:34px;height:34px;border-radius:8px;border:1px dashed #cbd5e1;background:#f8fafc;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;transition:all .15s" onmouseover="this.style.borderColor=\'#2563eb\';this.style.color=\'#2563eb\'" onmouseout="this.style.borderColor=\'#cbd5e1\';this.style.color=\'#64748b\'" title="Agregar filtro">+</button>'
+      + '<div id="repFilterAddMenu" style="display:' + (_repFilterMenuOpen ? 'block' : 'none') + ';position:absolute;top:38px;left:0;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px 0;z-index:999;min-width:180px">'
+      + '<div style="padding:4px 12px 6px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Agregar filtro</div>'
+      + inactive.map(o => '<div onclick="event.stopPropagation();_repAddFilter(\'' + o.key + '\')" style="padding:7px 12px;font-size:12px;color:#334155;cursor:pointer;display:flex;align-items:center;gap:8px" onmouseover="this.style.background=\'#f1f5f9\'" onmouseout="this.style.background=\'\'">'
+        + '<span style="color:#2563eb;font-size:14px">+</span> ' + esc(o.label) + '</div>').join('')
+      + '</div></div>';
+  }
+  bar.innerHTML = html;
+  const addBtn = document.getElementById('repFilterAddBtn');
+  if (addBtn) {
+    addBtn.onclick = function(e) {
+      e.stopPropagation();
+      _repFilterMenuOpen = !_repFilterMenuOpen;
+      const menu = document.getElementById('repFilterAddMenu');
+      if (menu) menu.style.display = _repFilterMenuOpen ? 'block' : 'none';
+    };
+  }
+}
+
+function _repAddFilter(key) { _repActiveFilters[key] = 'Todos'; _repFilterMenuOpen = false; _repPage = 1; _renderRepFiltersBar(); _renderRepTable(); }
+function _repRemoveFilter(key) { delete _repActiveFilters[key]; _repFilterMenuOpen = false; _repPage = 1; _renderRepFiltersBar(); _renderRepTable(); }
+
+document.addEventListener('click', function(e) {
+  if (_repFilterMenuOpen && !e.target.closest('#repFiltersBar')) {
+    _repFilterMenuOpen = false;
+    const m = document.getElementById('repFilterAddMenu');
+    if (m) m.style.display = 'none';
+  }
+});
+
+function _buildRepGroups() {
+  const repuestos = DB.get('repuestos');
+  const groups = {};
+  repuestos.forEach(r => {
+    const key = [(r.equipo || ''), (r.marca || ''), (r.modelo || ''), (r.partNumber || '')].map(v => v.toUpperCase().trim()).join('||');
+    if (!groups[key]) {
+      groups[key] = {
+        equipo: r.equipo || '',
+        marca: r.marca || '',
+        modelo: r.modelo || '',
+        partNumber: r.partNumber || '',
+        sku: r.sku || '',
+        almacen: r.almacen || '',
+        fechaIngreso: r.fechaIngreso || '',
+        origenEquipo: r.origenEquipo || 'PROPIO',
+        guia: r.nDocumento || '',
+        estadoEquipo: r.estadoEquipo || 'NUEVO',
+        items: []
+      };
+    }
+    groups[key].items.push(r);
+  });
+  return Object.values(groups);
 }
 
 function _renderRepTable() {
   const wrap = document.getElementById('repTableWrap');
   if (!wrap) return;
-  const repuestos = DB.get('repuestos');
-  let filtered = repuestos;
+  let groups = _buildRepGroups();
+
+  // Filtros dinámicos
+  for (const [key, val] of Object.entries(_repActiveFilters)) {
+    if (val && val !== 'Todos') {
+      groups = groups.filter(g => (g[key] || '').toUpperCase() === val.toUpperCase());
+    }
+  }
+
   if (_repSearch) {
     const s = _repSearch.toLowerCase();
-    filtered = repuestos.filter(r =>
-      (r.tipoEquipo || '').toLowerCase().includes(s) ||
-      (r.equipo || '').toLowerCase().includes(s) ||
-      (r.marca || '').toLowerCase().includes(s) ||
-      (r.modelo || '').toLowerCase().includes(s) ||
-      (r.serie || '').toLowerCase().includes(s) ||
-      (r.partNumber || '').toLowerCase().includes(s) ||
-      (r.sku || '').toLowerCase().includes(s) ||
-      (r.almacen || '').toLowerCase().includes(s) ||
-      (r.codigo || '').toLowerCase().includes(s)
+    groups = groups.filter(g =>
+      (g.equipo || '').toLowerCase().includes(s) ||
+      (g.marca || '').toLowerCase().includes(s) ||
+      (g.modelo || '').toLowerCase().includes(s) ||
+      (g.partNumber || '').toLowerCase().includes(s) ||
+      (g.sku || '').toLowerCase().includes(s) ||
+      (g.almacen || '').toLowerCase().includes(s) ||
+      g.items.some(r => (r.serie || '').toLowerCase().includes(s) || (r.codigo || '').toLowerCase().includes(s))
     );
   }
-  const total = filtered.length;
+
+  const total = groups.length;
   const totalPages = Math.max(1, Math.ceil(total / _REP_PAGE_SIZE));
   if (_repPage > totalPages) _repPage = totalPages;
   const start = (_repPage - 1) * _REP_PAGE_SIZE;
-  const pageData = filtered.slice(start, start + _REP_PAGE_SIZE);
+  const pageData = groups.slice(start, start + _REP_PAGE_SIZE);
 
   wrap.innerHTML = `
     <div class="table-container">
@@ -2612,42 +2725,44 @@ function _renderRepTable() {
         <table>
           <thead>
             <tr>
-              <th>Código</th>
-              <th>F. Ingreso</th>
               <th>Almacén</th>
-              <th>Tipo Equipo</th>
+              <th>F. Ingreso</th>
               <th>Equipo</th>
               <th>Marca</th>
               <th>Modelo</th>
-              <th>Serie</th>
               <th>PartNumber</th>
-              <th>SKU</th>
+              <th>Stock</th>
+              <th>Estado Equipo</th>
+              <th>Origen</th>
+              <th>Guía</th>
               <th>Acciones</th>
             </tr>
           </thead>
           <tbody>
             ${pageData.length === 0
               ? '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🔧</div><h3>Sin repuestos</h3><p>No hay repuestos registrados</p></div></td></tr>'
-              : pageData.map(r => `
-                <tr>
-                  <td style="font-weight:600;font-size:12px">${esc(r.codigo || '')}</td>
-                  <td style="font-size:12px;white-space:nowrap">${esc(r.fechaIngreso ? formatDate(r.fechaIngreso) : '—')}</td>
-                  <td style="font-size:11px">${esc(r.almacen || '—')}</td>
-                  <td style="font-size:11px">${esc(r.tipoEquipo || '—')}</td>
-                  <td style="font-size:11px">${esc(r.equipo || '—')}</td>
-                  <td style="font-size:12px">${esc(r.marca || '—')}</td>
-                  <td style="font-size:12px">${esc(r.modelo || '—')}</td>
-                  <td style="font-size:11px;font-family:monospace">${esc(r.serie || '—')}</td>
-                  <td style="font-size:11px">${esc(r.partNumber || '—')}</td>
-                  <td style="font-size:11px">${esc(r.sku || '—')}</td>
-                  <td>
-                    <div class="action-btns">
-                      <button class="btn-icon" title="Editar" onclick="openRepuestoModal(${r.id})" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">✏️</button>
-                      <button class="btn-icon" title="Eliminar" onclick="deleteRepuesto(${r.id})" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca">🗑️</button>
-                    </div>
-                  </td>
-                </tr>
-              `).join('')}
+              : pageData.map((g, gi) => {
+                  const firstId = g.items[0] ? g.items[0].id : 0;
+                  const _key = encodeURIComponent([(g.equipo),(g.marca),(g.modelo),(g.partNumber)].join('||'));
+                  return '<tr>'
+                    + '<td style="font-size:12px">' + esc(g.almacen || '—') + '</td>'
+                    + '<td style="font-size:12px;white-space:nowrap">' + (g.fechaIngreso ? formatDate(g.fechaIngreso) : '—') + '</td>'
+                    + '<td style="font-size:12px;font-weight:600">' + esc(g.equipo || '—') + '</td>'
+                    + '<td style="font-size:12px">' + esc(g.marca || '—') + '</td>'
+                    + '<td style="font-size:12px">' + esc(g.modelo || '—') + '</td>'
+                    + '<td style="font-size:11px;font-family:monospace">' + esc(g.partNumber || '—') + '</td>'
+                    + '<td style="text-align:center"><span class="badge ' + (g.items.length > 0 ? 'badge-info' : 'badge-neutral') + '" style="font-size:11px;min-width:28px">' + g.items.length + '</span></td>'
+                    + '<td><span class="badge ' + (g.estadoEquipo === 'NUEVO' ? 'badge-success' : g.estadoEquipo === 'DESTRUCCIÓN' ? 'badge-danger' : 'badge-warning') + '" style="font-size:10px">' + esc(g.estadoEquipo || '—') + '</span></td>'
+                    + '<td style="font-size:12px">' + esc(g.origenEquipo || '—') + '</td>'
+                    + '<td style="font-size:12px">' + esc(g.guia || '—') + '</td>'
+                    + '<td><div class="action-btns">'
+                      + '<button class="btn-icon" title="Editar" onclick="openRepuestoModal(' + firstId + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">✏️</button>'
+                      + '<button class="btn-icon" title="Eliminar grupo" onclick="_deleteRepGroup(\'' + _key + '\')" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca">🗑️</button>'
+                      + '<button class="btn-icon" title="Agregar serie" onclick="_addRepSerie(\'' + _key + '\')" style="background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0">➕</button>'
+                      + '<button class="btn btn-sm" onclick="_viewRepSeries(\'' + _key + '\')" style="font-size:10px;padding:3px 8px;background:#f8fafc;border:1px solid #e2e8f0;cursor:pointer">Serie</button>'
+                    + '</div></td>'
+                    + '</tr>';
+                }).join('')}
           </tbody>
         </table>
       </div>
@@ -2663,6 +2778,137 @@ function _renderRepTable() {
       </div>
     </div>
   `;
+}
+
+function _getRepGroupByKey(keyStr) {
+  const parts = decodeURIComponent(keyStr).split('||');
+  const groups = _buildRepGroups();
+  return groups.find(g => g.equipo === parts[0] && g.marca === parts[1] && g.modelo === parts[2] && g.partNumber === parts[3]);
+}
+
+function _viewRepSeries(keyStr) {
+  const g = _getRepGroupByKey(keyStr);
+  if (!g || g.items.length === 0) { showToast('Sin series registradas', 'error'); return; }
+
+  const rows = g.items.map((r, i) =>
+    '<tr style="border-bottom:1px solid #f1f5f9">'
+    + '<td style="padding:8px 10px;font-size:12px">' + (i + 1) + '</td>'
+    + '<td style="padding:8px 10px;font-size:12px;font-weight:600">' + esc(r.codigo || '—') + '</td>'
+    + '<td style="padding:8px 10px;font-size:11px;font-family:monospace">' + esc(r.serie || '—') + '</td>'
+    + '<td style="padding:8px 10px;font-size:11px">' + esc(r.partNumber || '—') + '</td>'
+    + '<td style="padding:8px 10px;font-size:11px">' + esc(r.sku || '—') + '</td>'
+    + '<td style="padding:8px 10px;font-size:11px">' + (r.fechaIngreso ? formatDate(r.fechaIngreso) : '—') + '</td>'
+    + '<td style="padding:8px 10px"><div class="action-btns"><button class="btn-icon" onclick="openRepuestoModal(' + r.id + ')" title="Editar" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;font-size:10px">✏️</button><button class="btn-icon" onclick="deleteRepuesto(' + r.id + ');closeModal();setTimeout(()=>_viewRepSeries(\'' + keyStr + '\'),300)" title="Eliminar" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca;font-size:10px">🗑️</button></div></td>'
+    + '</tr>'
+  ).join('');
+
+  openModal('Series — ' + esc(g.equipo) + ' ' + esc(g.marca) + ' ' + esc(g.modelo), `
+    <div style="margin-bottom:12px;display:flex;gap:12px;align-items:center">
+      <span class="badge badge-info" style="font-size:12px">Stock: ${g.items.length}</span>
+      <span style="font-size:12px;color:#64748b">PartNumber: <strong>${esc(g.partNumber || '—')}</strong></span>
+    </div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead><tr style="background:#f8fafc">
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">#</th>
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Código</th>
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Serie</th>
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">PartNumber</th>
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">SKU</th>
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">F. Ingreso</th>
+        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Acciones</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
+    <button class="btn btn-primary" onclick="closeModal();_addRepSerie('${keyStr}')">➕ Agregar Serie</button>
+  `, 'modal-lg');
+}
+
+function _addRepSerie(keyStr) {
+  const g = _getRepGroupByKey(keyStr);
+  if (!g) return;
+  // Abrir modal de repuesto pre-llenado con los datos del grupo
+  const tiposRepuesto = DB.getConfig('tiposRepuesto', []);
+  const marcas = DB.getConfig('marcas', []);
+  const ubicaciones = DB.getConfig('ubicaciones', []);
+  const tiposDoc = DB.getConfig('tipoDocumento', []);
+
+  openModal('Agregar Serie — ' + esc(g.equipo) + ' ' + esc(g.marca) + ' ' + esc(g.modelo), `
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Equipo</label>
+        <input class="form-control" value="${esc(g.equipo)}" readonly style="background:#f1f5f9">
+      </div>
+      <div class="form-group">
+        <label>Marca</label>
+        <input class="form-control" value="${esc(g.marca)}" readonly style="background:#f1f5f9">
+      </div>
+      <div class="form-group">
+        <label>Modelo</label>
+        <input class="form-control" value="${esc(g.modelo)}" readonly style="background:#f1f5f9">
+      </div>
+      <div class="form-group">
+        <label>PartNumber</label>
+        <input class="form-control" value="${esc(g.partNumber)}" readonly style="background:#f1f5f9">
+      </div>
+      <div class="form-group">
+        <label>Serie (dejar vacío para auto-generar)</label>
+        <input class="form-control" id="fRepNewSerie" placeholder="Dejar vacío para generar automática">
+      </div>
+      <div class="form-group">
+        <label>Almacén</label>
+        <select class="form-control" id="fRepNewAlmacen">
+          <option value="">Seleccionar...</option>
+          ${optionsHTML(ubicaciones, g.almacen)}
+        </select>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="_saveRepSerie('${keyStr}')">💾 Agregar</button>
+  `);
+}
+
+function _saveRepSerie(keyStr) {
+  const g = _getRepGroupByKey(keyStr);
+  if (!g) return;
+  let serie = (document.getElementById('fRepNewSerie') || {}).value.trim();
+  if (!serie) serie = _generarSerieRepuesto(g.equipo);
+  const almacen = (document.getElementById('fRepNewAlmacen') || {}).value || g.almacen;
+
+  const repuestos = DB.get('repuestos');
+  const newId = nextId(repuestos);
+  const codigo = 'REP-' + String(newId).padStart(5, '0');
+  repuestos.push(upperFields({
+    id: newId, codigo,
+    fechaIngreso: today(),
+    almacen,
+    tipoEquipo: 'REPUESTO',
+    equipo: g.equipo,
+    marca: g.marca,
+    modelo: g.modelo,
+    serie,
+    partNumber: g.partNumber,
+    sku: g.sku || ''
+  }));
+  DB.set('repuestos', repuestos);
+  addMovimiento('Ingreso Repuesto', 'Nueva serie ' + serie + ' para ' + g.equipo + ' ' + g.marca);
+  closeModal();
+  showToast('Serie agregada');
+  renderRepuestos(document.getElementById('contentArea'));
+}
+
+function _deleteRepGroup(keyStr) {
+  const g = _getRepGroupByKey(keyStr);
+  if (!g) return;
+  if (!confirm('¿Eliminar el grupo "' + g.equipo + ' ' + g.marca + ' ' + g.modelo + '" con ' + g.items.length + ' serie(s)?')) return;
+  const ids = g.items.map(r => r.id);
+  const repuestos = DB.get('repuestos').filter(r => !ids.includes(r.id));
+  DB.set('repuestos', repuestos);
+  addMovimiento('Eliminación Repuestos', g.items.length + ' repuesto(s) eliminados: ' + g.equipo + ' ' + g.marca);
+  showToast(g.items.length + ' repuesto(s) eliminados');
+  renderRepuestos(document.getElementById('contentArea'));
 }
 
 function openRepuestoModal(id) {
