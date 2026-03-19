@@ -57,6 +57,7 @@ function initSampleData() {
   }
 
   if (!DB.get('sitiosMoviles') || !Array.isArray(DB.get('sitiosMoviles'))) DB.set('sitiosMoviles', []);
+  if (!DB.get('repuestos') || !Array.isArray(DB.get('repuestos'))) DB.set('repuestos', []);
 
   if (DB.get('colaboradores').length === 0) {
     const nombres = [
@@ -162,6 +163,8 @@ function initSampleData() {
     DB.setConfig('tipoDocumento', ['PEDIDO', 'ORDEN DE COMPRA', 'GUÍA DE REMISIÓN', 'FACTURA', 'NOTA DE INGRESO']);
   if (!DB.getConfig('sistemasOS', null))
     DB.setConfig('sistemasOS', ['WIN 10', 'WIN 11', 'WIN 7', 'LINUX', 'MAC OS', 'ANDROID', 'IOS', 'CHROME OS', 'SIN SO']);
+  if (!DB.getConfig('tiposRepuesto', null))
+    DB.setConfig('tiposRepuesto', ['DISCO DURO', 'MEMORIA RAM', 'PANTALLA', 'TECLADO', 'BATERÍA', 'CARGADOR', 'PLACA MADRE', 'PROCESADOR', 'VENTILADOR', 'CABLE FLEX', 'BISAGRA', 'TOUCHPAD', 'WEBCAM', 'PARLANTE', 'PUERTO USB', 'CONECTOR DC']);
   if (!DB.getConfig('opcionesRAM', null))
     DB.setConfig('opcionesRAM', ['2 GB', '4 GB', '8 GB', '16 GB', '32 GB', '64 GB']);
   if (!DB.getConfig('opcionesAlmacenamiento', null))
@@ -198,7 +201,7 @@ function initSampleData() {
 function _migrateConfigToUpper() {
   // Normalizar arrays de catálogos a UPPERCASE (excepto estados que usan Title Case)
   const arrKeys = ['tipos','marcas','ubicaciones','areas','gamas','estadosEquipo','origenes',
-    'tipoDocumento','sistemasOS','regiones','departamentos','tiposLocal','sedesAdmin','tipoPuesto','tipoAsignacion'];
+    'tipoDocumento','sistemasOS','regiones','departamentos','tiposLocal','sedesAdmin','tipoPuesto','tipoAsignacion','tiposRepuesto'];
   arrKeys.forEach(key => {
     const val = DB.getConfig(key, null);
     if (Array.isArray(val)) {
@@ -371,7 +374,7 @@ const NAV = [
   },
   {
     key: 'activos', label: 'Activos TI', icon: '💻',
-    items: [{ key: 'ingreso', label: 'Registro Activo' }]
+    items: [{ key: 'ingreso', label: 'Registro Activo' }, { key: 'repuestos', label: 'Repuestos' }]
   },
   {
     key: 'colaboradores', label: 'Colaboradores', icon: '👥',
@@ -1020,6 +1023,7 @@ function renderPage() {
     dashboard2: renderDashboard2,
     dashboard3: renderDashboard3,
     ingreso: renderIngreso,
+    repuestos: renderRepuestos,
     padron: renderPadron,
     asignacion: renderAsignacion,
     ceses: renderCeses,
@@ -1085,7 +1089,7 @@ function renderDashboard1(el) {
       <div class="stat-card">
         <div class="stat-header"><div class="stat-icon orange">🔧</div></div>
         <div class="stat-value">${byEstado['Mantenimiento'] || 0}</div>
-        <div class="stat-label">En mantenimiento</div>
+        <div class="stat-label">Mantenimiento</div>
       </div>
       <div class="stat-card">
         <div class="stat-header"><div class="stat-icon red">👥</div></div>
@@ -2547,6 +2551,470 @@ function removeSerie(activoId, serieIdx) {
 }
 
 /* ═══════════════════════════════════════════════════════
+   REPUESTOS — REGISTRO DE PARTES Y REPUESTOS
+   ═══════════════════════════════════════════════════════ */
+let _repSearch = '';
+let _repPage = 1;
+const _REP_PAGE_SIZE = 15;
+
+function renderRepuestos(el) {
+  el.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Repuestos</h1>
+        <div class="subtitle">Registro de partes y repuestos de equipos</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="openRepuestoModal()">+ Nuevo Repuesto</button>
+        <button class="btn" onclick="openCargaMasivaRepModal()" style="background:#059669;color:#fff;border-color:#059669">📥 Carga Masiva</button>
+      </div>
+    </div>
+    <div class="table-toolbar">
+      <div class="search-box">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="repSearchInput" placeholder="Buscar por equipo, marca, modelo, serie, partnumber..."
+               value="${esc(_repSearch)}" oninput="_repSearch=this.value;_repPage=1;_renderRepTable()">
+      </div>
+    </div>
+    <div id="repTableWrap"></div>
+  `;
+  _renderRepTable();
+}
+
+function _renderRepTable() {
+  const wrap = document.getElementById('repTableWrap');
+  if (!wrap) return;
+  const repuestos = DB.get('repuestos');
+  let filtered = repuestos;
+  if (_repSearch) {
+    const s = _repSearch.toLowerCase();
+    filtered = repuestos.filter(r =>
+      (r.tipoEquipo || '').toLowerCase().includes(s) ||
+      (r.equipo || '').toLowerCase().includes(s) ||
+      (r.marca || '').toLowerCase().includes(s) ||
+      (r.modelo || '').toLowerCase().includes(s) ||
+      (r.serie || '').toLowerCase().includes(s) ||
+      (r.partNumber || '').toLowerCase().includes(s) ||
+      (r.sku || '').toLowerCase().includes(s) ||
+      (r.almacen || '').toLowerCase().includes(s) ||
+      (r.codigo || '').toLowerCase().includes(s)
+    );
+  }
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / _REP_PAGE_SIZE));
+  if (_repPage > totalPages) _repPage = totalPages;
+  const start = (_repPage - 1) * _REP_PAGE_SIZE;
+  const pageData = filtered.slice(start, start + _REP_PAGE_SIZE);
+
+  wrap.innerHTML = `
+    <div class="table-container">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Código</th>
+              <th>F. Ingreso</th>
+              <th>Almacén</th>
+              <th>Tipo Equipo</th>
+              <th>Equipo</th>
+              <th>Marca</th>
+              <th>Modelo</th>
+              <th>Serie</th>
+              <th>PartNumber</th>
+              <th>SKU</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageData.length === 0
+              ? '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🔧</div><h3>Sin repuestos</h3><p>No hay repuestos registrados</p></div></td></tr>'
+              : pageData.map(r => `
+                <tr>
+                  <td style="font-weight:600;font-size:12px">${esc(r.codigo || '')}</td>
+                  <td style="font-size:12px;white-space:nowrap">${esc(r.fechaIngreso ? formatDate(r.fechaIngreso) : '—')}</td>
+                  <td style="font-size:11px">${esc(r.almacen || '—')}</td>
+                  <td style="font-size:11px">${esc(r.tipoEquipo || '—')}</td>
+                  <td style="font-size:11px">${esc(r.equipo || '—')}</td>
+                  <td style="font-size:12px">${esc(r.marca || '—')}</td>
+                  <td style="font-size:12px">${esc(r.modelo || '—')}</td>
+                  <td style="font-size:11px;font-family:monospace">${esc(r.serie || '—')}</td>
+                  <td style="font-size:11px">${esc(r.partNumber || '—')}</td>
+                  <td style="font-size:11px">${esc(r.sku || '—')}</td>
+                  <td>
+                    <div class="action-btns">
+                      <button class="btn-icon" title="Editar" onclick="openRepuestoModal(${r.id})" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">✏️</button>
+                      <button class="btn-icon" title="Eliminar" onclick="deleteRepuesto(${r.id})" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca">🗑️</button>
+                    </div>
+                  </td>
+                </tr>
+              `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:12px;color:var(--text-light)">
+      <span>${start + 1}-${Math.min(start + _REP_PAGE_SIZE, total)} de ${total}</span>
+      <div style="display:flex;gap:4px;align-items:center">
+        <button class="btn btn-sm" onclick="_repPage=1;_renderRepTable()" ${_repPage <= 1 ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">«</button>
+        <button class="btn btn-sm" onclick="_repPage--;_renderRepTable()" ${_repPage <= 1 ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">‹</button>
+        <span style="padding:0 8px;font-weight:600">Pág ${_repPage} / ${totalPages}</span>
+        <button class="btn btn-sm" onclick="_repPage++;_renderRepTable()" ${_repPage >= totalPages ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">›</button>
+        <button class="btn btn-sm" onclick="_repPage=${totalPages};_renderRepTable()" ${_repPage >= totalPages ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">»</button>
+      </div>
+    </div>
+  `;
+}
+
+function openRepuestoModal(id) {
+  const repuestos = DB.get('repuestos');
+  const r = id ? repuestos.find(x => x.id === id) : null;
+  const tiposRepuesto = DB.getConfig('tiposRepuesto', []);
+  const marcas = DB.getConfig('marcas', []);
+  const ubicaciones = DB.getConfig('ubicaciones', []);
+  const tiposDoc = DB.getConfig('tipoDocumento', []);
+
+  openModal(r ? 'Editar Repuesto' : 'Registrar Repuesto', `
+    <div class="form-grid-3">
+      <div class="form-group">
+        <label>Fecha Ingreso</label>
+        <input type="date" class="form-control" id="fRepFecha" value="${r?.fechaIngreso || today()}">
+      </div>
+      <div class="form-group">
+        <label>Almacén</label>
+        <select class="form-control" id="fRepAlmacen">
+          <option value="">Seleccione Almacén</option>
+          ${optionsHTML(ubicaciones, r?.almacen)}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Tipo Documento</label>
+        <select class="form-control" id="fRepTipoDoc">
+          <option value="">Seleccione Documento</option>
+          ${optionsHTML(tiposDoc, r?.tipoDocumento)}
+        </select>
+      </div>
+      <div class="form-group span2">
+        <label>N° Documento</label>
+        <div class="input-icon-wrap"><span class="iw-icon">🔢</span>
+          <input class="form-control" id="fRepNDoc" placeholder="Ingrese el número del documento" value="${esc(r?.nDocumento || '')}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Tipo Equipo</label>
+        <input class="form-control" id="fRepTipoEquipo" value="REPUESTO" readonly style="background:#f1f5f9;font-weight:600">
+      </div>
+      <div class="form-group">
+        <label>Equipo / Parte <span class="required">*</span></label>
+        <select class="form-control" id="fRepEquipo">
+          <option value="">Seleccionar...</option>
+          ${optionsHTML(tiposRepuesto, r?.equipo)}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Marca <span class="required">*</span></label>
+        <select class="form-control" id="fRepMarca">
+          <option value="">Seleccionar...</option>
+          ${optionsHTML(marcas, r?.marca)}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Modelo <span class="required">*</span></label>
+        <div class="input-icon-wrap"><span class="iw-icon">💻</span>
+          <input class="form-control" id="fRepModelo" placeholder="Ingrese el modelo" value="${esc(r?.modelo || '')}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Serie</label>
+        <div class="input-icon-wrap"><span class="iw-icon">🔢</span>
+          <input class="form-control" id="fRepSerie" placeholder="Dejar vacío para generar automática" value="${esc(r?.serie || '')}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>PartNumber</label>
+        <div class="input-icon-wrap"><span class="iw-icon">🏷️</span>
+          <input class="form-control" id="fRepPartNumber" placeholder="Ingrese el PartNumber" value="${esc(r?.partNumber || '')}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>SKU</label>
+        <div class="input-icon-wrap"><span class="iw-icon">🏷️</span>
+          <input class="form-control" id="fRepSku" placeholder="Ingrese el SKU" value="${esc(r?.sku || '')}">
+        </div>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="saveRepuesto(${id || ''})">💾 ${r ? 'Actualizar' : 'Registrar'}</button>
+  `);
+}
+
+
+function _generarSerieRepuesto(equipo) {
+  const prefijo = 'REP-' + _generarPrefijo(equipo || 'REP');
+  const repuestos = DB.get('repuestos');
+  let maxNum = 0;
+  repuestos.forEach(r => {
+    if ((r.serie || '').toUpperCase().startsWith(prefijo)) {
+      const num = parseInt((r.serie || '').substring(prefijo.length)) || 0;
+      if (num > maxNum) maxNum = num;
+    }
+  });
+  return prefijo + String(maxNum + 1).padStart(5, '0');
+}
+
+function saveRepuesto(id) {
+  const tipoEquipo = 'REPUESTO';
+  const equipo = document.getElementById('fRepEquipo').value.trim();
+  const marca = document.getElementById('fRepMarca').value;
+  const modelo = document.getElementById('fRepModelo').value.trim();
+
+  if (!equipo || !marca || !modelo) {
+    showToast('Completa los campos obligatorios: Equipo/Parte, Marca y Modelo', 'error');
+    return;
+  }
+
+  let serie = document.getElementById('fRepSerie').value.trim();
+  if (!serie) serie = _generarSerieRepuesto(equipo);
+
+  const campos = upperFields({
+    fechaIngreso: document.getElementById('fRepFecha').value || today(),
+    almacen: document.getElementById('fRepAlmacen').value,
+    tipoDocumento: document.getElementById('fRepTipoDoc').value,
+    nDocumento: document.getElementById('fRepNDoc').value.trim(),
+    tipoEquipo,
+    equipo,
+    marca,
+    modelo,
+    serie,
+    partNumber: document.getElementById('fRepPartNumber').value.trim(),
+    sku: document.getElementById('fRepSku').value.trim()
+  });
+
+  const repuestos = DB.get('repuestos');
+
+  if (id) {
+    const idx = repuestos.findIndex(r => r.id === id);
+    if (idx >= 0) {
+      repuestos[idx] = { ...repuestos[idx], ...campos };
+      addMovimiento('Edición Repuesto', `Repuesto ${repuestos[idx].codigo} actualizado`);
+    }
+  } else {
+    const newId = nextId(repuestos);
+    const codigo = 'REP-' + String(newId).padStart(5, '0');
+    repuestos.push({ id: newId, codigo, ...campos });
+    addMovimiento('Ingreso Repuesto', `Nuevo repuesto ${codigo} registrado (${equipo} ${marca})`);
+  }
+
+  DB.set('repuestos', repuestos);
+  closeModal();
+  showToast(id ? 'Repuesto actualizado' : 'Repuesto registrado');
+  renderRepuestos(document.getElementById('contentArea'));
+}
+
+function deleteRepuesto(id) {
+  if (!confirm('¿Está seguro de eliminar este repuesto?')) return;
+  const repuestos = DB.get('repuestos');
+  const r = repuestos.find(x => x.id === id);
+  DB.set('repuestos', repuestos.filter(x => x.id !== id));
+  if (r) addMovimiento('Eliminación Repuesto', `Repuesto ${r.codigo} eliminado`);
+  showToast('Repuesto eliminado');
+  renderRepuestos(document.getElementById('contentArea'));
+}
+
+/* ── REPUESTOS — CARGA MASIVA ── */
+const _REP_CM_COLUMNS = [
+  { excel: 'F_INGRESO',       field: 'fechaIngreso' },
+  { excel: 'ALMACEN',         field: 'almacen' },
+  { excel: 'TIPO_DOCUMENTO',  field: 'tipoDocumento' },
+  { excel: 'N_DOCUMENTO',     field: 'nDocumento' },
+  { excel: 'TIPO_EQUIPO',     field: 'tipoEquipo',   required: true },
+  { excel: 'EQUIPO',          field: 'equipo',        required: true },
+  { excel: 'MARCA',           field: 'marca',         required: true },
+  { excel: 'MODELO',          field: 'modelo',        required: true },
+  { excel: 'SERIE',           field: 'serie' },
+  { excel: 'PARTNUMBER',      field: 'partNumber' },
+  { excel: 'SKU',             field: 'sku' }
+];
+let _cargaMasivaRepData = [];
+let _cargaMasivaRepPage = 1;
+const _REP_CM_PAGE_SIZE = 15;
+
+function openCargaMasivaRepModal() {
+  _cargaMasivaRepData = [];
+  _cargaMasivaRepPage = 1;
+  openModal('Carga Masiva de Repuestos', `
+    <div id="repCmContainer">
+      <div style="text-align:center;padding:20px 0">
+        <div style="font-size:48px;margin-bottom:12px">📥</div>
+        <p style="color:var(--text);font-weight:600;margin-bottom:4px">Importar repuestos desde Excel</p>
+        <p style="color:var(--text-light);font-size:13px;margin-bottom:20px">Sube un archivo .xlsx o .xls con los datos de los repuestos</p>
+        <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
+          <label style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:var(--primary);color:#fff;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500">
+            📂 Seleccionar archivo
+            <input type="file" id="repCmFileInput" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelRepuestos(this.files[0])">
+          </label>
+          <button class="btn" onclick="_descargarPlantillaRepuestos()" style="font-size:13px">📋 Descargar Plantilla</button>
+        </div>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
+  `, 'modal-lg');
+}
+
+function _descargarPlantillaRepuestos() {
+  const headers = _REP_CM_COLUMNS.map(c => c.excel);
+  const ejemplo = ['2026-03-17', 'ALMACÉN SAN BORJA', 'GUIA', 'G001-00123', 'LAPTOP', 'LAPTOP', 'LENOVO', 'THINKPAD L14', '', 'PN-12345', 'SKU-001'];
+  const ws = XLSX.utils.aoa_to_sheet([headers, ejemplo]);
+  ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Repuestos');
+  XLSX.writeFile(wb, 'Plantilla_Repuestos.xlsx');
+  showToast('Plantilla descargada');
+}
+
+function _procesarExcelRepuestos(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (rows.length === 0) { showToast('Archivo vacío', 'error'); return; }
+
+      const repExistentes = DB.get('repuestos');
+      const seriesExist = new Set(repExistentes.map(r => (r.serie || '').toUpperCase()));
+      const seenInFile = {};
+
+      _cargaMasivaRepData = rows.map((row, i) => {
+        const mapped = {};
+        const rowKeys = Object.keys(row);
+        _REP_CM_COLUMNS.forEach(col => {
+          const matchKey = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
+          let val = row[matchKey];
+          if (val === undefined || val === null) val = '';
+          mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
+        });
+        if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
+        Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
+
+        const errors = [];
+        if (!mapped.tipoEquipo) errors.push('TIPO EQUIPO');
+        if (!mapped.equipo) errors.push('EQUIPO');
+        if (!mapped.marca) errors.push('MARCA');
+        if (!mapped.modelo) errors.push('MODELO');
+
+        // Serie duplicada
+        if (mapped.serie) {
+          const su = mapped.serie.toUpperCase();
+          if (seriesExist.has(su)) errors.push('SERIE DUPLICADA (ya existe)');
+          else if (seenInFile[su] !== undefined) errors.push('SERIE DUPLICADA en archivo (fila ' + (seenInFile[su] + 2) + ')');
+          else seenInFile[su] = i;
+        }
+
+        return { ...mapped, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
+      });
+
+      _cargaMasivaRepPage = 1;
+      _renderCargaMasivaRepPreview();
+    } catch (err) { showToast('Error: ' + err.message, 'error'); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function _renderCargaMasivaRepPreview() {
+  const container = document.getElementById('repCmContainer');
+  if (!container) return;
+  const total = _cargaMasivaRepData.length;
+  const validos = _cargaMasivaRepData.filter(r => r._valid).length;
+  const invalidos = total - validos;
+  const tp = Math.max(1, Math.ceil(total / _REP_CM_PAGE_SIZE));
+  if (_cargaMasivaRepPage > tp) _cargaMasivaRepPage = tp;
+  const start = (_cargaMasivaRepPage - 1) * _REP_CM_PAGE_SIZE;
+  const pageData = _cargaMasivaRepData.slice(start, start + _REP_CM_PAGE_SIZE);
+
+  container.innerHTML = `
+    <div style="margin-bottom:12px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:600">Total: ${total}</span>
+      <span style="font-size:13px;color:#059669;font-weight:600">✓ Válidos: ${validos}</span>
+      ${invalidos > 0 ? `<span style="font-size:13px;color:#dc2626;font-weight:600">✗ Con errores: ${invalidos}</span>` : ''}
+    </div>
+    <div style="max-height:400px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table class="cmdb-table" style="font-size:11px;margin:0">
+        <thead><tr>
+          <th>#</th><th>Tipo Eq.</th><th>Equipo</th><th>Marca</th><th>Modelo</th><th>Serie</th><th>PartNumber</th><th>SKU</th><th>Estado</th>
+        </tr></thead>
+        <tbody>
+          ${pageData.map(r => `
+            <tr style="${!r._valid ? 'background:#fef2f2' : ''}">
+              <td>${r._row}</td>
+              <td>${esc(r.tipoEquipo || '')}</td>
+              <td>${esc(r.equipo || '')}</td>
+              <td>${esc(r.marca || '')}</td>
+              <td>${esc(r.modelo || '')}</td>
+              <td style="font-family:monospace">${esc(r.serie || '<auto>')}</td>
+              <td>${esc(r.partNumber || '')}</td>
+              <td>${esc(r.sku || '')}</td>
+              <td>${r._valid
+                ? '<span style="color:#059669;font-weight:600">✓</span>'
+                : `<span style="color:#dc2626;font-size:10px">${r._errors.join(', ')}</span>`}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+      <div style="display:flex;gap:4px;align-items:center">
+        ${_cargaMasivaRepPage > 1 ? `<button class="btn btn-sm" onclick="_cargaMasivaRepPage--;_renderCargaMasivaRepPreview()" style="font-size:11px;padding:3px 8px">‹ Ant</button>` : ''}
+        <span style="padding:3px 8px;font-weight:600;font-size:12px">${_cargaMasivaRepPage} / ${tp}</span>
+        ${_cargaMasivaRepPage < tp ? `<button class="btn btn-sm" onclick="_cargaMasivaRepPage++;_renderCargaMasivaRepPreview()" style="font-size:11px;padding:3px 8px">Sig ›</button>` : ''}
+      </div>
+      <div>
+        ${validos > 0 ? `<button class="btn btn-primary" onclick="_ejecutarCargaMasivaRep()" style="font-size:13px">📥 Importar ${validos} repuesto${validos > 1 ? 's' : ''}</button>` : '<span style="color:#dc2626;font-size:13px;font-weight:600">No hay registros válidos</span>'}
+      </div>
+    </div>
+  `;
+}
+
+function _ejecutarCargaMasivaRep() {
+  const validos = _cargaMasivaRepData.filter(r => r._valid);
+  if (validos.length === 0) return;
+  if (!confirm('¿Importar ' + validos.length + ' repuestos?')) return;
+
+  const repuestos = DB.get('repuestos');
+  validos.forEach(r => {
+    const newId = nextId(repuestos);
+    const codigo = 'REP-' + String(newId).padStart(5, '0');
+    let serie = r.serie;
+    if (!serie) serie = _generarSerieRepuesto(r.equipo);
+    repuestos.push(upperFields({
+      id: newId,
+      codigo,
+      fechaIngreso: r.fechaIngreso || today(),
+      almacen: r.almacen || '',
+      tipoDocumento: r.tipoDocumento || '',
+      nDocumento: r.nDocumento || '',
+      tipoEquipo: r.tipoEquipo,
+      equipo: r.equipo,
+      marca: r.marca,
+      modelo: r.modelo,
+      serie,
+      partNumber: r.partNumber || '',
+      sku: r.sku || ''
+    }));
+  });
+
+  DB.set('repuestos', repuestos);
+  _cargaMasivaRepData = [];
+  closeModal();
+  showToast(validos.length + ' repuestos importados correctamente');
+  addMovimiento('Carga Masiva Repuestos', `Se importaron ${validos.length} repuestos desde Excel`);
+  renderRepuestos(document.getElementById('contentArea'));
+}
+
+/* ═══════════════════════════════════════════════════════
    COLABORADORES - PADRON
    ═══════════════════════════════════════════════════════ */
 let padronSearch = '';
@@ -3267,6 +3735,7 @@ function _groupAsignaciones(asigList) {
         colaboradorNombre: a.colaboradorNombre,
         colaboradorId: a.colaboradorId,
         correoColab: a.correoColab || '',
+        sitioNombre: a.sitioNombre || '',
         motivo: a.tipoAsignacion || a.motivo || '',
         estado: a.estado,
         items: []
@@ -3304,7 +3773,7 @@ function _renderAsigTable() {
             <tr>
               <th>ID</th>
               <th>Fecha</th>
-              <th>Correo</th>
+              <th>Destino</th>
               <th>Motivo</th>
               <th>Ticket</th>
               <th>Acciones</th>
@@ -3317,7 +3786,7 @@ function _renderAsigTable() {
                   <tr>
                     <td style="font-size:12px;color:var(--text-light)">${g.id}</td>
                     <td style="font-size:12px;white-space:nowrap">${formatDateTime(g.fechaAsignacion)}</td>
-                    <td style="font-size:11px">${esc(g.correoColab || '—')}</td>
+                    <td style="font-size:11px">${g.sitioNombre ? esc(g.sitioNombre) : esc(g.correoColab || '—')}</td>
                     <td><span class="badge badge-info" style="font-size:10px">${esc(g.motivo || '—')}</span></td>
                     <td style="font-size:11px;font-family:monospace">${esc(g.ticket || '—')}</td>
                     <td>
@@ -3597,10 +4066,20 @@ function _renderAsignacionModal(fresh) {
       <!-- Header -->
       <div style="display:flex;align-items:center;gap:14px;padding-bottom:16px;margin-bottom:16px;border-bottom:2px solid #dbeafe">
         <div style="width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,${isReposicionRobo ? '#7c3aed,#4c1d95' : isReposicionDano ? '#dc2626,#991b1b' : isReemplazo ? '#ea580c,#dc2626' : isPrestamo ? '#d97706,#b45309' : isIngresoNuevo ? '#059669,#047857' : '#3b82f6,#2563eb'});display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 4px 12px ${isReposicionRobo ? 'rgba(124,58,237,.25)' : isReposicionDano ? 'rgba(220,38,38,.25)' : isReemplazo ? 'rgba(234,88,12,.25)' : isPrestamo ? 'rgba(217,119,6,.25)' : isIngresoNuevo ? 'rgba(5,150,105,.25)' : 'rgba(37,99,235,.25)'}">${isReposicionRobo ? '🚨' : isReposicionDano ? '🛠️' : isReemplazo ? '🔄' : isPrestamo ? '⏱️' : isIngresoNuevo ? '🆕' : '📋'}</div>
-        <div>
+        <div style="flex:1">
           <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">${isReposicionRobo ? 'Reposición por Robo' : isReposicionDano ? 'Reposición por Daño Físico' : isReemplazo ? (isRenovacion ? 'Renovación de Equipo' : 'Reemplazo de Equipo') : isPrestamo ? 'Préstamo de Equipo' : isIngresoNuevo ? 'Ingreso Nuevo — Asignación Inicial' : 'Asignación de Activo'}</h2>
           <div style="font-size:11px;color:#64748b;margin-top:1px">${isReposicionRobo ? 'Reponer equipo robado y registrar el caso para control y trazabilidad' : isReposicionDano ? 'Reponer equipo dañado físicamente a un colaborador' : isReemplazo ? (isRenovacion ? 'Renovar equipo asignado a un colaborador' : 'Reemplazar equipo asignado a un colaborador') : isPrestamo ? 'Préstamo temporal de equipo a un colaborador' : isIngresoNuevo ? 'Asignar kit inicial a un colaborador nuevo sin equipo' : 'Asignar equipos del inventario a un colaborador'}</div>
         </div>
+        ${!isReemplazo ? `
+        <div style="display:flex;gap:0;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;flex-shrink:0">
+          <button onclick="_asigTipoDestino='colaborador';_asigSelectedSitio=null;_renderAsignacionModal()" style="padding:5px 12px;border:none;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px;transition:all .15s;${_asigTipoDestino === 'colaborador' ? 'background:#2563eb;color:#fff' : 'background:#fff;color:#64748b'}">
+            👤 Colaborador
+          </button>
+          <button onclick="_asigTipoDestino='sitio';_asigSelectedColab=null;if(!['ASIGNACIÓN','REEMPLAZO','RENOVACIÓN'].includes((_asigMotivo||'').toUpperCase())){_asigMotivo=''};_renderAsignacionModal()" style="padding:5px 12px;border:none;border-left:1px solid #e2e8f0;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px;transition:all .15s;${_asigTipoDestino === 'sitio' ? 'background:#f59e0b;color:#fff' : 'background:#fff;color:#64748b'}">
+            📍 Sitio Móvil
+          </button>
+        </div>
+        ` : ''}
       </div>
 
       <!-- Row 1: Ticket info -->
@@ -3634,7 +4113,11 @@ function _renderAsignacionModal(fresh) {
           ` : `
           <select class="form-control" id="fAsigMotivo" onchange="_onMotivoAsigChange()" style="height:38px;font-size:12px">
             <option value="">Seleccionar...</option>
-            ${motivosAsig.map(m => `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}
+            ${motivosAsig.map(m => {
+              const _motivosSitio = ['ASIGNACIÓN','REEMPLAZO','RENOVACIÓN'];
+              const _disabled = _asigTipoDestino === 'sitio' && !_motivosSitio.includes(m) ? 'disabled style="color:#cbd5e1"' : '';
+              return `<option value="${esc(m)}" ${motVal.toUpperCase() === m ? 'selected' : ''} ${_disabled}>${esc(m)}</option>`;
+            }).join('')}
           </select>
           `}
         </div>
@@ -3644,17 +4127,7 @@ function _renderAsignacionModal(fresh) {
         </div>
       </div>
 
-      <!-- Tipo destino -->
-      ${!isReemplazo ? `
-      <div style="display:flex;gap:8px;margin-bottom:14px">
-        <button onclick="_asigTipoDestino='colaborador';_asigSelectedSitio=null;_renderAsignacionModal()" style="flex:1;padding:10px;border-radius:8px;border:2px solid ${_asigTipoDestino === 'colaborador' ? '#2563eb' : '#e2e8f0'};background:${_asigTipoDestino === 'colaborador' ? '#eff6ff' : '#fff'};color:${_asigTipoDestino === 'colaborador' ? '#1d4ed8' : '#64748b'};font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s">
-          <span style="font-size:16px">👤</span> Colaborador
-        </button>
-        <button onclick="_asigTipoDestino='sitio';_asigSelectedColab=null;_renderAsignacionModal()" style="flex:1;padding:10px;border-radius:8px;border:2px solid ${_asigTipoDestino === 'sitio' ? '#f59e0b' : '#e2e8f0'};background:${_asigTipoDestino === 'sitio' ? '#fffbeb' : '#fff'};color:${_asigTipoDestino === 'sitio' ? '#92400e' : '#64748b'};font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;transition:all .15s">
-          <span style="font-size:16px">📍</span> Sitio Móvil
-        </button>
-      </div>
-      ` : ''}
+      <!-- Tipo destino tabs moved to header -->
 
       <!-- Row 3: Colaborador / Sitio -->
       ${_asigTipoDestino === 'sitio' ? `
@@ -3664,16 +4137,31 @@ function _renderAsignacionModal(fresh) {
             <span style="font-size:14px">📍</span>
             <span style="font-size:12px;font-weight:700;color:#92400e">Sitio Móvil</span>
           </div>
-          <select class="form-control" id="fAsigSitio" onchange="_onSitioAsigChange(this.value)" style="height:36px;font-size:12px">
-            <option value="">Seleccionar sitio...</option>
-            ${DB.get('sitiosMoviles').filter(s => s.estado === 'Activo' || (s.estado || '').toUpperCase() === 'ACTIVO').map(s =>
-              '<option value="' + s.id + '" ' + (_asigSelectedSitio && _asigSelectedSitio.id === s.id ? 'selected' : '') + '>' + esc(_buildSitioNombre(s)) + '</option>'
-            ).join('')}
-          </select>
+          <div style="position:relative">
+            <div style="display:flex;align-items:center;border:1px solid #fde68a;border-radius:8px;overflow:hidden;height:36px;background:#fff">
+              <span style="padding:0 8px;font-size:13px;color:#d97706">🔍</span>
+              <input class="form-control" id="fAsigSitioSearch" placeholder="Buscar por sede, área, piso..."
+                oninput="_buscarSitioAsig(this.value)" autocomplete="off" value="${_asigSelectedSitio ? esc(_buildSitioNombre(_asigSelectedSitio)) : ''}"
+                style="border:none;border-radius:0;height:100%;font-size:12px;flex:1;background:transparent">
+              <span onclick="_toggleSitioDropdown()" style="padding:0 10px;cursor:pointer;font-size:12px;color:#92400e;height:100%;display:flex;align-items:center;border-left:1px solid #fde68a;background:#fef3c7;user-select:none" title="Ver lista de sitios">▼</span>
+            </div>
+            <div id="asigSitioResults" style="position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid var(--border);border-radius:8px;max-height:220px;overflow-y:auto;z-index:10;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.1)"></div>
+          </div>
         </div>
         <div style="border:1px solid ${_asigSelectedSitio ? '#fde68a' : '#e2e8f0'};border-radius:10px;padding:12px;background:${_asigSelectedSitio ? '#fffbeb' : '#fafafa'}">
-          ${_asigSelectedSitio ? '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:18px;height:18px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff">✓</span><span style="font-size:11px;font-weight:600;color:#334155">Sitio seleccionado:</span></div><div style="display:flex;align-items:center;gap:10px"><div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;flex-shrink:0">📍</div><div><div style="font-size:13px;font-weight:700;color:#0f172a">' + esc(_buildSitioNombre(_asigSelectedSitio)) + '</div><div style="font-size:11px;color:#64748b">' + esc(_asigSelectedSitio.area || '') + ' — ' + esc(_asigSelectedSitio.sede || '') + '</div></div></div>'
-          : '<div style="padding:12px;text-align:center;color:#94a3b8;font-size:12px">Seleccione un sitio móvil</div>'}
+          ${_asigSelectedSitio ? `
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+              <span style="width:18px;height:18px;border-radius:50%;background:#f59e0b;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff">✓</span>
+              <span style="font-size:11px;font-weight:600;color:#334155">Sitio seleccionado:</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;flex-shrink:0">📍</div>
+              <div>
+                <div style="font-size:13px;font-weight:700;color:#0f172a">${esc(_buildSitioNombre(_asigSelectedSitio))}</div>
+                <div style="font-size:11px;color:#64748b">${esc(_asigSelectedSitio.area || '')} — ${esc(_asigSelectedSitio.sede || '')}</div>
+              </div>
+            </div>
+          ` : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:12px">Seleccione un sitio móvil...</div>'}
         </div>
       </div>
       ` : `
@@ -3682,7 +4170,7 @@ function _renderAsignacionModal(fresh) {
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
             <span style="font-size:14px">📇</span>
             <span style="font-size:12px;font-weight:700;color:#334155">Colaborador</span>
-          </div>`}
+          </div>
           <div style="position:relative">
             <div style="display:flex;align-items:center;border:1px solid ${isIngresoNuevo ? '#fbbf24' : '#e2e8f0'};border-radius:8px;overflow:hidden;height:36px${isIngresoNuevo ? ';background:#fffbeb' : ''}">
               <span style="padding:0 8px;font-size:13px;color:#94a3b8">🔍</span>
@@ -3712,6 +4200,7 @@ function _renderAsignacionModal(fresh) {
           `}
         </div>
       </div>
+      `}
       ${isIngresoNuevo ? `<div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 12px;font-size:11px;color:#065f46;margin-bottom:16px;display:flex;align-items:center;gap:8px">
         <span style="font-size:14px">ℹ️</span>
         <span>Solo se muestran colaboradores activos <strong>sin equipo principal asignado</strong> (laptop/desktop). Los nuevos colaboradores deben registrarse primero en el <strong>Padrón de Colaboradores</strong>.</span>
@@ -3991,6 +4480,58 @@ let _buscarColabTimer = null;
 function _onSitioAsigChange(val) {
   const id = parseInt(val);
   if (!id) { _asigSelectedSitio = null; _renderAsignacionModal(); return; }
+  const sitios = DB.get('sitiosMoviles');
+  _asigSelectedSitio = sitios.find(s => s.id === id) || null;
+  _renderAsignacionModal();
+}
+
+let _buscarSitioTimer = null;
+function _buscarSitioAsig(val) {
+  clearTimeout(_buscarSitioTimer);
+  _buscarSitioTimer = setTimeout(() => {
+    const box = document.getElementById('asigSitioResults');
+    if (!box) return;
+    if (!val || val.length < 2) { box.style.display = 'none'; return; }
+    const sitios = DB.get('sitiosMoviles').filter(s => s.estado === 'Activo' || (s.estado || '').toUpperCase() === 'ACTIVO');
+    const q = val.toLowerCase();
+    const found = sitios.filter(st =>
+      _buildSitioNombre(st).toLowerCase().includes(q) ||
+      (st.sede || '').toLowerCase().includes(q) ||
+      (st.area || '').toLowerCase().includes(q) ||
+      (st.piso || '').toLowerCase().includes(q) ||
+      (st.ubicacion || '').toLowerCase().includes(q)
+    ).slice(0, 8);
+    _renderSitioResults(box, found);
+  }, 150);
+}
+
+function _renderSitioResults(box, found) {
+  if (found.length === 0) {
+    box.innerHTML = '<div style="padding:10px;font-size:12px;color:var(--text-muted)">Sin coincidencias</div>';
+  } else {
+    box.innerHTML = found.map(s => `
+      <div style="padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"
+           onmouseover="this.style.background='var(--bg-secondary)'" onmouseout="this.style.background=''"
+           onclick="_selectSitioAsig(${s.id})">
+        <div>
+          <strong>${esc(_buildSitioNombre(s))}</strong>
+        </div>
+        <span style="color:var(--text-light);font-size:11px">${esc(s.area || '')}</span>
+      </div>
+    `).join('');
+  }
+  box.style.display = 'block';
+}
+
+function _toggleSitioDropdown() {
+  const box = document.getElementById('asigSitioResults');
+  if (!box) return;
+  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  const sitios = DB.get('sitiosMoviles').filter(s => s.estado === 'Activo' || (s.estado || '').toUpperCase() === 'ACTIVO');
+  _renderSitioResults(box, sitios.slice(0, 15));
+}
+
+function _selectSitioAsig(id) {
   const sitios = DB.get('sitiosMoviles');
   _asigSelectedSitio = sitios.find(s => s.id === id) || null;
   _renderAsignacionModal();
@@ -5827,7 +6368,7 @@ function _renderSitioTable() {
             ${filtered.length === 0
               ? '<tr><td colspan="9"><div class="empty-state"><div class="empty-icon">📍</div><h3>Sin sitios móviles</h3><p>Crea un sitio para asignar activos a ubicaciones físicas</p></div></td></tr>'
               : pageItems.map(s => {
-                  const nAsig = asignaciones.filter(a => a.estado === 'Vigente' && a.tipoDestino === 'sitio' && a.sitioId === s.id).length;
+                  const nAsig = asignaciones.filter(a => a.estado === 'Vigente' && ((a.tipoDestino||'').toUpperCase() === 'SITIO') && a.sitioId === s.id).length;
                   return '<tr>'
                     + '<td style="font-size:12px;color:var(--text-light)">' + s.id + '</td>'
                     + '<td><div style="display:flex;align-items:center;gap:10px"><div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0">📍</div><strong>' + esc(_buildSitioNombre(s)) + '</strong></div></td>'
@@ -5953,7 +6494,7 @@ function _deleteSitio(id) {
   const sitios = DB.get('sitiosMoviles');
   const s = sitios.find(x => x.id === id);
   if (!s) return;
-  const asigs = DB.get('asignaciones').filter(a => a.estado === 'Vigente' && a.tipoDestino === 'sitio' && a.sitioId === id);
+  const asigs = DB.get('asignaciones').filter(a => a.estado === 'Vigente' && ((a.tipoDestino||'').toUpperCase() === 'SITIO') && a.sitioId === id);
   if (asigs.length > 0) {
     showToast('No se puede eliminar: tiene ' + asigs.length + ' activo(s) asignado(s)', 'error');
     return;
@@ -5968,7 +6509,7 @@ function _verDetalleSitio(id) {
   const sitios = DB.get('sitiosMoviles');
   const s = sitios.find(x => x.id === id);
   if (!s) return;
-  const asigs = DB.get('asignaciones').filter(a => a.estado === 'Vigente' && a.tipoDestino === 'sitio' && a.sitioId === id);
+  const asigs = DB.get('asignaciones').filter(a => a.estado === 'Vigente' && ((a.tipoDestino||'').toUpperCase() === 'SITIO') && a.sitioId === id);
   const activos = DB.get('activos');
 
   const _f = (lbl, val) => val ? '<div style="padding:8px 12px;background:#f8fafc;border-radius:8px;border:1px solid #f1f5f9"><span style="font-size:10px;font-weight:600;text-transform:uppercase;color:#94a3b8;display:block;margin-bottom:2px">' + lbl + '</span><span style="font-size:14px;font-weight:700;color:#0f172a">' + esc(val) + '</span></div>' : '';
@@ -6040,6 +6581,8 @@ function _descargarPlantillaSitios() {
   showToast('Plantilla descargada');
 }
 
+let _cargaMasivaSitiosData = [];
+
 function _procesarExcelSitios(file) {
   if (!file) return;
   const reader = new FileReader();
@@ -6051,28 +6594,101 @@ function _procesarExcelSitios(file) {
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (rows.length === 0) { showToast('Archivo vacío', 'error'); return; }
 
-      const sitios = DB.get('sitiosMoviles');
-      let added = 0, skipped = 0;
-      rows.forEach(r => {
+      const sitiosExistentes = DB.get('sitiosMoviles');
+
+      // Track keys within the file for intra-file duplicate detection
+      const seenInFile = {};
+
+      _cargaMasivaSitiosData = rows.map((r, i) => {
         const sede = String(r.SEDE || r.sede || '').trim().toUpperCase();
         const area = String(r.AREA || r.area || '').trim().toUpperCase();
         const piso = String(r.PISO || r.piso || '').trim().toUpperCase();
         const ubi  = String(r.UBICACION || r.ubicacion || '').trim().toUpperCase();
-        if (!sede || !piso || !ubi) { skipped++; return; }
-        const dup = sitios.find(s => s.sede === sede && s.area === area && s.piso === piso && s.ubicacion === ubi);
-        if (dup) { skipped++; return; }
-        const _s = { id: nextId(sitios), sede, area, piso, ubicacion: ubi, estado: 'Activo', observacion: String(r.OBSERVACION || r.observacion || '').trim() };
-        _s.nombreVisible = _buildSitioNombre(_s);
-        sitios.push(_s);
-        added++;
+        const obs  = String(r.OBSERVACION || r.observacion || '').trim();
+        const errors = [];
+
+        if (!sede) errors.push('SEDE requerida');
+        if (!piso) errors.push('PISO requerido');
+        if (!ubi) errors.push('UBICACIÓN requerida');
+
+        // Check duplicate against existing sitios
+        const key = `${sede}|${area}|${piso}|${ubi}`;
+        const dupExist = sitiosExistentes.find(s => s.sede === sede && s.area === area && s.piso === piso && s.ubicacion === ubi);
+        if (dupExist) errors.push('DUPLICADO — ya existe en sitios móviles');
+
+        // Check duplicate within the file
+        if (!errors.length && seenInFile[key] !== undefined) {
+          errors.push('DUPLICADO en archivo (fila ' + (seenInFile[key] + 2) + ')');
+        }
+        if (!errors.length) seenInFile[key] = i;
+
+        return { sede, area, piso, ubicacion: ubi, observacion: obs, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
       });
-      DB.set('sitiosMoviles', sitios);
-      closeModal();
-      showToast(added + ' sitios importados' + (skipped > 0 ? ', ' + skipped + ' omitidos (duplicados o vacíos)' : ''));
-      renderSitiosMoviles(document.getElementById('contentArea'));
+
+      _renderCargaMasivaSitiosPreview();
     } catch (err) { showToast('Error: ' + err.message, 'error'); }
   };
   reader.readAsArrayBuffer(file);
+}
+
+function _renderCargaMasivaSitiosPreview() {
+  const container = document.getElementById('sitiosCmpContainer');
+  if (!container) return;
+  const total = _cargaMasivaSitiosData.length;
+  const validos = _cargaMasivaSitiosData.filter(r => r._valid).length;
+  const invalidos = total - validos;
+
+  container.innerHTML = `
+    <div style="margin-bottom:12px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:600">Total: ${total}</span>
+      <span style="font-size:13px;color:#059669;font-weight:600">✓ Válidos: ${validos}</span>
+      ${invalidos > 0 ? `<span style="font-size:13px;color:#dc2626;font-weight:600">✗ Con errores: ${invalidos}</span>` : ''}
+    </div>
+    <div style="max-height:400px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table class="cmdb-table" style="font-size:12px;margin:0">
+        <thead><tr>
+          <th style="width:30px">#</th>
+          <th>SEDE</th><th>ÁREA</th><th>PISO</th><th>UBICACIÓN</th><th>OBSERVACIÓN</th><th>ESTADO</th>
+        </tr></thead>
+        <tbody>
+          ${_cargaMasivaSitiosData.map(r => `
+            <tr style="${!r._valid ? 'background:#fef2f2' : ''}">
+              <td>${r._row}</td>
+              <td>${esc(r.sede)}</td>
+              <td>${esc(r.area)}</td>
+              <td>${esc(r.piso)}</td>
+              <td>${esc(r.ubicacion)}</td>
+              <td>${esc(r.observacion)}</td>
+              <td>${r._valid
+                ? '<span style="color:#059669;font-weight:600">✓</span>'
+                : `<span style="color:#dc2626;font-size:11px">${r._errors.join(', ')}</span>`}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:16px;text-align:right">
+      ${validos > 0 ? `<button class="btn btn-primary" onclick="_ejecutarCargaMasivaSitios()" style="font-size:13px">📥 Importar ${validos} sitio${validos > 1 ? 's' : ''}</button>` : '<span style="color:#dc2626;font-size:13px;font-weight:600">No hay registros válidos para importar</span>'}
+    </div>
+  `;
+}
+
+function _ejecutarCargaMasivaSitios() {
+  const validos = _cargaMasivaSitiosData.filter(r => r._valid);
+  if (validos.length === 0) return;
+  if (!confirm('¿Importar ' + validos.length + ' sitios móviles?')) return;
+
+  const sitios = DB.get('sitiosMoviles');
+  validos.forEach(r => {
+    const _s = { id: nextId(sitios), sede: r.sede, area: r.area, piso: r.piso, ubicacion: r.ubicacion, estado: 'Activo', observacion: r.observacion };
+    _s.nombreVisible = _buildSitioNombre(_s);
+    sitios.push(_s);
+  });
+  DB.set('sitiosMoviles', sitios);
+  closeModal();
+  showToast(validos.length + ' sitios importados correctamente');
+  renderSitiosMoviles(document.getElementById('contentArea'));
+  _cargaMasivaSitiosData = [];
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -7198,7 +7814,7 @@ function _buildInventarioRows() {
       // Activo sin series — una fila
       const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (!x.serieAsignada || x.serieAsignada === ''));
       const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
-      const _esSitio = asig && asig.tipoDestino === 'sitio';
+      const _esSitio = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
       rows.push({
         activoId: a.id,
         sede: a.ubicacion || '',
@@ -7214,9 +7830,9 @@ function _buildInventarioRows() {
         estadoCMDB: asig ? 'Asignado' : (a.estado || 'Disponible'),
         estadoEquipo: a.estadoEquipo || '',
         usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
-        areaTrabajo: _esSitio ? (asig.area || '') : (colab ? colab.area || '' : ''),
-        correo: _esSitio ? (asig.sitioNombre || '') : (colab ? colab.email || '' : ''),
-        colaborador: _esSitio ? ('📍 ' + (asig.sitioNombre || asig.colaboradorNombre || '')) : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
+        areaTrabajo: _esSitio ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
+        correo: _esSitio ? '—' : (colab ? colab.email || '' : ''),
+        colaborador: _esSitio ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
         jefe: asig ? asig.jefe || '' : '',
         ticket: asig ? asig.ticket || '' : ''
       });
@@ -7229,7 +7845,7 @@ function _buildInventarioRows() {
         const serieUp = (s.serie || '').toUpperCase().trim();
         const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (x.serieAsignada || '').toUpperCase().trim() === serieUp);
         const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
-        const _esSitio2 = asig && asig.tipoDestino === 'sitio';
+        const _esSitio2 = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
         rows.push({
           activoId: a.id,
           sede: a.ubicacion || '',
@@ -7245,9 +7861,9 @@ function _buildInventarioRows() {
           estadoCMDB: asig ? 'Asignado' : (s.estadoSerie || a.estado || 'Disponible'),
           estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
           usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
-          areaTrabajo: _esSitio2 ? (asig.area || '') : (colab ? colab.area || '' : ''),
-          correo: _esSitio2 ? (asig.sitioNombre || '') : (colab ? colab.email || '' : ''),
-          colaborador: _esSitio2 ? ('📍 ' + (asig.sitioNombre || asig.colaboradorNombre || '')) : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
+          areaTrabajo: _esSitio2 ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
+          correo: _esSitio2 ? '—' : (colab ? colab.email || '' : ''),
+          colaborador: _esSitio2 ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
           jefe: asig ? asig.jefe || '' : '',
           ticket: asig ? asig.ticket || '' : ''
         });
@@ -9984,7 +10600,8 @@ const PARAM_TABS = [
   { key: 'sedesAdmin',    label: 'Sedes Administrativas' },
   // Tipo de Puesto oculto — ahora es campo de texto libre "Puesto"
   // { key: 'tipoPuesto',    label: 'Tipo de Puesto', perfil: 'Administrativo' },
-  { key: 'tipoAsignacion', label: 'Tipo Asignación' }
+  { key: 'tipoAsignacion', label: 'Tipo Asignación' },
+  { key: 'tiposRepuesto', label: 'Repuestos' }
 ];
 
 function renderParametros(el) {
