@@ -58,6 +58,7 @@ function initSampleData() {
 
   if (!DB.get('sitiosMoviles') || !Array.isArray(DB.get('sitiosMoviles'))) DB.set('sitiosMoviles', []);
   if (!DB.get('repuestos') || !Array.isArray(DB.get('repuestos'))) DB.set('repuestos', []);
+  if (!DB.get('asignacionesRep') || !Array.isArray(DB.get('asignacionesRep'))) DB.set('asignacionesRep', []);
 
   if (DB.get('colaboradores').length === 0) {
     const nombres = [
@@ -196,6 +197,31 @@ function initSampleData() {
 
   // ── Migración: normalizar catálogos existentes a UPPERCASE ──
   _migrateConfigToUpper();
+
+  // ── Migración: normalizar repuestos existentes con nuevos campos ──
+  _migrateRepuestos();
+}
+
+function _migrateRepuestos() {
+  const reps = DB.get('repuestos');
+  if (reps.length === 0) return;
+  let changed = false;
+  const COMP_TIPOS = ['MEMORIA RAM', 'DISCO DURO / SSD', 'DISCO DURO', 'DISCO SSD'];
+  reps.forEach(r => {
+    if (!r.categoria) {
+      const eq = (r.equipo || '').toUpperCase();
+      r.categoria = COMP_TIPOS.some(t => eq.includes(t) || eq === t) ? 'COMPONENTE' : 'PARTE';
+      changed = true;
+    }
+    if (!r.estadoUso) { r.estadoUso = r.uso || r.estadoEquipo || 'NUEVO'; changed = true; }
+    if (!r.estadoDisp) { r.estadoDisp = r.disponibilidad || 'DISPONIBLE'; changed = true; }
+    if (r.activoAsignadoId === undefined) { r.activoAsignadoId = null; changed = true; }
+    if (!r.estadoCMDB) { r.estadoCMDB = r.estadoCmdb || null; changed = true; }
+    if (!r.observaciones) { r.observaciones = ''; changed = true; }
+    // Normalize tipo field from equipo
+    if (!r.tipo && r.equipo) { r.tipo = r.equipo; changed = true; }
+  });
+  if (changed) DB.set('repuestos', reps);
 }
 
 function _migrateConfigToUpper() {
@@ -386,7 +412,8 @@ const NAV = [
   {
     key: 'asignaciones', label: 'Asignación', icon: '🔗',
     items: [
-      { key: 'asignacion', label: 'Asignación de Activos' }
+      { key: 'asignacion', label: 'Asignación de Activos' },
+      { key: 'asignacionRepuestos', label: 'Asignación de Repuestos' }
     ]
   },
   {
@@ -1026,6 +1053,7 @@ function renderPage() {
     repuestos: renderRepuestos,
     padron: renderPadron,
     asignacion: renderAsignacion,
+    asignacionRepuestos: renderAsignacionRepuestos,
     ceses: renderCeses,
     listaTiendas: renderTiendas,
     inventario: renderInventario,
@@ -2550,23 +2578,56 @@ function removeSerie(activoId, serieIdx) {
   showToast('Serie eliminada');
 }
 
+
 /* ═══════════════════════════════════════════════════════
    REPUESTOS — REGISTRO DE PARTES Y REPUESTOS
    ═══════════════════════════════════════════════════════ */
-let _repSearch = '';
-let _repPage = 1;
-const _REP_PAGE_SIZE = 15;
 
-const _REP_FILTER_OPTIONS = [
-  { key: 'almacen',       label: 'Almacén' },
-  { key: 'equipo',        label: 'Equipo' },
-  { key: 'marca',         label: 'Marca' },
-  { key: 'estadoEquipo',  label: 'Estado Equipo' },
-  { key: 'partNumber',    label: 'PartNumber' }
-];
-let _repActiveFilters = {};
-let _repFilterMenuOpen = false;
+/* ── Constants ── */
+const _REP_COMP_TIPOS = ['MEMORIA RAM', 'DISCO DURO / SSD'];
+const _REP_PARTE_TIPOS = ['PANTALLA', 'BACK COVER', 'TOP COVER', 'TECLADO', 'BATERIA', 'CARGADOR', 'BISAGRA', 'TOUCHPAD', 'WEBCAM', 'PARLANTE', 'CABLE FLEX', 'PUERTO USB', 'CONECTOR DC', 'VENTILADOR', 'PLACA MADRE'];
+const _REP_CAPACIDADES = ['4 GB','8 GB','16 GB','32 GB','64 GB','128 GB','256 GB','512 GB','1 TB','2 TB'];
+const _REP_ESTADOS_CMDB = {
+  DISPONIBLE: ['USADO BUENO', 'USADO REGULAR'],
+  MANTENIMIENTO: ['EN DIAGNOSTICO', 'EN REPARACION', 'EN ESPERA DE PIEZAS'],
+  BAJA: ['OBSOLETO', 'DANADO IRREPARABLE', 'PERDIDA / ROBO', 'DESTRUIDO FISICAMENTE']
+};
 
+/* ── State ── */
+let _repTab = 'stock'; // kept for compat
+let _repMode = 'individual'; // kept for compat
+let _repStockEstado = 'Todos';
+let _repStockSearch = '';
+let _repStockCat = 'Todos';
+let _repStockTipo = 'Todos';
+let _repStockAlmacen = 'Todos';
+let _repStockPage = 1;
+const _REP_STOCK_PAGE_SIZE = 15;
+let _repIngCat = '';
+let _repCmStep = 1;
+let _cargaMasivaRepData = [];
+
+/* ── Stats Helper ── */
+function _getRepStats() {
+  const all = DB.get('repuestos');
+  const comp = all.filter(r => (r.categoria || '').toUpperCase() === 'COMPONENTE').length;
+  const parte = all.length - comp;
+  const disp = all.filter(r => (r.estadoDisp || 'DISPONIBLE') === 'DISPONIBLE');
+  const nuevos = disp.filter(r => (r.estadoUso || 'NUEVO') === 'NUEVO').length;
+  const usados = disp.length - nuevos;
+  return {
+    total: all.length, comp, parte,
+    disponibles: disp.length, nuevos, usados,
+    asignados: all.filter(r => r.estadoDisp === 'ASIGNADO').length,
+    retorno: all.filter(r => r.estadoDisp === 'PENDIENTE_RETORNO').length,
+    mantenimiento: all.filter(r => r.estadoDisp === 'MANTENIMIENTO').length,
+    baja: all.filter(r => r.estadoDisp === 'BAJA').length
+  };
+}
+
+/* ══════════════════════════════════════
+   MAIN RENDER
+   ══════════════════════════════════════ */
 function renderRepuestos(el) {
   el.innerHTML = `
     <div class="page-header">
@@ -2575,543 +2636,314 @@ function renderRepuestos(el) {
         <div class="subtitle">Registro de partes y repuestos de equipos</div>
       </div>
       <div style="display:flex;gap:8px">
-        <button class="btn btn-primary" onclick="openRepuestoModal()">+ Nuevo Repuesto</button>
-        <button class="btn" onclick="openCargaMasivaRepModal()" style="background:#059669;color:#fff;border-color:#059669">📥 Carga Masiva</button>
+        <button class="btn btn-primary" onclick="_openRepNuevoModal()">+ Nuevo Repuesto</button>
+        <button class="btn" onclick="_openRepCargaMasivaModal()" style="background:#059669;color:#fff;border-color:#059669">&#128229; Carga Masiva</button>
       </div>
     </div>
-    <div class="table-toolbar">
-      <div class="search-box" style="position:relative">
-        <span class="search-icon">🔍</span>
-        <input type="text" id="repSearchInput" placeholder="Buscar por equipo, marca, modelo, serie, partnumber..."
-               value="${esc(_repSearch)}" oninput="_onRepSearch(this.value)">
-        <span id="repSearchClear" onclick="_clearRepSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${_repSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar búsqueda">✕</span>
-      </div>
-    </div>
-    <div id="repFiltersBar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap"></div>
-    <div id="repTableWrap"></div>
+    <div id="repContent"></div>
   `;
-  _renderRepFiltersBar();
-  _renderRepTable();
+  _renderRepStock();
 }
 
-function _onRepSearch(val) {
-  _repSearch = val;
-  const cb = document.getElementById('repSearchClear');
-  if (cb) cb.style.display = val ? 'flex' : 'none';
-  _repPage = 1;
-  _renderRepTable();
+/* ══════════════════════════════════════
+   NUEVO REPUESTO (Modal)
+   ══════════════════════════════════════ */
+function _openRepNuevoModal() {
+  _repIngCat = '';
+  openModal('Registrar Repuesto', '<div id="repIngresoBody"></div>', '', 'modal-lg');
+  _renderRepIngresoIndividual();
 }
 
-function _clearRepSearch() {
-  _repSearch = '';
-  const input = document.getElementById('repSearchInput');
-  if (input) { input.value = ''; input.focus(); }
-  const cb = document.getElementById('repSearchClear');
-  if (cb) cb.style.display = 'none';
-  _repPage = 1;
-  _renderRepTable();
-}
-
-function _renderRepFiltersBar() {
-  const bar = document.getElementById('repFiltersBar');
-  if (!bar) return;
-  const groups = _buildRepGroups();
-
-  let html = Object.keys(_repActiveFilters).map(key => {
-    const opt = _REP_FILTER_OPTIONS.find(o => o.key === key);
-    if (!opt) return '';
-    const values = ['Todos', ...new Set(groups.map(g => g[key] || '').filter(Boolean))].sort((a, b) => a === 'Todos' ? -1 : b === 'Todos' ? 1 : a.localeCompare(b));
-    const current = _repActiveFilters[key] || 'Todos';
-    return '<div style="display:flex;align-items:center;gap:0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:34px;background:#fff">'
-      + '<select onchange="_repActiveFilters[\'' + key + '\']=this.value;_repPage=1;_renderRepTable()" style="border:none;padding:0 8px 0 10px;font-size:11px;color:#334155;height:100%;cursor:pointer;background:transparent;min-width:120px">'
-      + values.map(v => '<option value="' + esc(v) + '" ' + (current === v ? 'selected' : '') + '>' + (v === 'Todos' ? esc(opt.label) + ': Todos' : esc(v)) + '</option>').join('')
-      + '</select>'
-      + '<button onclick="_repRemoveFilter(\'' + key + '\')" style="border:none;background:none;cursor:pointer;padding:0 6px;color:#94a3b8;font-size:14px;height:100%;display:flex;align-items:center" onmouseover="this.style.color=\'#dc2626\'" onmouseout="this.style.color=\'#94a3b8\'">✕</button>'
-      + '</div>';
-  }).join('');
-
-  const inactive = _REP_FILTER_OPTIONS.filter(o => !_repActiveFilters.hasOwnProperty(o.key));
-  if (inactive.length > 0) {
-    html += '<div style="position:relative;display:inline-block">'
-      + '<button id="repFilterAddBtn" style="width:34px;height:34px;border-radius:8px;border:1px dashed #cbd5e1;background:#f8fafc;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;transition:all .15s" onmouseover="this.style.borderColor=\'#2563eb\';this.style.color=\'#2563eb\'" onmouseout="this.style.borderColor=\'#cbd5e1\';this.style.color=\'#64748b\'" title="Agregar filtro">+</button>'
-      + '<div id="repFilterAddMenu" style="display:' + (_repFilterMenuOpen ? 'block' : 'none') + ';position:absolute;top:38px;left:0;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px 0;z-index:999;min-width:180px">'
-      + '<div style="padding:4px 12px 6px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Agregar filtro</div>'
-      + inactive.map(o => '<div onclick="event.stopPropagation();_repAddFilter(\'' + o.key + '\')" style="padding:7px 12px;font-size:12px;color:#334155;cursor:pointer;display:flex;align-items:center;gap:8px" onmouseover="this.style.background=\'#f1f5f9\'" onmouseout="this.style.background=\'\'">'
-        + '<span style="color:#2563eb;font-size:14px">+</span> ' + esc(o.label) + '</div>').join('')
-      + '</div></div>';
-  }
-  bar.innerHTML = html;
-  const addBtn = document.getElementById('repFilterAddBtn');
-  if (addBtn) {
-    addBtn.onclick = function(e) {
-      e.stopPropagation();
-      _repFilterMenuOpen = !_repFilterMenuOpen;
-      const menu = document.getElementById('repFilterAddMenu');
-      if (menu) menu.style.display = _repFilterMenuOpen ? 'block' : 'none';
-    };
-  }
-}
-
-function _repAddFilter(key) { _repActiveFilters[key] = 'Todos'; _repFilterMenuOpen = false; _repPage = 1; _renderRepFiltersBar(); _renderRepTable(); }
-function _repRemoveFilter(key) { delete _repActiveFilters[key]; _repFilterMenuOpen = false; _repPage = 1; _renderRepFiltersBar(); _renderRepTable(); }
-
-document.addEventListener('click', function(e) {
-  if (_repFilterMenuOpen && !e.target.closest('#repFiltersBar')) {
-    _repFilterMenuOpen = false;
-    const m = document.getElementById('repFilterAddMenu');
-    if (m) m.style.display = 'none';
-  }
-});
-
-function _buildRepGroups() {
+function _renderRepIngresoIndividual() {
+  const body = document.getElementById('repIngresoBody');
+  if (!body) return;
   const repuestos = DB.get('repuestos');
-  const groups = {};
-  repuestos.forEach(r => {
-    const key = [(r.equipo || ''), (r.marca || ''), (r.modelo || ''), (r.partNumber || '')].map(v => v.toUpperCase().trim()).join('||');
-    if (!groups[key]) {
-      groups[key] = {
-        equipo: r.equipo || '',
-        marca: r.marca || '',
-        modelo: r.modelo || '',
-        partNumber: r.partNumber || '',
-        sku: r.sku || '',
-        almacen: r.almacen || '',
-        fechaIngreso: r.fechaIngreso || '',
-        origenEquipo: r.origenEquipo || 'PROPIO',
-        guia: r.nDocumento || '',
-        estadoEquipo: r.estadoEquipo || 'NUEVO',
-        items: []
-      };
-    }
-    groups[key].items.push(r);
-  });
-  return Object.values(groups);
-}
-
-function _renderRepTable() {
-  const wrap = document.getElementById('repTableWrap');
-  if (!wrap) return;
-  let groups = _buildRepGroups();
-
-  // Filtros dinámicos
-  for (const [key, val] of Object.entries(_repActiveFilters)) {
-    if (val && val !== 'Todos') {
-      groups = groups.filter(g => (g[key] || '').toUpperCase() === val.toUpperCase());
-    }
-  }
-
-  if (_repSearch) {
-    const s = _repSearch.toLowerCase();
-    groups = groups.filter(g =>
-      (g.equipo || '').toLowerCase().includes(s) ||
-      (g.marca || '').toLowerCase().includes(s) ||
-      (g.modelo || '').toLowerCase().includes(s) ||
-      (g.partNumber || '').toLowerCase().includes(s) ||
-      (g.sku || '').toLowerCase().includes(s) ||
-      (g.almacen || '').toLowerCase().includes(s) ||
-      g.items.some(r => (r.serie || '').toLowerCase().includes(s) || (r.codigo || '').toLowerCase().includes(s))
-    );
-  }
-
-  const total = groups.length;
-  const totalPages = Math.max(1, Math.ceil(total / _REP_PAGE_SIZE));
-  if (_repPage > totalPages) _repPage = totalPages;
-  const start = (_repPage - 1) * _REP_PAGE_SIZE;
-  const pageData = groups.slice(start, start + _REP_PAGE_SIZE);
-
-  wrap.innerHTML = `
-    <div class="table-container">
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Almacén</th>
-              <th>F. Ingreso</th>
-              <th>Equipo</th>
-              <th>Marca</th>
-              <th>Modelo</th>
-              <th>PartNumber</th>
-              <th>Stock</th>
-              <th>Estado Equipo</th>
-              <th>Origen</th>
-              <th>Guía</th>
-              <th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pageData.length === 0
-              ? '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">🔧</div><h3>Sin repuestos</h3><p>No hay repuestos registrados</p></div></td></tr>'
-              : pageData.map((g, gi) => {
-                  const firstId = g.items[0] ? g.items[0].id : 0;
-                  const _key = encodeURIComponent([(g.equipo),(g.marca),(g.modelo),(g.partNumber)].join('||'));
-                  return '<tr>'
-                    + '<td style="font-size:12px">' + esc(g.almacen || '—') + '</td>'
-                    + '<td style="font-size:12px;white-space:nowrap">' + (g.fechaIngreso ? formatDate(g.fechaIngreso) : '—') + '</td>'
-                    + '<td style="font-size:12px;font-weight:600">' + esc(g.equipo || '—') + '</td>'
-                    + '<td style="font-size:12px">' + esc(g.marca || '—') + '</td>'
-                    + '<td style="font-size:12px">' + esc(g.modelo || '—') + '</td>'
-                    + '<td style="font-size:11px;font-family:monospace">' + esc(g.partNumber || '—') + '</td>'
-                    + '<td style="text-align:center"><span class="badge ' + (g.items.length > 0 ? 'badge-info' : 'badge-neutral') + '" style="font-size:11px;min-width:28px">' + g.items.length + '</span></td>'
-                    + '<td><span class="badge ' + (g.estadoEquipo === 'NUEVO' ? 'badge-success' : g.estadoEquipo === 'DESTRUCCIÓN' ? 'badge-danger' : 'badge-warning') + '" style="font-size:10px">' + esc(g.estadoEquipo || '—') + '</span></td>'
-                    + '<td style="font-size:12px">' + esc(g.origenEquipo || '—') + '</td>'
-                    + '<td style="font-size:12px">' + esc(g.guia || '—') + '</td>'
-                    + '<td><div class="action-btns">'
-                      + '<button class="btn-icon" title="Editar" onclick="openRepuestoModal(' + firstId + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">✏️</button>'
-                      + '<button class="btn-icon" title="Eliminar grupo" onclick="_deleteRepGroup(\'' + _key + '\')" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca">🗑️</button>'
-                      + '<button class="btn-icon" title="Agregar serie" onclick="_addRepSerie(\'' + _key + '\')" style="background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0">➕</button>'
-                      + '<button class="btn btn-sm" onclick="_viewRepSeries(\'' + _key + '\')" style="font-size:10px;padding:3px 8px;background:#f8fafc;border:1px solid #e2e8f0;cursor:pointer">Serie</button>'
-                    + '</div></td>'
-                    + '</tr>';
-                }).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:12px;color:var(--text-light)">
-      <span>${start + 1}-${Math.min(start + _REP_PAGE_SIZE, total)} de ${total}</span>
-      <div style="display:flex;gap:4px;align-items:center">
-        <button class="btn btn-sm" onclick="_repPage=1;_renderRepTable()" ${_repPage <= 1 ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">«</button>
-        <button class="btn btn-sm" onclick="_repPage--;_renderRepTable()" ${_repPage <= 1 ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">‹</button>
-        <span style="padding:0 8px;font-weight:600">Pág ${_repPage} / ${totalPages}</span>
-        <button class="btn btn-sm" onclick="_repPage++;_renderRepTable()" ${_repPage >= totalPages ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">›</button>
-        <button class="btn btn-sm" onclick="_repPage=${totalPages};_renderRepTable()" ${_repPage >= totalPages ? 'disabled' : ''} style="font-size:11px;padding:3px 8px">»</button>
-      </div>
-    </div>
-  `;
-}
-
-function _getRepGroupByKey(keyStr) {
-  const parts = decodeURIComponent(keyStr).split('||');
-  const groups = _buildRepGroups();
-  return groups.find(g => g.equipo === parts[0] && g.marca === parts[1] && g.modelo === parts[2] && g.partNumber === parts[3]);
-}
-
-function _viewRepSeries(keyStr) {
-  const g = _getRepGroupByKey(keyStr);
-  if (!g || g.items.length === 0) { showToast('Sin series registradas', 'error'); return; }
-
-  const rows = g.items.map((r, i) =>
-    '<tr style="border-bottom:1px solid #f1f5f9">'
-    + '<td style="padding:8px 10px;font-size:12px">' + (i + 1) + '</td>'
-    + '<td style="padding:8px 10px;font-size:12px;font-weight:600">' + esc(r.codigo || '—') + '</td>'
-    + '<td style="padding:8px 10px;font-size:11px;font-family:monospace">' + esc(r.serie || '—') + '</td>'
-    + '<td style="padding:8px 10px;font-size:11px">' + esc(r.partNumber || '—') + '</td>'
-    + '<td style="padding:8px 10px;font-size:11px">' + esc(r.sku || '—') + '</td>'
-    + '<td style="padding:8px 10px;font-size:11px">' + (r.fechaIngreso ? formatDate(r.fechaIngreso) : '—') + '</td>'
-    + '<td style="padding:8px 10px"><div class="action-btns"><button class="btn-icon" onclick="openRepuestoModal(' + r.id + ')" title="Editar" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;font-size:10px">✏️</button><button class="btn-icon" onclick="deleteRepuesto(' + r.id + ');closeModal();setTimeout(()=>_viewRepSeries(\'' + keyStr + '\'),300)" title="Eliminar" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca;font-size:10px">🗑️</button></div></td>'
-    + '</tr>'
-  ).join('');
-
-  openModal('Series — ' + esc(g.equipo) + ' ' + esc(g.marca) + ' ' + esc(g.modelo), `
-    <div style="margin-bottom:12px;display:flex;gap:12px;align-items:center">
-      <span class="badge badge-info" style="font-size:12px">Stock: ${g.items.length}</span>
-      <span style="font-size:12px;color:#64748b">PartNumber: <strong>${esc(g.partNumber || '—')}</strong></span>
-    </div>
-    <table style="width:100%;font-size:12px;border-collapse:collapse">
-      <thead><tr style="background:#f8fafc">
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">#</th>
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Código</th>
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Serie</th>
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">PartNumber</th>
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">SKU</th>
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">F. Ingreso</th>
-        <th style="padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Acciones</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `, `
-    <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
-    <button class="btn btn-primary" onclick="closeModal();_addRepSerie('${keyStr}')">➕ Agregar Serie</button>
-  `, 'modal-lg');
-}
-
-function _addRepSerie(keyStr) {
-  const g = _getRepGroupByKey(keyStr);
-  if (!g) return;
-  // Abrir modal de repuesto pre-llenado con los datos del grupo
-  const tiposRepuesto = DB.getConfig('tiposRepuesto', []);
+  const nextCode = 'REP-' + String(nextId(repuestos)).padStart(5, '0');
   const marcas = DB.getConfig('marcas', []);
   const ubicaciones = DB.getConfig('ubicaciones', []);
   const tiposDoc = DB.getConfig('tipoDocumento', []);
+  const isComp = _repIngCat === 'COMPONENTE';
+  const isParte = _repIngCat === 'PARTE';
+  const tiposForCat = isComp ? _REP_COMP_TIPOS : isParte ? _REP_PARTE_TIPOS : [];
 
-  openModal('Agregar Serie — ' + esc(g.equipo) + ' ' + esc(g.marca) + ' ' + esc(g.modelo), `
-    <div class="form-grid">
-      <div class="form-group">
-        <label>Equipo</label>
-        <input class="form-control" value="${esc(g.equipo)}" readonly style="background:#f1f5f9">
+  body.innerHTML = `
+    <div class="rep-ingreso-card">
+      <div class="rep-ingreso-header">
+        <h2>Registrar Repuesto</h2>
+        <div class="rep-code-chip">${nextCode}</div>
       </div>
-      <div class="form-group">
-        <label>Marca</label>
-        <input class="form-control" value="${esc(g.marca)}" readonly style="background:#f1f5f9">
+
+      <!-- SECCION 1: Categoria -->
+      <div class="rep-section">
+        <div class="rep-section-title">
+          <span class="rep-section-num">1</span>
+          <span class="rep-section-label">Selecciona la categor&iacute;a</span>
+        </div>
+        <div class="rep-cat-cards">
+          <div class="rep-cat-card${isComp ? ' selected-comp' : ''}" onclick="_repIngCat='COMPONENTE';_renderRepIngresoIndividual()">
+            <div class="cat-icon">&#9881;&#65039;</div>
+            <div class="cat-name">COMPONENTE</div>
+            <div class="cat-desc">Memoria RAM, Disco Duro / SSD</div>
+          </div>
+          <div class="rep-cat-card${isParte ? ' selected-parte' : ''}" onclick="_repIngCat='PARTE';_renderRepIngresoIndividual()">
+            <div class="cat-icon">&#128295;</div>
+            <div class="cat-name">PARTE</div>
+            <div class="cat-desc">Pantalla, Teclado, Bater&iacute;a, etc.</div>
+          </div>
+        </div>
       </div>
-      <div class="form-group">
-        <label>Modelo</label>
-        <input class="form-control" value="${esc(g.modelo)}" readonly style="background:#f1f5f9">
+
+      ${_repIngCat ? `
+      <!-- SECCION 2: Datos de ingreso -->
+      <div class="rep-section">
+        <div class="rep-section-title">
+          <span class="rep-section-num">2</span>
+          <span class="rep-section-label">Datos de ingreso</span>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-group">
+            <label>Fecha Ingreso</label>
+            <input type="date" class="form-control" id="fRepFecha" value="${today()}">
+          </div>
+          <div class="form-group">
+            <label>Almac&eacute;n</label>
+            <select class="form-control" id="fRepAlmacen">
+              <option value="">Seleccionar...</option>
+              ${optionsHTML(ubicaciones, '')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Estado de Uso</label>
+            <select class="form-control" id="fRepEstadoUso">
+              <option value="NUEVO">Nuevo</option>
+              <option value="USADO">Usado</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Tipo Documento</label>
+            <select class="form-control" id="fRepTipoDoc">
+              <option value="">Seleccionar...</option>
+              ${optionsHTML(tiposDoc, '')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>N&deg; Documento / Ticket</label>
+            <input class="form-control" id="fRepNDoc" placeholder="Ingrese n&uacute;mero">
+          </div>
+        </div>
       </div>
-      <div class="form-group">
-        <label>PartNumber</label>
-        <input class="form-control" value="${esc(g.partNumber)}" readonly style="background:#f1f5f9">
+
+      <!-- SECCION 3: Identificacion -->
+      <div class="rep-section">
+        <div class="rep-section-title">
+          <span class="rep-section-num">3</span>
+          <span class="rep-section-label">Identificaci&oacute;n del repuesto</span>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-group">
+            <label>Tipo <span class="required">*</span></label>
+            <select class="form-control" id="fRepTipo">
+              <option value="">Seleccionar...</option>
+              ${tiposForCat.map(t => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('')}
+            </select>
+          </div>
+          ${isComp ? `
+          <div class="form-group">
+            <label>Capacidad <span class="required">*</span></label>
+            <select class="form-control" id="fRepCapacidad">
+              <option value="">Seleccionar...</option>
+              ${_REP_CAPACIDADES.map(c => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join('')}
+            </select>
+          </div>` : ''}
+          <div class="form-group">
+            <label>Marca <span class="required">*</span></label>
+            <select class="form-control" id="fRepMarca">
+              <option value="">Seleccionar...</option>
+              ${optionsHTML(marcas, '')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Modelo <span class="required">*</span></label>
+            <input class="form-control" id="fRepModelo" placeholder="Ingrese el modelo">
+          </div>
+          <div class="form-group">
+            <label>N&deg; Serie${isComp ? ' <span class="required">*</span>' : ''}</label>
+            <input class="form-control" id="fRepSerie" placeholder="${isComp ? 'Obligatorio' : 'Opcional'}">
+          </div>
+          <div class="form-group">
+            <label>PartNumber</label>
+            <input class="form-control" id="fRepPartNumber" placeholder="Ingrese PartNumber">
+          </div>
+          <div class="form-group">
+            <label>SKU</label>
+            <input class="form-control" id="fRepSku" placeholder="Ingrese SKU">
+          </div>
+          <div class="form-group span2">
+            <label>Observaciones</label>
+            <input class="form-control" id="fRepObs" placeholder="Observaciones adicionales">
+          </div>
+        </div>
       </div>
-      <div class="form-group">
-        <label>Serie (dejar vacío para auto-generar)</label>
-        <input class="form-control" id="fRepNewSerie" placeholder="Dejar vacío para generar automática">
+
+      <div class="rep-ingreso-footer">
+        <button class="btn btn-secondary" onclick="_repIngCat='';_renderRepIngresoIndividual()">Limpiar</button>
+        <button class="btn btn-primary" onclick="_saveRepIndividual()">&#128190; Registrar Repuesto</button>
       </div>
-      <div class="form-group">
-        <label>Almacén</label>
-        <select class="form-control" id="fRepNewAlmacen">
-          <option value="">Seleccionar...</option>
-          ${optionsHTML(ubicaciones, g.almacen)}
-        </select>
-      </div>
+      ` : ''}
     </div>
-  `, `
-    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
-    <button class="btn btn-primary" onclick="_saveRepSerie('${keyStr}')">💾 Agregar</button>
-  `);
+  `;
 }
 
-function _saveRepSerie(keyStr) {
-  const g = _getRepGroupByKey(keyStr);
-  if (!g) return;
-  let serie = (document.getElementById('fRepNewSerie') || {}).value.trim();
-  if (!serie) serie = _generarSerieRepuesto(g.equipo);
-  const almacen = (document.getElementById('fRepNewAlmacen') || {}).value || g.almacen;
+function _saveRepIndividual() {
+  const tipo = (document.getElementById('fRepTipo') || {}).value;
+  const marca = (document.getElementById('fRepMarca') || {}).value;
+  const modelo = (document.getElementById('fRepModelo') || {}).value.trim();
+  const serie = (document.getElementById('fRepSerie') || {}).value.trim();
+  const isComp = _repIngCat === 'COMPONENTE';
+  const capacidad = isComp ? (document.getElementById('fRepCapacidad') || {}).value : '';
+
+  if (!tipo || !marca || !modelo) { showToast('Completa Tipo, Marca y Modelo', 'error'); return; }
+  if (isComp && !serie) { showToast('La serie es obligatoria para componentes', 'error'); return; }
+  if (isComp && !capacidad) { showToast('La capacidad es obligatoria para componentes', 'error'); return; }
 
   const repuestos = DB.get('repuestos');
+  if (serie) {
+    const dup = repuestos.find(r => (r.serie || '').toUpperCase() === serie.toUpperCase());
+    if (dup) { showToast('Ya existe un repuesto con esa serie: ' + dup.codigo, 'error'); return; }
+  }
+
   const newId = nextId(repuestos);
   const codigo = 'REP-' + String(newId).padStart(5, '0');
-  repuestos.push(upperFields({
+  const nDoc = (document.getElementById('fRepNDoc') || {}).value.trim();
+
+  const obj = upperFields({
     id: newId, codigo,
-    fechaIngreso: today(),
-    almacen,
-    tipoEquipo: 'REPUESTO',
-    equipo: g.equipo,
-    marca: g.marca,
-    modelo: g.modelo,
-    serie,
-    partNumber: g.partNumber,
-    sku: g.sku || ''
-  }));
-  DB.set('repuestos', repuestos);
-  addMovimiento('Ingreso Repuesto', 'Nueva serie ' + serie + ' para ' + g.equipo + ' ' + g.marca);
-  closeModal();
-  showToast('Serie agregada');
-  renderRepuestos(document.getElementById('contentArea'));
-}
-
-function _deleteRepGroup(keyStr) {
-  const g = _getRepGroupByKey(keyStr);
-  if (!g) return;
-  if (!confirm('¿Eliminar el grupo "' + g.equipo + ' ' + g.marca + ' ' + g.modelo + '" con ' + g.items.length + ' serie(s)?')) return;
-  const ids = g.items.map(r => r.id);
-  const repuestos = DB.get('repuestos').filter(r => !ids.includes(r.id));
-  DB.set('repuestos', repuestos);
-  addMovimiento('Eliminación Repuestos', g.items.length + ' repuesto(s) eliminados: ' + g.equipo + ' ' + g.marca);
-  showToast(g.items.length + ' repuesto(s) eliminados');
-  renderRepuestos(document.getElementById('contentArea'));
-}
-
-function openRepuestoModal(id) {
-  const repuestos = DB.get('repuestos');
-  const r = id ? repuestos.find(x => x.id === id) : null;
-  const tiposRepuesto = DB.getConfig('tiposRepuesto', []);
-  const marcas = DB.getConfig('marcas', []);
-  const ubicaciones = DB.getConfig('ubicaciones', []);
-  const tiposDoc = DB.getConfig('tipoDocumento', []);
-
-  openModal(r ? 'Editar Repuesto' : 'Registrar Repuesto', `
-    <div class="form-grid-3">
-      <div class="form-group">
-        <label>Fecha Ingreso</label>
-        <input type="date" class="form-control" id="fRepFecha" value="${r?.fechaIngreso || today()}">
-      </div>
-      <div class="form-group">
-        <label>Almacén</label>
-        <select class="form-control" id="fRepAlmacen">
-          <option value="">Seleccione Almacén</option>
-          ${optionsHTML(ubicaciones, r?.almacen)}
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Tipo Documento</label>
-        <select class="form-control" id="fRepTipoDoc">
-          <option value="">Seleccione Documento</option>
-          ${optionsHTML(tiposDoc, r?.tipoDocumento)}
-        </select>
-      </div>
-      <div class="form-group span2">
-        <label>N° Documento</label>
-        <div class="input-icon-wrap"><span class="iw-icon">🔢</span>
-          <input class="form-control" id="fRepNDoc" placeholder="Ingrese el número del documento" value="${esc(r?.nDocumento || '')}">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Tipo Equipo</label>
-        <input class="form-control" id="fRepTipoEquipo" value="REPUESTO" readonly style="background:#f1f5f9;font-weight:600">
-      </div>
-      <div class="form-group">
-        <label>Equipo / Parte <span class="required">*</span></label>
-        <select class="form-control" id="fRepEquipo">
-          <option value="">Seleccionar...</option>
-          ${optionsHTML(tiposRepuesto, r?.equipo)}
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Marca <span class="required">*</span></label>
-        <select class="form-control" id="fRepMarca">
-          <option value="">Seleccionar...</option>
-          ${optionsHTML(marcas, r?.marca)}
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Modelo <span class="required">*</span></label>
-        <div class="input-icon-wrap"><span class="iw-icon">💻</span>
-          <input class="form-control" id="fRepModelo" placeholder="Ingrese el modelo" value="${esc(r?.modelo || '')}">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Serie</label>
-        <div class="input-icon-wrap"><span class="iw-icon">🔢</span>
-          <input class="form-control" id="fRepSerie" placeholder="Dejar vacío para generar automática" value="${esc(r?.serie || '')}">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>PartNumber</label>
-        <div class="input-icon-wrap"><span class="iw-icon">🏷️</span>
-          <input class="form-control" id="fRepPartNumber" placeholder="Ingrese el PartNumber" value="${esc(r?.partNumber || '')}">
-        </div>
-      </div>
-      <div class="form-group">
-        <label>SKU</label>
-        <div class="input-icon-wrap"><span class="iw-icon">🏷️</span>
-          <input class="form-control" id="fRepSku" placeholder="Ingrese el SKU" value="${esc(r?.sku || '')}">
-        </div>
-      </div>
-    </div>
-  `, `
-    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
-    <button class="btn btn-primary" onclick="saveRepuesto(${id || ''})">💾 ${r ? 'Actualizar' : 'Registrar'}</button>
-  `);
-}
-
-
-function _generarSerieRepuesto(equipo) {
-  const prefijo = 'REP-' + _generarPrefijo(equipo || 'REP');
-  const repuestos = DB.get('repuestos');
-  let maxNum = 0;
-  repuestos.forEach(r => {
-    if ((r.serie || '').toUpperCase().startsWith(prefijo)) {
-      const num = parseInt((r.serie || '').substring(prefijo.length)) || 0;
-      if (num > maxNum) maxNum = num;
-    }
-  });
-  return prefijo + String(maxNum + 1).padStart(5, '0');
-}
-
-function saveRepuesto(id) {
-  const tipoEquipo = 'REPUESTO';
-  const equipo = document.getElementById('fRepEquipo').value.trim();
-  const marca = document.getElementById('fRepMarca').value;
-  const modelo = document.getElementById('fRepModelo').value.trim();
-
-  if (!equipo || !marca || !modelo) {
-    showToast('Completa los campos obligatorios: Equipo/Parte, Marca y Modelo', 'error');
-    return;
-  }
-
-  let serie = document.getElementById('fRepSerie').value.trim();
-  if (!serie) serie = _generarSerieRepuesto(equipo);
-
-  const campos = upperFields({
-    fechaIngreso: document.getElementById('fRepFecha').value || today(),
-    almacen: document.getElementById('fRepAlmacen').value,
-    tipoDocumento: document.getElementById('fRepTipoDoc').value,
-    nDocumento: document.getElementById('fRepNDoc').value.trim(),
-    tipoEquipo,
-    equipo,
+    categoria: _repIngCat,
+    tipo,
+    capacidad,
     marca,
     modelo,
-    serie,
-    partNumber: document.getElementById('fRepPartNumber').value.trim(),
-    sku: document.getElementById('fRepSku').value.trim()
+    serie: serie || _generarSerieRepuesto(tipo),
+    partNumber: (document.getElementById('fRepPartNumber') || {}).value.trim(),
+    sku: (document.getElementById('fRepSku') || {}).value.trim(),
+    estadoUso: (document.getElementById('fRepEstadoUso') || {}).value || 'NUEVO',
+    estadoDisp: 'DISPONIBLE',
+    estadoCMDB: null,
+    activoAsignadoId: null,
+    almacen: (document.getElementById('fRepAlmacen') || {}).value,
+    tipoDocumento: (document.getElementById('fRepTipoDoc') || {}).value,
+    nDocumento: nDoc,
+    fechaIngreso: (document.getElementById('fRepFecha') || {}).value || today(),
+    observaciones: (document.getElementById('fRepObs') || {}).value.trim(),
+    equipo: tipo
   });
-
-  const repuestos = DB.get('repuestos');
-
-  if (id) {
-    const idx = repuestos.findIndex(r => r.id === id);
-    if (idx >= 0) {
-      repuestos[idx] = { ...repuestos[idx], ...campos };
-      addMovimiento('Edición Repuesto', `Repuesto ${repuestos[idx].codigo} actualizado`);
-    }
-  } else {
-    const newId = nextId(repuestos);
-    const codigo = 'REP-' + String(newId).padStart(5, '0');
-    repuestos.push({ id: newId, codigo, ...campos });
-    addMovimiento('Ingreso Repuesto', `Nuevo repuesto ${codigo} registrado (${equipo} ${marca})`);
-  }
-
+  repuestos.push(obj);
   DB.set('repuestos', repuestos);
+
+  const detalle = codigo + ' - ' + _repIngCat + ' ' + tipo + (capacidad ? ' ' + capacidad : '') + ' ' + marca + ' ' + modelo + (nDoc ? ' | Ticket: ' + nDoc : '');
+  addMovimiento('INGRESO REPUESTO', detalle);
   closeModal();
-  showToast(id ? 'Repuesto actualizado' : 'Repuesto registrado');
+  showToast('Repuesto ' + codigo + ' registrado');
+  _repIngCat = '';
   renderRepuestos(document.getElementById('contentArea'));
 }
 
-function deleteRepuesto(id) {
-  if (!confirm('¿Está seguro de eliminar este repuesto?')) return;
-  const repuestos = DB.get('repuestos');
-  const r = repuestos.find(x => x.id === id);
-  DB.set('repuestos', repuestos.filter(x => x.id !== id));
-  if (r) addMovimiento('Eliminación Repuesto', `Repuesto ${r.codigo} eliminado`);
-  showToast('Repuesto eliminado');
-  renderRepuestos(document.getElementById('contentArea'));
-}
-
-/* ── REPUESTOS — CARGA MASIVA ── */
+/* ── Carga Masiva ── */
 const _REP_CM_COLUMNS = [
-  { excel: 'F_INGRESO',       field: 'fechaIngreso' },
-  { excel: 'ALMACEN',         field: 'almacen' },
-  { excel: 'TIPO_DOCUMENTO',  field: 'tipoDocumento' },
-  { excel: 'N_DOCUMENTO',     field: 'nDocumento' },
-  { excel: 'TIPO_EQUIPO',     field: 'tipoEquipo',   required: true },
-  { excel: 'EQUIPO',          field: 'equipo',        required: true },
-  { excel: 'MARCA',           field: 'marca',         required: true },
-  { excel: 'MODELO',          field: 'modelo',        required: true },
-  { excel: 'SERIE',           field: 'serie' },
-  { excel: 'PARTNUMBER',      field: 'partNumber' },
-  { excel: 'SKU',             field: 'sku' }
+  { excel: 'CATEGORIA',    field: 'categoria',    required: true },
+  { excel: 'TIPO',         field: 'tipo',         required: true },
+  { excel: 'CAPACIDAD',    field: 'capacidad' },
+  { excel: 'MARCA',        field: 'marca',        required: true },
+  { excel: 'MODELO',       field: 'modelo',       required: true },
+  { excel: 'SERIE',        field: 'serie' },
+  { excel: 'PARTNUMBER',   field: 'partNumber' },
+  { excel: 'SKU',          field: 'sku' },
+  { excel: 'ESTADO_USO',   field: 'estadoUso' },
+  { excel: 'ALMACEN',      field: 'almacen' },
+  { excel: 'N_DOCUMENTO',  field: 'nDocumento' },
+  { excel: 'FECHA_INGRESO', field: 'fechaIngreso' },
+  { excel: 'OBSERVACIONES', field: 'observaciones' }
 ];
-let _cargaMasivaRepData = [];
-let _cargaMasivaRepPage = 1;
-const _REP_CM_PAGE_SIZE = 15;
 
-function openCargaMasivaRepModal() {
+function _openRepCargaMasivaModal() {
+  _repCmStep = 1;
   _cargaMasivaRepData = [];
-  _cargaMasivaRepPage = 1;
-  openModal('Carga Masiva de Repuestos', `
-    <div id="repCmContainer">
-      <div style="text-align:center;padding:20px 0">
-        <div style="font-size:48px;margin-bottom:12px">📥</div>
-        <p style="color:var(--text);font-weight:600;margin-bottom:4px">Importar repuestos desde Excel</p>
-        <p style="color:var(--text-light);font-size:13px;margin-bottom:20px">Sube un archivo .xlsx o .xls con los datos de los repuestos</p>
-        <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
-          <label style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:var(--primary);color:#fff;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500">
-            📂 Seleccionar archivo
-            <input type="file" id="repCmFileInput" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelRepuestos(this.files[0])">
-          </label>
-          <button class="btn" onclick="_descargarPlantillaRepuestos()" style="font-size:13px">📋 Descargar Plantilla</button>
-        </div>
-      </div>
-    </div>
-  `, `
+  openModal('Carga Masiva de Repuestos', '<div id="repCmContainer"></div>', `
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
+  _renderRepCargaMasiva();
+}
+
+function _renderRepCargaMasiva() {
+  const body = document.getElementById('repCmContainer');
+  if (!body) return;
+  const stepLabels = ['Descargar plantilla', 'Subir archivo', 'Revisar preview', 'Confirmar'];
+  body.innerHTML = `
+    <div class="rep-cm-layout">
+      <div class="rep-cm-steps">
+        ${stepLabels.map((l, i) => {
+          const n = i + 1;
+          const cls = n < _repCmStep ? 'done' : n === _repCmStep ? 'active' : '';
+          return '<div class="rep-cm-step ' + cls + '"><span class="rep-cm-step-num">' + (n < _repCmStep ? '&#10003;' : n) + '</span><span class="rep-cm-step-label">' + l + '</span></div>';
+        }).join('')}
+      </div>
+      <div class="rep-cm-work" id="repCmWork"></div>
+    </div>
+  `;
+  _renderRepCmStep();
+}
+
+function _renderRepCmStep() {
+  const w = document.getElementById('repCmWork');
+  if (!w) return;
+  if (_repCmStep === 1) {
+    w.innerHTML = `
+      <div style="text-align:center;padding:20px 0">
+        <div style="font-size:48px;margin-bottom:12px">&#128203;</div>
+        <h3 style="margin-bottom:8px">Paso 1: Descargar Plantilla</h3>
+        <p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">Descarga la plantilla Excel con el formato correcto para importar repuestos.</p>
+        <button class="btn btn-primary" onclick="_descargarPlantillaRepuestos();_repCmStep=2;_renderRepCargaMasiva()">&#128203; Descargar Plantilla</button>
+        <button class="btn btn-secondary" onclick="_repCmStep=2;_renderRepCargaMasiva()" style="margin-left:8px">Ya tengo la plantilla &rarr;</button>
+      </div>
+    `;
+  } else if (_repCmStep === 2) {
+    w.innerHTML = `
+      <div style="text-align:center;padding:20px 0">
+        <div class="rep-cm-dropzone" id="repCmDropZone" onclick="document.getElementById('repCmFileInput').click()">
+          <div style="font-size:48px;margin-bottom:12px">&#128229;</div>
+          <p style="font-weight:600;color:var(--text);margin-bottom:4px">Arrastra o selecciona tu archivo Excel</p>
+          <p style="font-size:13px;color:var(--text-secondary)">.xlsx o .xls</p>
+          <input type="file" id="repCmFileInput" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelRepuestos(this.files[0])">
+        </div>
+      </div>
+    `;
+    const dz = document.getElementById('repCmDropZone');
+    if (dz) {
+      dz.ondragover = function(e) { e.preventDefault(); dz.classList.add('dragover'); };
+      dz.ondragleave = function() { dz.classList.remove('dragover'); };
+      dz.ondrop = function(e) { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) _procesarExcelRepuestos(e.dataTransfer.files[0]); };
+    }
+  } else if (_repCmStep === 3) {
+    _renderRepCmPreview(w);
+  } else if (_repCmStep === 4) {
+    const validos = _cargaMasivaRepData.filter(r => r._valid).length;
+    w.innerHTML = `
+      <div style="text-align:center;padding:20px 0">
+        <div style="font-size:48px;margin-bottom:12px">&#9989;</div>
+        <h3 style="margin-bottom:8px">Confirmar Importaci&oacute;n</h3>
+        <p style="color:var(--text-secondary);margin-bottom:20px">Se importar&aacute;n <strong>${validos}</strong> repuestos v&aacute;lidos.</p>
+        <button class="btn btn-primary" onclick="_ejecutarCargaMasivaRep()" style="font-size:14px;padding:12px 32px">&#128229; Importar ${validos} repuestos</button>
+        <button class="btn btn-secondary" onclick="_repCmStep=3;_renderRepCargaMasiva()" style="margin-left:8px">&larr; Volver</button>
+      </div>
+    `;
+  }
 }
 
 function _descargarPlantillaRepuestos() {
   const headers = _REP_CM_COLUMNS.map(c => c.excel);
-  const ejemplo = ['2026-03-17', 'ALMACÉN SAN BORJA', 'GUIA', 'G001-00123', 'LAPTOP', 'LAPTOP', 'LENOVO', 'THINKPAD L14', '', 'PN-12345', 'SKU-001'];
-  const ws = XLSX.utils.aoa_to_sheet([headers, ejemplo]);
+  const ej1 = ['COMPONENTE', 'MEMORIA RAM', '8 GB', 'KINGSTON', 'VALUERAM DDR4', 'KVR32-A1B2C3D4', '', '', 'NUEVO', 'ALMACEN CENTRAL', '', '', ''];
+  const ej2 = ['PARTE', 'PANTALLA', '', 'LG DISPLAY', '15.6 FHD IPS', '', '', '', 'NUEVO', 'ALMACEN TI', '', '', ''];
+  const ws = XLSX.utils.aoa_to_sheet([headers, ej1, ej2]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Repuestos');
@@ -3128,10 +2960,10 @@ function _procesarExcelRepuestos(file) {
       const wb = XLSX.read(data, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-      if (rows.length === 0) { showToast('Archivo vacío', 'error'); return; }
+      if (rows.length === 0) { showToast('Archivo vacio', 'error'); return; }
 
-      const repExistentes = DB.get('repuestos');
-      const seriesExist = new Set(repExistentes.map(r => (r.serie || '').toUpperCase()));
+      const existentes = DB.get('repuestos');
+      const seriesExist = new Set(existentes.map(r => (r.serie || '').toUpperCase()));
       const seenInFile = {};
 
       _cargaMasivaRepData = rows.map((row, i) => {
@@ -3144,82 +2976,73 @@ function _procesarExcelRepuestos(file) {
           mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
         });
         if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
-        Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
+        Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k) && k !== 'observaciones') mapped[k] = mapped[k].toUpperCase(); });
 
         const errors = [];
-        if (!mapped.tipoEquipo) errors.push('TIPO EQUIPO');
-        if (!mapped.equipo) errors.push('EQUIPO');
-        if (!mapped.marca) errors.push('MARCA');
-        if (!mapped.modelo) errors.push('MODELO');
+        const cat = (mapped.categoria || '').toUpperCase();
+        if (!cat || (cat !== 'COMPONENTE' && cat !== 'PARTE')) errors.push('CATEGORIA invalida');
+        if (!mapped.tipo) errors.push('TIPO requerido');
+        if (!mapped.marca) errors.push('MARCA requerida');
+        if (!mapped.modelo) errors.push('MODELO requerido');
+        if (cat === 'COMPONENTE' && !mapped.serie) errors.push('SERIE requerida (componente)');
+        if (cat === 'COMPONENTE' && !mapped.capacidad) errors.push('CAPACIDAD requerida (componente)');
 
-        // Serie duplicada
         if (mapped.serie) {
           const su = mapped.serie.toUpperCase();
           if (seriesExist.has(su)) errors.push('SERIE DUPLICADA (ya existe)');
-          else if (seenInFile[su] !== undefined) errors.push('SERIE DUPLICADA en archivo (fila ' + (seenInFile[su] + 2) + ')');
+          else if (seenInFile[su] !== undefined) errors.push('SERIE DUPLICADA en archivo');
           else seenInFile[su] = i;
         }
 
         return { ...mapped, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
       });
 
-      _cargaMasivaRepPage = 1;
-      _renderCargaMasivaRepPreview();
+      _repCmStep = 3;
+      _renderRepCargaMasiva();
     } catch (err) { showToast('Error: ' + err.message, 'error'); }
   };
   reader.readAsArrayBuffer(file);
 }
 
-function _renderCargaMasivaRepPreview() {
-  const container = document.getElementById('repCmContainer');
-  if (!container) return;
+function _renderRepCmPreview(w) {
   const total = _cargaMasivaRepData.length;
   const validos = _cargaMasivaRepData.filter(r => r._valid).length;
   const invalidos = total - validos;
-  const tp = Math.max(1, Math.ceil(total / _REP_CM_PAGE_SIZE));
-  if (_cargaMasivaRepPage > tp) _cargaMasivaRepPage = tp;
-  const start = (_cargaMasivaRepPage - 1) * _REP_CM_PAGE_SIZE;
-  const pageData = _cargaMasivaRepData.slice(start, start + _REP_CM_PAGE_SIZE);
-
-  container.innerHTML = `
-    <div style="margin-bottom:12px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
-      <span style="font-size:13px;font-weight:600">Total: ${total}</span>
-      <span style="font-size:13px;color:#059669;font-weight:600">✓ Válidos: ${validos}</span>
-      ${invalidos > 0 ? `<span style="font-size:13px;color:#dc2626;font-weight:600">✗ Con errores: ${invalidos}</span>` : ''}
+  w.innerHTML = `
+    <div style="margin-bottom:16px;display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
+      <span style="font-size:14px;font-weight:700">Total: ${total}</span>
+      <span style="font-size:14px;color:#059669;font-weight:700">&#10003; V&aacute;lidos: ${validos}</span>
+      ${invalidos > 0 ? '<span style="font-size:14px;color:#dc2626;font-weight:700">&#10007; Con errores: ' + invalidos + '</span>' : ''}
     </div>
-    <div style="max-height:400px;overflow:auto;border:1px solid var(--border);border-radius:8px">
-      <table class="cmdb-table" style="font-size:11px;margin:0">
-        <thead><tr>
-          <th>#</th><th>Tipo Eq.</th><th>Equipo</th><th>Marca</th><th>Modelo</th><th>Serie</th><th>PartNumber</th><th>SKU</th><th>Estado</th>
+    <div style="max-height:350px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table style="width:100%;font-size:11px;border-collapse:collapse">
+        <thead><tr style="background:#f8fafc;position:sticky;top:0">
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">#</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Cat.</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Tipo</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Cap.</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Marca</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Modelo</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Serie</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b">Estado</th>
         </tr></thead>
         <tbody>
-          ${pageData.map(r => `
-            <tr style="${!r._valid ? 'background:#fef2f2' : ''}">
-              <td>${r._row}</td>
-              <td>${esc(r.tipoEquipo || '')}</td>
-              <td>${esc(r.equipo || '')}</td>
-              <td>${esc(r.marca || '')}</td>
-              <td>${esc(r.modelo || '')}</td>
-              <td style="font-family:monospace">${esc(r.serie || '<auto>')}</td>
-              <td>${esc(r.partNumber || '')}</td>
-              <td>${esc(r.sku || '')}</td>
-              <td>${r._valid
-                ? '<span style="color:#059669;font-weight:600">✓</span>'
-                : `<span style="color:#dc2626;font-size:10px">${r._errors.join(', ')}</span>`}</td>
-            </tr>
-          `).join('')}
+          ${_cargaMasivaRepData.map(r => '<tr style="border-bottom:1px solid #f1f5f9;' + (!r._valid ? 'background:#fef2f2' : 'background:#f0fdf4') + '">'
+            + '<td style="padding:6px">' + r._row + '</td>'
+            + '<td style="padding:6px">' + esc(r.categoria || '') + '</td>'
+            + '<td style="padding:6px">' + esc(r.tipo || '') + '</td>'
+            + '<td style="padding:6px">' + esc(r.capacidad || '') + '</td>'
+            + '<td style="padding:6px">' + esc(r.marca || '') + '</td>'
+            + '<td style="padding:6px">' + esc(r.modelo || '') + '</td>'
+            + '<td style="padding:6px;font-family:monospace">' + esc(r.serie || '<auto>') + '</td>'
+            + '<td style="padding:6px">' + (r._valid ? '<span style="color:#059669;font-weight:700">&#10003; OK</span>' : '<span style="color:#dc2626;font-size:10px">' + r._errors.join(', ') + '</span>') + '</td>'
+            + '</tr>').join('')}
         </tbody>
       </table>
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
-      <div style="display:flex;gap:4px;align-items:center">
-        ${_cargaMasivaRepPage > 1 ? `<button class="btn btn-sm" onclick="_cargaMasivaRepPage--;_renderCargaMasivaRepPreview()" style="font-size:11px;padding:3px 8px">‹ Ant</button>` : ''}
-        <span style="padding:3px 8px;font-weight:600;font-size:12px">${_cargaMasivaRepPage} / ${tp}</span>
-        ${_cargaMasivaRepPage < tp ? `<button class="btn btn-sm" onclick="_cargaMasivaRepPage++;_renderCargaMasivaRepPreview()" style="font-size:11px;padding:3px 8px">Sig ›</button>` : ''}
-      </div>
-      <div>
-        ${validos > 0 ? `<button class="btn btn-primary" onclick="_ejecutarCargaMasivaRep()" style="font-size:13px">📥 Importar ${validos} repuesto${validos > 1 ? 's' : ''}</button>` : '<span style="color:#dc2626;font-size:13px;font-weight:600">No hay registros válidos</span>'}
-      </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+      <button class="btn btn-secondary" onclick="_repCmStep=2;_cargaMasivaRepData=[];_renderRepCargaMasiva()">&larr; Subir otro archivo</button>
+      ${validos > 0 ? '<button class="btn btn-primary" onclick="_repCmStep=4;_renderRepCargaMasiva()">Continuar con ' + validos + ' v&aacute;lidos &rarr;</button>' : '<span style="color:#dc2626;font-weight:600">No hay registros v&aacute;lidos</span>'}
     </div>
   `;
 }
@@ -3227,37 +3050,1071 @@ function _renderCargaMasivaRepPreview() {
 function _ejecutarCargaMasivaRep() {
   const validos = _cargaMasivaRepData.filter(r => r._valid);
   if (validos.length === 0) return;
-  if (!confirm('¿Importar ' + validos.length + ' repuestos?')) return;
 
   const repuestos = DB.get('repuestos');
   validos.forEach(r => {
     const newId = nextId(repuestos);
     const codigo = 'REP-' + String(newId).padStart(5, '0');
     let serie = r.serie;
-    if (!serie) serie = _generarSerieRepuesto(r.equipo);
+    if (!serie) serie = _generarSerieRepuesto(r.tipo || r.equipo || 'REP');
     repuestos.push(upperFields({
-      id: newId,
-      codigo,
-      fechaIngreso: r.fechaIngreso || today(),
-      almacen: r.almacen || '',
-      tipoDocumento: r.tipoDocumento || '',
-      nDocumento: r.nDocumento || '',
-      tipoEquipo: r.tipoEquipo,
-      equipo: r.equipo,
+      id: newId, codigo,
+      categoria: r.categoria || 'PARTE',
+      tipo: r.tipo,
+      equipo: r.tipo,
+      capacidad: r.capacidad || '',
       marca: r.marca,
       modelo: r.modelo,
       serie,
       partNumber: r.partNumber || '',
-      sku: r.sku || ''
+      sku: r.sku || '',
+      estadoUso: r.estadoUso || 'NUEVO',
+      estadoDisp: 'DISPONIBLE',
+      estadoCMDB: null,
+      activoAsignadoId: null,
+      almacen: r.almacen || '',
+      tipoDocumento: '',
+      nDocumento: r.nDocumento || '',
+      fechaIngreso: r.fechaIngreso || today(),
+      observaciones: r.observaciones || ''
     }));
   });
-
   DB.set('repuestos', repuestos);
   _cargaMasivaRepData = [];
+  _repCmStep = 1;
+  addMovimiento('CARGA MASIVA REPUESTOS', validos.length + ' repuestos importados desde Excel');
   closeModal();
   showToast(validos.length + ' repuestos importados correctamente');
-  addMovimiento('Carga Masiva Repuestos', `Se importaron ${validos.length} repuestos desde Excel`);
   renderRepuestos(document.getElementById('contentArea'));
+}
+
+/* ══════════════════════════════════════
+   TAB 2 — STOCK E INVENTARIO
+   ══════════════════════════════════════ */
+function _renderRepStock() {
+  const c = document.getElementById('repContent');
+  if (!c) return;
+  const s = _getRepStats();
+
+  c.innerHTML = `
+    <!-- KPI Cards -->
+    <div class="rep-kpi-grid">
+      <div class="rep-kpi-card kpi-total">
+        <div class="rep-kpi-value">${s.total}</div>
+        <div class="rep-kpi-label">Total Repuestos</div>
+        <div class="rep-kpi-sub">${s.comp} comp &middot; ${s.parte} partes</div>
+      </div>
+      <div class="rep-kpi-card kpi-disponible">
+        <div class="rep-kpi-value">${s.disponibles}</div>
+        <div class="rep-kpi-label">Disponibles</div>
+        <div class="rep-kpi-sub">N&deg;${s.nuevos} &middot; U&deg;${s.usados}</div>
+      </div>
+      <div class="rep-kpi-card kpi-asignado">
+        <div class="rep-kpi-value">${s.asignados}</div>
+        <div class="rep-kpi-label">Asignados</div>
+        <div class="rep-kpi-sub">En uso activo</div>
+      </div>
+      <div class="rep-kpi-card kpi-retorno">
+        <div class="rep-kpi-value">${s.retorno}</div>
+        <div class="rep-kpi-label">Pend. Retorno</div>
+        <div class="rep-kpi-sub">Confirmar en Bit&aacute;cora</div>
+      </div>
+      <div class="rep-kpi-card kpi-mantenimiento">
+        <div class="rep-kpi-value">${s.mantenimiento}</div>
+        <div class="rep-kpi-label">Mantenimiento</div>
+        <div class="rep-kpi-sub">En diagn&oacute;stico</div>
+      </div>
+      <div class="rep-kpi-card kpi-baja">
+        <div class="rep-kpi-value">${s.baja}</div>
+        <div class="rep-kpi-label">Dados de baja</div>
+        <div class="rep-kpi-sub">Sin disponibilidad</div>
+      </div>
+    </div>
+
+    <!-- Search -->
+    <div class="table-toolbar">
+      <div class="search-box" style="position:relative">
+        <span class="search-icon">&#128270;</span>
+        <input type="text" id="repStockSearch" placeholder="Buscar por tipo, marca, serie, PartNumber, c&oacute;digo..."
+               value="${esc(_repStockSearch)}" oninput="_onRepStockSearch(this.value)">
+        <span id="repStockSearchClear" onclick="_clearRepStockSearch()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;color:#94a3b8;font-size:16px;font-weight:700;width:24px;height:24px;display:${_repStockSearch ? 'flex' : 'none'};align-items:center;justify-content:center;border-radius:50%;transition:all .15s" onmouseover="this.style.background='#fee2e2';this.style.color='#dc2626'" onmouseout="this.style.background='';this.style.color='#94a3b8'" title="Limpiar b&uacute;squeda">&#10005;</span>
+      </div>
+    </div>
+    <div id="repFiltersBar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap"></div>
+
+    <!-- Status Tabs -->
+    <div class="rep-tabs" id="repStockTabs">
+      ${_buildRepStockTabs(s)}
+    </div>
+
+    <div id="repStockTableWrap" style="margin-top:0"></div>
+  `;
+  _renderRepFiltersBar();
+  _renderRepStockTable();
+}
+
+/* ── Search helpers ── */
+let _repStockSearchTimer = null;
+function _onRepStockSearch(val) {
+  _repStockSearch = val;
+  const cb = document.getElementById('repStockSearchClear');
+  if (cb) cb.style.display = val ? 'flex' : 'none';
+  _repStockPage = 1;
+  clearTimeout(_repStockSearchTimer);
+  _repStockSearchTimer = setTimeout(_renderRepStockTable, 120);
+}
+function _clearRepStockSearch() {
+  _repStockSearch = '';
+  const input = document.getElementById('repStockSearch');
+  if (input) { input.value = ''; input.focus(); }
+  const cb = document.getElementById('repStockSearchClear');
+  if (cb) cb.style.display = 'none';
+  _repStockPage = 1;
+  _renderRepStockTable();
+}
+
+/* ── Dynamic Filters Bar ── */
+const _REP_FILTER_OPTIONS = [
+  { key: 'categoria', label: 'Categoria' },
+  { key: 'tipo',      label: 'Tipo' },
+  { key: 'almacen',   label: 'Almacen' },
+  { key: 'estadoUso', label: 'Estado Uso' },
+  { key: 'marca',     label: 'Marca' }
+];
+let _repActiveFilters = {};
+let _repFilterMenuOpen = false;
+
+function _renderRepFiltersBar() {
+  const bar = document.getElementById('repFiltersBar');
+  if (!bar) return;
+  const all = DB.get('repuestos');
+
+  let html = Object.keys(_repActiveFilters).map(key => {
+    const opt = _REP_FILTER_OPTIONS.find(o => o.key === key);
+    if (!opt) return '';
+    const values = ['Todos', ...new Set(all.map(r => (r[key] || r.equipo || '').toUpperCase()).filter(Boolean))].sort((a, b) => a === 'Todos' ? -1 : b === 'Todos' ? 1 : a.localeCompare(b));
+    const current = _repActiveFilters[key] || 'Todos';
+    return '<div style="display:flex;align-items:center;gap:0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;height:34px;background:#fff">'
+      + '<select onchange="_repActiveFilters[\'' + key + '\']=this.value;_repStockPage=1;_renderRepStockTable()" style="border:none;padding:0 8px 0 10px;font-size:11px;color:#334155;height:100%;cursor:pointer;background:transparent;min-width:120px">'
+      + values.map(v => '<option value="' + esc(v) + '" ' + (current === v ? 'selected' : '') + '>' + (v === 'Todos' ? esc(opt.label) + ': Todos' : esc(v)) + '</option>').join('')
+      + '</select>'
+      + '<button onclick="_repRemoveFilter(\'' + key + '\')" style="border:none;background:none;cursor:pointer;padding:0 6px;color:#94a3b8;font-size:14px;height:100%;display:flex;align-items:center" onmouseover="this.style.color=\'#dc2626\'" onmouseout="this.style.color=\'#94a3b8\'" title="Quitar filtro">&#10005;</button>'
+      + '</div>';
+  }).join('');
+
+  const inactive = _REP_FILTER_OPTIONS.filter(o => !_repActiveFilters.hasOwnProperty(o.key));
+  if (inactive.length > 0) {
+    html += '<div id="repFilterAddWrap" style="position:relative;display:inline-block">'
+      + '<button id="repFilterAddBtn" style="width:34px;height:34px;border-radius:8px;border:1px dashed #cbd5e1;background:#f8fafc;cursor:pointer;font-size:16px;color:#64748b;display:flex;align-items:center;justify-content:center;transition:all .15s" onmouseover="this.style.borderColor=\'#2563eb\';this.style.color=\'#2563eb\'" onmouseout="this.style.borderColor=\'#cbd5e1\';this.style.color=\'#64748b\'" title="Agregar filtro">+</button>'
+      + '<div id="repFilterAddMenu" style="display:' + (_repFilterMenuOpen ? 'block' : 'none') + ';position:absolute;top:38px;left:0;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px 0;z-index:999;min-width:200px">'
+      + '<div style="padding:4px 12px 6px;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.5px">Agregar filtro</div>'
+      + inactive.map(o => '<div onclick="event.stopPropagation();_repAddFilter(\'' + o.key + '\')" style="padding:7px 12px;font-size:12px;color:#334155;cursor:pointer;display:flex;align-items:center;gap:8px" onmouseover="this.style.background=\'#f1f5f9\'" onmouseout="this.style.background=\'\'">'
+        + '<span style="color:#2563eb;font-size:14px">+</span> ' + esc(o.label) + '</div>').join('')
+      + '</div></div>';
+  }
+
+  bar.innerHTML = html;
+  const addBtn = document.getElementById('repFilterAddBtn');
+  if (addBtn) {
+    addBtn.onclick = function(e) {
+      e.stopPropagation();
+      _repFilterMenuOpen = !_repFilterMenuOpen;
+      const menu = document.getElementById('repFilterAddMenu');
+      if (menu) menu.style.display = _repFilterMenuOpen ? 'block' : 'none';
+    };
+  }
+}
+
+function _repAddFilter(key) { _repActiveFilters[key] = 'Todos'; _repFilterMenuOpen = false; _repStockPage = 1; _renderRepFiltersBar(); _renderRepStockTable(); }
+function _repRemoveFilter(key) { delete _repActiveFilters[key]; _repFilterMenuOpen = false; _repStockPage = 1; _renderRepFiltersBar(); _renderRepStockTable(); }
+
+document.addEventListener('click', function(e) {
+  if (_repFilterMenuOpen && !e.target.closest('#repFiltersBar')) {
+    _repFilterMenuOpen = false;
+    const m = document.getElementById('repFilterAddMenu');
+    if (m) m.style.display = 'none';
+  }
+});
+
+function _buildRepStockTabs(s) {
+  const tabs = [
+    { key: 'Todos', count: s.total, label: 'TODOS' },
+    { key: 'DISPONIBLE', count: s.disponibles, label: 'DISPONIBLE' },
+    { key: 'ASIGNADO', count: s.asignados, label: 'ASIGNADO' },
+    { key: 'PENDIENTE_RETORNO', count: s.retorno, label: 'PEND. RETORNO' },
+    { key: 'MANTENIMIENTO', count: s.mantenimiento, label: 'MANTENIMIENTO' },
+    { key: 'BAJA', count: s.baja, label: 'BAJA' }
+  ];
+  return tabs.map(t =>
+    '<button class="rep-tab' + (_repStockEstado === t.key ? ' active' : '') + '" onclick="_repStockEstado=\'' + t.key + '\';_repStockPage=1;_renderRepStockTable();_updateRepStockTabs()">'
+    + '<span class="rep-tab-count">' + t.count + '</span>'
+    + '<span class="rep-tab-label">' + t.label + '</span>'
+    + '</button>'
+  ).join('');
+}
+
+function _updateRepStockTabs() {
+  const el = document.getElementById('repStockTabs');
+  if (el) el.innerHTML = _buildRepStockTabs(_getRepStats());
+}
+
+function _getDispLabel(d) {
+  if (d === 'PENDIENTE_RETORNO') return 'PEND. RETORNO';
+  return d || 'DISPONIBLE';
+}
+function _getDispClass(d) {
+  if (d === 'DISPONIBLE') return 'disponible';
+  if (d === 'ASIGNADO') return 'asignado';
+  if (d === 'PENDIENTE_RETORNO') return 'retorno';
+  if (d === 'MANTENIMIENTO') return 'mantenimiento';
+  if (d === 'BAJA') return 'baja';
+  return 'disponible';
+}
+function _getEstadoCmdbClass(e) {
+  if (!e) return '';
+  const u = e.toUpperCase();
+  if (u.includes('BUENO')) return 'bueno';
+  if (u.includes('REGULAR')) return 'regular';
+  if (u.includes('DIAGNOSTICO')) return 'diagnostico';
+  if (u.includes('REPARACION')) return 'reparacion';
+  if (u.includes('ESPERA')) return 'espera';
+  if (u.includes('OBSOLETO')) return 'obsoleto';
+  if (u.includes('DANADO') || u.includes('IRREPARABLE')) return 'danado';
+  if (u.includes('PERDIDA') || u.includes('ROBO')) return 'perdida';
+  if (u.includes('DESTRUIDO')) return 'destruido';
+  return 'diagnostico';
+}
+
+function _renderRepStockTable() {
+  const wrap = document.getElementById('repStockTableWrap');
+  if (!wrap) return;
+  let items = DB.get('repuestos');
+
+  // Status tab filter
+  if (_repStockEstado !== 'Todos') {
+    items = items.filter(r => (r.estadoDisp || 'DISPONIBLE') === _repStockEstado);
+  }
+  // Dynamic filters from filter bar
+  for (const [key, val] of Object.entries(_repActiveFilters)) {
+    if (val && val !== 'Todos') {
+      items = items.filter(r => {
+        const field = key === 'tipo' ? (r.tipo || r.equipo || '') : (r[key] || '');
+        return field.toUpperCase() === val.toUpperCase();
+      });
+    }
+  }
+  if (_repStockSearch) {
+    const s = _repStockSearch.toLowerCase();
+    items = items.filter(r =>
+      (r.tipo || r.equipo || '').toLowerCase().includes(s) ||
+      (r.marca || '').toLowerCase().includes(s) ||
+      (r.modelo || '').toLowerCase().includes(s) ||
+      (r.serie || '').toLowerCase().includes(s) ||
+      (r.partNumber || '').toLowerCase().includes(s) ||
+      (r.codigo || '').toLowerCase().includes(s) ||
+      (r.almacen || '').toLowerCase().includes(s)
+    );
+  }
+
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / _REP_STOCK_PAGE_SIZE));
+  if (_repStockPage > totalPages) _repStockPage = totalPages;
+  const start = (_repStockPage - 1) * _REP_STOCK_PAGE_SIZE;
+  const pageData = items.slice(start, start + _REP_STOCK_PAGE_SIZE);
+
+  let pageButtons = '';
+  const maxVis = 5;
+  let pS = Math.max(1, _repStockPage - Math.floor(maxVis / 2));
+  let pE = Math.min(totalPages, pS + maxVis - 1);
+  if (pE - pS < maxVis - 1) pS = Math.max(1, pE - maxVis + 1);
+  pageButtons += '<button class="rep-page-btn" onclick="_repStockPage=1;_renderRepStockTable()" ' + (_repStockPage <= 1 ? 'disabled' : '') + '>&laquo;</button>';
+  pageButtons += '<button class="rep-page-btn" onclick="_repStockPage--;_renderRepStockTable()" ' + (_repStockPage <= 1 ? 'disabled' : '') + '>&lsaquo;</button>';
+  for (let p = pS; p <= pE; p++) {
+    pageButtons += '<button class="rep-page-btn' + (p === _repStockPage ? ' active' : '') + '" onclick="_repStockPage=' + p + ';_renderRepStockTable()">' + p + '</button>';
+  }
+  pageButtons += '<button class="rep-page-btn" onclick="_repStockPage++;_renderRepStockTable()" ' + (_repStockPage >= totalPages ? 'disabled' : '') + '>&rsaquo;</button>';
+  pageButtons += '<button class="rep-page-btn" onclick="_repStockPage=' + totalPages + ';_renderRepStockTable()" ' + (_repStockPage >= totalPages ? 'disabled' : '') + '>&raquo;</button>';
+
+  const activos = DB.get('activos');
+
+  wrap.innerHTML = `
+    <div class="table-container" style="margin-top:0;border-top:none;border-radius:0 0 var(--radius) var(--radius)">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>C&Oacute;DIGO</th>
+              <th>ALMAC&Eacute;N</th>
+              <th>F. INGRESO</th>
+              <th>CATEGOR&Iacute;A</th>
+              <th>REPUESTO</th>
+              <th>MARCA / MODELO</th>
+              <th>CAPACIDAD</th>
+              <th>SERIE</th>
+              <th>PARTNUMBER</th>
+              <th>ESTADO CMDB</th>
+              <th>USO</th>
+              <th>ACCIONES</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageData.length === 0
+              ? '<tr><td colspan="12"><div class="empty-state"><div class="empty-icon">&#128295;</div><h3>Sin repuestos</h3><p>No hay repuestos registrados</p></div></td></tr>'
+              : pageData.map(r => {
+                  const cat = (r.categoria || 'COMPONENTE').toUpperCase();
+                  const disp = r.estadoDisp || 'DISPONIBLE';
+                  const rowClass = disp === 'PENDIENTE_RETORNO' ? ' rep-row-retorno' : disp === 'BAJA' ? ' rep-row-baja' : disp === 'MANTENIMIENTO' ? ' rep-row-mant' : '';
+
+                  // USO column: EN USO (if ASIGNADO) or PEND. RETORNO
+                  let usoLabel = '', usoClass = '';
+                  if (disp === 'ASIGNADO') { usoLabel = 'EN USO'; usoClass = 'asignado'; }
+                  else if (disp === 'PENDIENTE_RETORNO') { usoLabel = 'PEND. RETORNO'; usoClass = 'retorno'; }
+
+                  let actions = '<button class="btn-icon" title="Editar" onclick="event.stopPropagation();_openRepEditModal(' + r.id + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;font-size:10px">&#9998;&#65039;</button>';
+                  if (disp === 'DISPONIBLE') {
+                    actions += '<button class="btn-icon" title="Eliminar" onclick="event.stopPropagation();_deleteRepuesto(' + r.id + ')" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca;font-size:10px">&#128465;&#65039;</button>';
+                  }
+                  if (disp === 'PENDIENTE_RETORNO') {
+                    actions += '<button class="btn-icon" title="Confirmar Retorno" onclick="event.stopPropagation();_openConfirmarRetorno(' + r.id + ')" style="background:#fefce8;color:#d97706;border:1px solid #fde68a;font-size:10px">&#8617;&#65039;</button>';
+                  }
+
+                  return '<tr class="' + rowClass + '">'
+                    + '<td style="font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap">' + esc(r.codigo || '') + '</td>'
+                    + '<td style="font-size:12px">' + esc(r.almacen || '&mdash;') + '</td>'
+                    + '<td style="font-size:11px;white-space:nowrap">' + (r.fechaIngreso ? formatDate(r.fechaIngreso) : '&mdash;') + '</td>'
+                    + '<td><span class="rep-badge-cat ' + (cat === 'PARTE' ? 'parte' : 'comp') + '">' + (cat === 'PARTE' ? '&#128295; PARTE' : '&#9881;&#65039; COMP') + '</span></td>'
+                    + '<td style="font-size:12px;font-weight:600">' + esc(r.tipo || r.equipo || '') + '</td>'
+                    + '<td><div class="rep-marca-cell"><span class="marca-name">' + esc(r.marca || '') + '</span><span class="modelo-name">' + esc(r.modelo || '') + '</span></div></td>'
+                    + '<td>' + ((r.capacidad) ? '<span class="rep-badge-cap">' + esc(r.capacidad) + '</span>' : '<span style="color:#94a3b8">&mdash;</span>') + '</td>'
+                    + '<td style="font-size:11px;font-family:monospace;color:#475569">' + esc(r.serie || '&mdash;') + '</td>'
+                    + '<td style="font-size:11px;font-family:monospace;color:#475569">' + esc(r.partNumber || '&mdash;') + '</td>'
+                    + '<td><span class="rep-disp ' + _getDispClass(disp) + '">' + _getDispLabel(disp) + '</span></td>'
+                    + '<td>' + (usoLabel ? '<span class="rep-disp ' + usoClass + '">' + usoLabel + '</span>' : '<span style="color:#94a3b8">&mdash;</span>') + '</td>'
+                    + '<td><div class="action-btns">' + actions + '</div></td>'
+                    + '</tr>';
+                }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="rep-pagination">
+      <span>${start + 1}&ndash;${Math.min(start + _REP_STOCK_PAGE_SIZE, total)} de ${total} repuestos</span>
+      <div class="rep-pages">${pageButtons}</div>
+    </div>
+  `;
+}
+
+function _exportRepuestos() {
+  const items = DB.get('repuestos');
+  if (items.length === 0) { showToast('No hay repuestos para exportar', 'error'); return; }
+  const headers = ['CODIGO','CATEGORIA','TIPO','CAPACIDAD','MARCA','MODELO','SERIE','PARTNUMBER','SKU','ESTADO_USO','ESTADO_DISP','ESTADO_CMDB','ACTIVO_ASIGNADO','ALMACEN','F_INGRESO','OBSERVACIONES'];
+  const activos = DB.get('activos');
+  const rows = items.map(r => {
+    const activo = r.activoAsignadoId ? activos.find(a => a.id === r.activoAsignadoId) : null;
+    return [r.codigo||'', r.categoria||'', r.tipo||r.equipo||'', r.capacidad||'', r.marca||'', r.modelo||'', r.serie||'', r.partNumber||'', r.sku||'', r.estadoUso||'', r.estadoDisp||'', r.estadoCMDB||'', activo?activo.codigo:'', r.almacen||'', r.fechaIngreso||'', r.observaciones||''];
+  });
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Repuestos');
+  XLSX.writeFile(wb, 'Repuestos_Export.xlsx');
+  showToast('Exportado correctamente');
+}
+
+/* ── Edit Modal ── */
+function _openRepEditModal(id) {
+  const repuestos = DB.get('repuestos');
+  const r = repuestos.find(x => x.id === id);
+  if (!r) return;
+  const marcas = DB.getConfig('marcas', []);
+  const ubicaciones = DB.getConfig('ubicaciones', []);
+  const isComp = (r.categoria || '').toUpperCase() === 'COMPONENTE';
+  const tiposForCat = isComp ? _REP_COMP_TIPOS : _REP_PARTE_TIPOS;
+  const curTipo = (r.tipo || r.equipo || '').toUpperCase();
+  const curMarca = (r.marca || '').toUpperCase();
+  const curCap = (r.capacidad || '').toUpperCase();
+  const curAlm = (r.almacen || '').toUpperCase();
+
+  // Build tipo options - include current value even if not in predefined list
+  const tipoOpts = [...tiposForCat];
+  if (curTipo && !tipoOpts.some(t => t.toUpperCase() === curTipo)) tipoOpts.push(curTipo);
+
+  // Build marca options - include current value even if not in config
+  const marcaOpts = [...marcas];
+  if (curMarca && !marcaOpts.some(m => m.toUpperCase() === curMarca)) marcaOpts.push(curMarca);
+
+  // Build almacen options - include current value even if not in config
+  const almOpts = [...ubicaciones];
+  if (curAlm && !almOpts.some(a => a.toUpperCase() === curAlm)) almOpts.push(curAlm);
+
+  openModal('Editar Repuesto — ' + esc(r.codigo), `
+    <div class="form-grid-3">
+      <div class="form-group">
+        <label>Categor&iacute;a</label>
+        <input class="form-control" value="${esc(r.categoria || '')}" readonly style="background:#f1f5f9;font-weight:600">
+      </div>
+      <div class="form-group">
+        <label>Tipo <span class="required">*</span></label>
+        <select class="form-control" id="fRepEditTipo">
+          ${tipoOpts.map(t => '<option value="' + esc(t) + '"' + (t.toUpperCase() === curTipo ? ' selected' : '') + '>' + esc(t) + '</option>').join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Marca <span class="required">*</span></label>
+        <select class="form-control" id="fRepEditMarca">
+          <option value="">Seleccionar...</option>
+          ${marcaOpts.map(m => '<option value="' + esc(m) + '"' + (m.toUpperCase() === curMarca ? ' selected' : '') + '>' + esc(m) + '</option>').join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Modelo <span class="required">*</span></label>
+        <input class="form-control" id="fRepEditModelo" value="${esc(r.modelo || '')}">
+      </div>
+      ${isComp ? '<div class="form-group"><label>Capacidad <span class="required">*</span></label><select class="form-control" id="fRepEditCap">' + _REP_CAPACIDADES.map(c => '<option value="' + esc(c) + '"' + (c.toUpperCase() === curCap ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></div>' : ''}
+      <div class="form-group">
+        <label>N&deg; Serie</label>
+        <input class="form-control" id="fRepEditSerie" value="${esc(r.serie || '')}">
+      </div>
+      <div class="form-group">
+        <label>PartNumber</label>
+        <input class="form-control" id="fRepEditPN" value="${esc(r.partNumber || '')}">
+      </div>
+      <div class="form-group">
+        <label>SKU</label>
+        <input class="form-control" id="fRepEditSku" value="${esc(r.sku || '')}">
+      </div>
+      <div class="form-group">
+        <label>Estado de Uso</label>
+        <select class="form-control" id="fRepEditUso">
+          <option value="NUEVO" ${(r.estadoUso||'NUEVO') === 'NUEVO' ? 'selected' : ''}>Nuevo</option>
+          <option value="USADO" ${r.estadoUso === 'USADO' ? 'selected' : ''}>Usado</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Almac&eacute;n</label>
+        <select class="form-control" id="fRepEditAlmacen">
+          <option value="">Seleccionar...</option>
+          ${almOpts.map(a => '<option value="' + esc(a) + '"' + (a.toUpperCase() === curAlm ? ' selected' : '') + '>' + esc(a) + '</option>').join('')}
+        </select>
+      </div>
+      <div class="form-group span2">
+        <label>Observaciones</label>
+        <input class="form-control" id="fRepEditObs" value="${esc(r.observaciones || '')}">
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="_saveRepEdit(${id})">&#128190; Actualizar</button>
+  `, 'modal-lg');
+}
+
+function _saveRepEdit(id) {
+  const repuestos = DB.get('repuestos');
+  const idx = repuestos.findIndex(r => r.id === id);
+  if (idx < 0) return;
+  const r = repuestos[idx];
+  const isComp = (r.categoria || '').toUpperCase() === 'COMPONENTE';
+
+  const tipo = (document.getElementById('fRepEditTipo') || {}).value;
+  const marca = (document.getElementById('fRepEditMarca') || {}).value;
+  const modelo = (document.getElementById('fRepEditModelo') || {}).value.trim();
+  const serie = (document.getElementById('fRepEditSerie') || {}).value.trim();
+  const capacidad = isComp ? (document.getElementById('fRepEditCap') || {}).value : (r.capacidad || '');
+
+  if (!tipo || !marca || !modelo) { showToast('Completa Tipo, Marca y Modelo', 'error'); return; }
+  if (isComp && !serie) { showToast('Serie obligatoria para componentes', 'error'); return; }
+  if (isComp && !capacidad) { showToast('Capacidad obligatoria para componentes', 'error'); return; }
+
+  Object.assign(repuestos[idx], upperFields({
+    tipo, equipo: tipo, capacidad, marca, modelo, serie,
+    partNumber: (document.getElementById('fRepEditPN') || {}).value.trim(),
+    sku: (document.getElementById('fRepEditSku') || {}).value.trim(),
+    estadoUso: (document.getElementById('fRepEditUso') || {}).value,
+    almacen: (document.getElementById('fRepEditAlmacen') || {}).value,
+    observaciones: (document.getElementById('fRepEditObs') || {}).value.trim()
+  }));
+
+  DB.set('repuestos', repuestos);
+  addMovimiento('EDICION REPUESTO', 'Repuesto ' + r.codigo + ' actualizado');
+  closeModal();
+  showToast('Repuesto actualizado');
+  _renderRepStock();
+}
+
+function _deleteRepuesto(id) {
+  if (!confirm('Eliminar este repuesto?')) return;
+  const repuestos = DB.get('repuestos');
+  const r = repuestos.find(x => x.id === id);
+  if (r && r.estadoDisp && r.estadoDisp !== 'DISPONIBLE') { showToast('Solo se pueden eliminar repuestos disponibles', 'error'); return; }
+  DB.set('repuestos', repuestos.filter(x => x.id !== id));
+  if (r) addMovimiento('ELIMINACION REPUESTO', 'Repuesto ' + r.codigo + ' eliminado');
+  showToast('Repuesto eliminado');
+  _renderRepStock();
+}
+
+/* ── Confirmar Retorno Modal ── */
+let _retornoState = { estadoGrupo: '', subEstado: '' };
+
+function _openConfirmarRetorno(id) {
+  _retornoState = { estadoGrupo: '', subEstado: '' };
+  const repuestos = DB.get('repuestos');
+  const r = repuestos.find(x => x.id === id);
+  if (!r) return;
+  const activos = DB.get('activos');
+  const activo = r.activoAsignadoId ? activos.find(a => a.id === r.activoAsignadoId) : null;
+  const ubicaciones = DB.getConfig('ubicaciones', []);
+
+  openModal('Confirmar Retorno &mdash; ' + esc(r.codigo), `
+    <div id="retornoModalBody" data-rep-id="${id}">
+      ${_buildRetornoBody(r, activo, ubicaciones)}
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" id="btnConfirmarRetorno" onclick="_confirmarRetorno(${id})" disabled>&#10003; Confirmar Retorno</button>
+  `, 'modal-lg');
+}
+
+function _buildRetornoBody(r, activo, ubicaciones) {
+  const g = _retornoState.estadoGrupo;
+  const sub = _retornoState.subEstado;
+  const subEstados = g ? (_REP_ESTADOS_CMDB[g] || []) : [];
+
+  let previewHtml = '';
+  if (g && sub) {
+    const colors = { DISPONIBLE: { bg: '#ecfdf5', border: '#10b981', text: '#065f46' }, MANTENIMIENTO: { bg: '#f5f3ff', border: '#8b5cf6', text: '#5b21b6' }, BAJA: { bg: '#fef2f2', border: '#ef4444', text: '#991b1b' } };
+    const c = colors[g] || colors.DISPONIBLE;
+    previewHtml = '<div class="rep-preview-result" style="background:' + c.bg + ';border:1px solid ' + c.border + ';color:' + c.text + '">Resultado: <strong>' + g + '</strong> &rarr; ' + sub + '</div>';
+  }
+
+  return `
+    <div class="rep-retorno-info">
+      <div style="display:flex;gap:20px;flex-wrap:wrap">
+        <div><strong>C&oacute;digo:</strong> ${esc(r.codigo)}</div>
+        <div><strong>Tipo:</strong> ${esc(r.tipo || r.equipo || '')}</div>
+        <div><strong>Marca:</strong> ${esc(r.marca)} ${esc(r.modelo)}</div>
+        <div><strong>Serie:</strong> ${esc(r.serie || '&mdash;')}</div>
+        ${activo ? '<div><strong>Activo:</strong> ' + esc(activo.codigo) + '</div>' : ''}
+      </div>
+    </div>
+
+    <div class="form-grid-3" style="margin-bottom:20px">
+      <div class="form-group">
+        <label>Ticket <span class="required">*</span></label>
+        <input class="form-control" id="fRetornoTicket" placeholder="N&uacute;mero de ticket">
+      </div>
+      <div class="form-group">
+        <label>Fecha confirmaci&oacute;n</label>
+        <input type="date" class="form-control" id="fRetornoFecha" value="${today()}">
+      </div>
+      <div class="form-group">
+        <label>Almac&eacute;n de ingreso <span class="required">*</span></label>
+        <select class="form-control" id="fRetornoAlmacen">
+          <option value="">Seleccionar...</option>
+          ${optionsHTML(ubicaciones, '')}
+        </select>
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px"><label style="font-weight:700;font-size:13px">Estado CMDB <span class="required">*</span></label></div>
+    <div class="rep-retorno-cards">
+      <div class="rep-retorno-card${g === 'DISPONIBLE' ? ' sel-disp' : ''}" onclick="_retornoSelectGrupo('DISPONIBLE', ${r.id})">
+        <div class="rc-icon">&#9989;</div>
+        <div class="rc-label">DISPONIBLE</div>
+      </div>
+      <div class="rep-retorno-card${g === 'MANTENIMIENTO' ? ' sel-mant' : ''}" onclick="_retornoSelectGrupo('MANTENIMIENTO', ${r.id})">
+        <div class="rc-icon">&#128295;</div>
+        <div class="rc-label">MANTENIMIENTO</div>
+      </div>
+      <div class="rep-retorno-card${g === 'BAJA' ? ' sel-baja' : ''}" onclick="_retornoSelectGrupo('BAJA', ${r.id})">
+        <div class="rc-icon">&#128683;</div>
+        <div class="rc-label">BAJA</div>
+      </div>
+    </div>
+
+    ${subEstados.length > 0 ? `
+    <div style="margin-bottom:8px"><label style="font-weight:600;font-size:12px;color:var(--text-secondary)">Sub-estado:</label></div>
+    <div class="rep-sub-estados">
+      ${subEstados.map(s => '<button class="rep-sub-estado' + (sub === s ? ' active' : '') + '" onclick="_retornoSelectSub(\'' + esc(s) + '\', ' + r.id + ')">' + esc(s) + '</button>').join('')}
+    </div>` : ''}
+
+    ${previewHtml}
+
+    <div class="form-group">
+      <label>Observaciones</label>
+      <input class="form-control" id="fRetornoObs" placeholder="Observaciones del retorno">
+    </div>
+  `;
+}
+
+function _retornoSelectGrupo(grupo, repId) {
+  _retornoState.estadoGrupo = grupo;
+  _retornoState.subEstado = '';
+  _refreshRetornoModal(repId);
+}
+
+function _retornoSelectSub(sub, repId) {
+  _retornoState.subEstado = sub;
+  _refreshRetornoModal(repId);
+}
+
+function _refreshRetornoModal(repId) {
+  const repuestos = DB.get('repuestos');
+  const r = repuestos.find(x => x.id === repId);
+  if (!r) return;
+  const activos = DB.get('activos');
+  const activo = r.activoAsignadoId ? activos.find(a => a.id === r.activoAsignadoId) : null;
+  const ubicaciones = DB.getConfig('ubicaciones', []);
+
+  const ticket = (document.getElementById('fRetornoTicket') || {}).value;
+  const fecha = (document.getElementById('fRetornoFecha') || {}).value;
+  const almacen = (document.getElementById('fRetornoAlmacen') || {}).value;
+  const obs = (document.getElementById('fRetornoObs') || {}).value;
+
+  const body = document.getElementById('retornoModalBody');
+  if (body) body.innerHTML = _buildRetornoBody(r, activo, ubicaciones);
+
+  const tEl = document.getElementById('fRetornoTicket'); if (tEl) tEl.value = ticket;
+  const fEl = document.getElementById('fRetornoFecha'); if (fEl) fEl.value = fecha;
+  const aEl = document.getElementById('fRetornoAlmacen'); if (aEl) aEl.value = almacen;
+  const oEl = document.getElementById('fRetornoObs'); if (oEl) oEl.value = obs;
+
+  const btn = document.getElementById('btnConfirmarRetorno');
+  if (btn) btn.disabled = !(_retornoState.estadoGrupo && _retornoState.subEstado);
+}
+
+function _confirmarRetorno(id) {
+  const g = _retornoState.estadoGrupo;
+  const sub = _retornoState.subEstado;
+  if (!g || !sub) { showToast('Selecciona estado CMDB y sub-estado', 'error'); return; }
+
+  const ticket = (document.getElementById('fRetornoTicket') || {}).value.trim();
+  const almacen = (document.getElementById('fRetornoAlmacen') || {}).value;
+  if (!ticket) { showToast('El ticket es obligatorio', 'error'); return; }
+  if (!almacen) { showToast('El almacen de ingreso es obligatorio', 'error'); return; }
+
+  const repuestos = DB.get('repuestos');
+  const idx = repuestos.findIndex(r => r.id === id);
+  if (idx < 0) return;
+  const r = repuestos[idx];
+
+  repuestos[idx].estadoDisp = g;
+  repuestos[idx].estadoCMDB = sub;
+  repuestos[idx].estadoUso = 'USADO';
+  repuestos[idx].activoAsignadoId = null;
+  repuestos[idx].almacen = almacen.toUpperCase();
+  repuestos[idx].observaciones = (document.getElementById('fRetornoObs') || {}).value.trim();
+  DB.set('repuestos', repuestos);
+
+  const detalle = 'Retorno ' + r.codigo + ' (' + (r.tipo || r.equipo) + ' ' + (r.capacidad || '') + ' ' + r.marca + ') | Ticket: ' + ticket + ' | Almacen: ' + almacen + ' | Estado: ' + g + ' - ' + sub;
+  addMovimiento('RETORNO REPUESTO', detalle);
+  closeModal();
+  showToast('Retorno confirmado: ' + r.codigo + ' &rarr; ' + g);
+  _renderRepStock();
+}
+
+/* ── Helper: generar serie ── */
+function _generarSerieRepuesto(equipo) {
+  const prefijo = 'REP-' + _generarPrefijo(equipo || 'REP');
+  const repuestos = DB.get('repuestos');
+  let maxNum = 0;
+  repuestos.forEach(r => {
+    if ((r.serie || '').toUpperCase().startsWith(prefijo)) {
+      const num = parseInt((r.serie || '').substring(prefijo.length)) || 0;
+      if (num > maxNum) maxNum = num;
+    }
+  });
+  return prefijo + String(maxNum + 1).padStart(5, '0');
+}
+
+/* ═══════════════════════════════════════════════════════
+   ASIGNACION DE REPUESTOS
+   ═══════════════════════════════════════════════════════ */
+let _arSearch = '';
+let _arPage = 1;
+const _AR_PAGE_SIZE = 15;
+let _arFilterMotivo = 'Todos';
+let _arFilterCat = 'Todos';
+let _arFilterEstado = 'Todos';
+
+function _getArStats() {
+  const all = DB.get('asignacionesRep');
+  return {
+    total: all.length,
+    vigentes: all.filter(a => a.estado === 'VIGENTE').length,
+    pendRetorno: all.filter(a => a.estado === 'PEND. RETORNO').length,
+    revertidas: all.filter(a => a.estado === 'REVERTIDA').length
+  };
+}
+
+function renderAsignacionRepuestos(el) {
+  const s = _getArStats();
+  el.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1>Asignaci&oacute;n de Repuestos</h1>
+        <div class="subtitle">Ampliaci&oacute;n &middot; Reemplazo &middot; Repliegue de componentes y partes</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        ${s.pendRetorno > 0 ? '<button class="ar-pend-btn" onclick="_arFilterEstado=\'PEND. RETORNO\';_arPage=1;renderAsignacionRepuestos(document.getElementById(\'contentArea\'))">&#128230; Pendientes Retorno <span class="ar-pend-count">' + s.pendRetorno + '</span></button>' : ''}
+        <button class="btn btn-primary" onclick="_openNuevaAsigRepModal()">+ Nueva Asignaci&oacute;n</button>
+      </div>
+    </div>
+
+    <div class="ar-kpi-grid">
+      <div class="ar-kpi-card ar-total">
+        <div class="ar-kpi-value">${s.total}</div>
+        <div class="ar-kpi-label">Total asignaciones</div>
+      </div>
+      <div class="ar-kpi-card ar-vigente">
+        <div class="ar-kpi-value" style="color:#10b981">${s.vigentes}</div>
+        <div class="ar-kpi-label">Vigentes</div>
+      </div>
+      <div class="ar-kpi-card ar-pend">
+        <div class="ar-kpi-value" style="color:#f59e0b">${s.pendRetorno}</div>
+        <div class="ar-kpi-label">Pend. Retorno componente</div>
+      </div>
+      <div class="ar-kpi-card ar-revertida">
+        <div class="ar-kpi-value" style="color:#8b5cf6">${s.revertidas}</div>
+        <div class="ar-kpi-label">Revertidas</div>
+      </div>
+    </div>
+
+    <div class="table-toolbar">
+      <div class="search-box" style="position:relative">
+        <span class="search-icon">&#128270;</span>
+        <input type="text" id="arSearchInput" placeholder="Buscar por activo, repuesto, ticket, serie..."
+               value="${esc(_arSearch)}" oninput="_arSearch=this.value;_arPage=1;_renderArTable()">
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select class="form-control" style="width:auto;min-width:130px;height:38px;font-size:13px" onchange="_arFilterMotivo=this.value;_arPage=1;_renderArTable()">
+          <option value="Todos"${_arFilterMotivo==='Todos'?' selected':''}>Motivo: Todos</option>
+          <option value="AMPLIACION"${_arFilterMotivo==='AMPLIACION'?' selected':''}>Ampliaci&oacute;n</option>
+          <option value="REEMPLAZO"${_arFilterMotivo==='REEMPLAZO'?' selected':''}>Reemplazo</option>
+          <option value="REPLIEGUE"${_arFilterMotivo==='REPLIEGUE'?' selected':''}>Repliegue</option>
+        </select>
+        <select class="form-control" style="width:auto;min-width:140px;height:38px;font-size:13px" onchange="_arFilterCat=this.value;_arPage=1;_renderArTable()">
+          <option value="Todos"${_arFilterCat==='Todos'?' selected':''}>Categor&iacute;a: Todos</option>
+          <option value="COMPONENTE"${_arFilterCat==='COMPONENTE'?' selected':''}>Componente</option>
+          <option value="PARTE"${_arFilterCat==='PARTE'?' selected':''}>Parte</option>
+        </select>
+        <select class="form-control" style="width:auto;min-width:130px;height:38px;font-size:13px" onchange="_arFilterEstado=this.value;_arPage=1;_renderArTable()">
+          <option value="Todos"${_arFilterEstado==='Todos'?' selected':''}>Estado: Todos</option>
+          <option value="VIGENTE"${_arFilterEstado==='VIGENTE'?' selected':''}>Vigente</option>
+          <option value="PEND. RETORNO"${_arFilterEstado==='PEND. RETORNO'?' selected':''}>Pend. Retorno</option>
+          <option value="REVERTIDA"${_arFilterEstado==='REVERTIDA'?' selected':''}>Revertida</option>
+        </select>
+        <button class="btn" onclick="_exportAsigRep()" style="height:38px;font-size:13px;border:1px solid var(--border)">&#128203; Exportar</button>
+      </div>
+    </div>
+
+    <div id="arTableWrap"></div>
+  `;
+  _renderArTable();
+}
+
+function _renderArTable() {
+  const wrap = document.getElementById('arTableWrap');
+  if (!wrap) return;
+  let items = DB.get('asignacionesRep');
+
+  if (_arFilterMotivo !== 'Todos') items = items.filter(a => a.motivo === _arFilterMotivo);
+  if (_arFilterCat !== 'Todos') items = items.filter(a => (a.categoria || '').toUpperCase() === _arFilterCat);
+  if (_arFilterEstado !== 'Todos') items = items.filter(a => a.estado === _arFilterEstado);
+  if (_arSearch) {
+    const s = _arSearch.toLowerCase();
+    items = items.filter(a =>
+      (a.activoCodigo || '').toLowerCase().includes(s) ||
+      (a.repuestoDesc || '').toLowerCase().includes(s) ||
+      (a.ticket || '').toLowerCase().includes(s) ||
+      (a.serie || '').toLowerCase().includes(s) ||
+      (a.repuestoCodigo || '').toLowerCase().includes(s) ||
+      String(a.id || '').includes(s)
+    );
+  }
+
+  // Sort by date desc
+  items.sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+  const total = items.length;
+  const totalPages = Math.max(1, Math.ceil(total / _AR_PAGE_SIZE));
+  if (_arPage > totalPages) _arPage = totalPages;
+  const start = (_arPage - 1) * _AR_PAGE_SIZE;
+  const pageData = items.slice(start, start + _AR_PAGE_SIZE);
+
+  let pageButtons = '';
+  const maxVis = 5;
+  let pS = Math.max(1, _arPage - Math.floor(maxVis / 2));
+  let pE = Math.min(totalPages, pS + maxVis - 1);
+  if (pE - pS < maxVis - 1) pS = Math.max(1, pE - maxVis + 1);
+  pageButtons += '<button class="rep-page-btn" onclick="_arPage=1;_renderArTable()" ' + (_arPage<=1?'disabled':'') + '>&laquo;</button>';
+  pageButtons += '<button class="rep-page-btn" onclick="_arPage--;_renderArTable()" ' + (_arPage<=1?'disabled':'') + '>&lsaquo;</button>';
+  for (let p = pS; p <= pE; p++) pageButtons += '<button class="rep-page-btn' + (p===_arPage?' active':'') + '" onclick="_arPage='+p+';_renderArTable()">'+p+'</button>';
+  pageButtons += '<button class="rep-page-btn" onclick="_arPage++;_renderArTable()" ' + (_arPage>=totalPages?'disabled':'') + '>&rsaquo;</button>';
+  pageButtons += '<button class="rep-page-btn" onclick="_arPage='+totalPages+';_renderArTable()" ' + (_arPage>=totalPages?'disabled':'') + '>&raquo;</button>';
+
+  wrap.innerHTML = `
+    <div class="table-container">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>FECHA</th>
+              <th>CATEGOR&Iacute;A</th>
+              <th>REPUESTO</th>
+              <th>SERIE</th>
+              <th>MOTIVO</th>
+              <th>USO</th>
+              <th>ACCIONES</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pageData.length === 0
+              ? '<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">&#128279;</div><h3>Sin asignaciones</h3><p>No hay asignaciones de repuestos registradas</p></div></td></tr>'
+              : pageData.map(a => {
+                  const cat = (a.categoria || '').toUpperCase();
+                  const isPend = a.estado === 'PEND. RETORNO';
+                  const mClass = a.motivo === 'AMPLIACION' ? 'ampliacion' : a.motivo === 'REEMPLAZO' ? 'reemplazo' : 'repliegue';
+                  const eClass = a.estado === 'VIGENTE' ? 'vigente' : isPend ? 'pend-retorno' : 'revertida';
+
+                  let actions = '<button class="btn-icon" title="Ver detalle" onclick="_verDetalleAsigRep(' + a.id + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;font-size:10px">&#128196;</button>';
+                  if (isPend) {
+                    actions += '<button class="btn btn-sm" onclick="_confirmarRetornoAsigRep(' + a.id + ')" style="font-size:11px;padding:4px 10px;background:#fefce8;border:1px solid #fde68a;color:#92400e;cursor:pointer;font-weight:600">&#8617; Confirmar</button>';
+                  }
+                  if (a.estado === 'VIGENTE') {
+                    actions += '<button class="btn-icon" title="Revertir" onclick="_revertirAsigRep(' + a.id + ')" style="background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;font-size:10px">&#8634;</button>';
+                  }
+
+                  return '<tr class="' + (isPend ? 'ar-row-pend' : '') + '">'
+                    + '<td style="font-size:12px;font-weight:600;color:var(--accent)">' + a.id + '</td>'
+                    + '<td style="font-size:11px;white-space:nowrap">' + (a.fecha ? formatDate(a.fecha) : '&mdash;') + '</td>'
+                    + '<td><span class="rep-badge-cat ' + (cat==='PARTE'?'parte':'comp') + '">' + (cat==='PARTE'?'&#128295; PARTE':'&#9881;&#65039; COMP') + '</span></td>'
+                    + '<td><div class="ar-rep-desc"><span class="ar-rep-name">' + esc(a.repuestoTipo || '') + '</span><span class="ar-rep-detail">' + esc(a.repuestoDesc || '') + '</span></div></td>'
+                    + '<td style="font-size:11px;font-family:monospace;color:#475569">' + esc(a.serie || '&mdash;') + '</td>'
+                    + '<td><span class="ar-motivo-badge ' + mClass + '">' + (a.motivo==='AMPLIACION'?'+ AMPLIACI&Oacute;N':a.motivo==='REEMPLAZO'?'&#128260; REEMPLAZO':'&#128230; REPLIEGUE') + '</span></td>'
+                    + '<td><span class="ar-estado-badge ' + eClass + '">' + esc(a.estado) + '</span></td>'
+                    + '<td><div class="action-btns">' + actions + '</div></td>'
+                    + '</tr>';
+                }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="rep-pagination">
+      <span>${start+1}&ndash;${Math.min(start+_AR_PAGE_SIZE,total)} de ${total} asignaciones</span>
+      <div class="rep-pages">${pageButtons}</div>
+    </div>
+  `;
+}
+
+/* ── Nueva Asignacion Modal ── */
+let _arModalRepId = null;
+let _arModalActivoId = null;
+let _arModalMotivo = '';
+
+function _openNuevaAsigRepModal() {
+  _arModalRepId = null;
+  _arModalActivoId = null;
+  _arModalMotivo = '';
+
+  const repuestos = DB.get('repuestos').filter(r => (r.estadoDisp || 'DISPONIBLE') === 'DISPONIBLE');
+  const activos = DB.get('activos').filter(a => a.estado === 'Asignado' || a.estado === 'Disponible');
+
+  openModal('Nueva Asignaci&oacute;n de Repuesto', `
+    <div id="arModalBody">
+      <div class="form-grid-3">
+        <div class="form-group">
+          <label>Fecha</label>
+          <input type="date" class="form-control" id="fArFecha" value="${today()}">
+        </div>
+        <div class="form-group">
+          <label>Ticket <span class="required">*</span></label>
+          <input class="form-control" id="fArTicket" placeholder="N&uacute;mero de ticket">
+        </div>
+        <div class="form-group">
+          <label>Motivo <span class="required">*</span></label>
+          <select class="form-control" id="fArMotivo" onchange="_arModalMotivo=this.value">
+            <option value="">Seleccionar...</option>
+            <option value="AMPLIACION">Ampliaci&oacute;n</option>
+            <option value="REEMPLAZO">Reemplazo</option>
+            <option value="REPLIEGUE">Repliegue</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-grid-3" style="margin-top:16px">
+        <div class="form-group">
+          <label>Activo destino <span class="required">*</span></label>
+          <select class="form-control" id="fArActivo" onchange="_arModalActivoId=parseInt(this.value)||null">
+            <option value="">Seleccionar activo...</option>
+            ${activos.map(a => '<option value="'+a.id+'">'+esc(a.codigo)+' - '+esc(a.marca)+' '+esc(a.modelo)+'</option>').join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Repuesto a asignar <span class="required">*</span></label>
+          <select class="form-control" id="fArRepuesto" onchange="_arModalRepId=parseInt(this.value)||null">
+            <option value="">Seleccionar repuesto...</option>
+            ${repuestos.map(r => '<option value="'+r.id+'">'+esc(r.codigo)+' - '+esc(r.tipo||r.equipo)+' '+esc(r.marca)+' '+esc(r.modelo)+(r.capacidad?' '+esc(r.capacidad):'')+'</option>').join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Observaciones</label>
+          <input class="form-control" id="fArObs" placeholder="Opcional">
+        </div>
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="_saveAsigRep()">&#128190; Registrar Asignaci&oacute;n</button>
+  `, 'modal-lg');
+}
+
+function _saveAsigRep() {
+  const ticket = (document.getElementById('fArTicket')||{}).value.trim();
+  const motivo = (document.getElementById('fArMotivo')||{}).value;
+  const activoId = _arModalActivoId;
+  const repId = _arModalRepId;
+  const fecha = (document.getElementById('fArFecha')||{}).value || today();
+  const obs = (document.getElementById('fArObs')||{}).value.trim();
+
+  if (!ticket) { showToast('El ticket es obligatorio', 'error'); return; }
+  if (!motivo) { showToast('Selecciona un motivo', 'error'); return; }
+  if (!activoId) { showToast('Selecciona un activo destino', 'error'); return; }
+  if (!repId) { showToast('Selecciona un repuesto', 'error'); return; }
+
+  const repuestos = DB.get('repuestos');
+  const rep = repuestos.find(r => r.id === repId);
+  if (!rep) { showToast('Repuesto no encontrado', 'error'); return; }
+
+  const activos = DB.get('activos');
+  const activo = activos.find(a => a.id === activoId);
+  if (!activo) { showToast('Activo no encontrado', 'error'); return; }
+
+  const asigs = DB.get('asignacionesRep');
+  const newId = nextId(asigs);
+
+  const repDesc = [rep.marca, rep.modelo, rep.capacidad].filter(Boolean).join(' ');
+  let estado = 'VIGENTE';
+  if (motivo === 'REPLIEGUE') estado = 'VIGENTE';
+
+  asigs.push({
+    id: newId,
+    fecha,
+    ticket: ticket.toUpperCase(),
+    motivo,
+    activoId,
+    activoCodigo: activo.codigo,
+    repuestoId: rep.id,
+    repuestoCodigo: rep.codigo,
+    categoria: rep.categoria || 'COMPONENTE',
+    repuestoTipo: rep.tipo || rep.equipo || '',
+    repuestoDesc: repDesc,
+    serie: rep.serie || '',
+    estado,
+    observaciones: obs
+  });
+  DB.set('asignacionesRep', asigs);
+
+  // Update repuesto status
+  const rIdx = repuestos.findIndex(r => r.id === repId);
+  if (rIdx >= 0) {
+    if (motivo === 'REPLIEGUE') {
+      repuestos[rIdx].estadoDisp = 'PENDIENTE_RETORNO';
+      repuestos[rIdx].activoAsignadoId = activoId;
+    } else {
+      repuestos[rIdx].estadoDisp = 'ASIGNADO';
+      repuestos[rIdx].activoAsignadoId = activoId;
+    }
+    DB.set('repuestos', repuestos);
+  }
+
+  addMovimiento('ASIGNACION REPUESTO', rep.codigo + ' (' + (rep.tipo||rep.equipo) + ' ' + repDesc + ') -> ' + activo.codigo + ' | Motivo: ' + motivo + ' | Ticket: ' + ticket);
+  closeModal();
+  showToast('Asignacion registrada');
+  renderAsignacionRepuestos(document.getElementById('contentArea'));
+}
+
+/* ── Ver Detalle ── */
+function _verDetalleAsigRep(id) {
+  const asigs = DB.get('asignacionesRep');
+  const a = asigs.find(x => x.id === id);
+  if (!a) return;
+
+  const mClass = a.motivo === 'AMPLIACION' ? 'ampliacion' : a.motivo === 'REEMPLAZO' ? 'reemplazo' : 'repliegue';
+  const eClass = a.estado === 'VIGENTE' ? 'vigente' : a.estado === 'PEND. RETORNO' ? 'pend-retorno' : 'revertida';
+
+  openModal('Detalle Asignaci&oacute;n #' + a.id, `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <div><strong>Fecha:</strong> ${a.fecha ? formatDate(a.fecha) : '&mdash;'}</div>
+      <div><strong>Ticket:</strong> ${esc(a.ticket || '')}</div>
+      <div><strong>Motivo:</strong> <span class="ar-motivo-badge ${mClass}">${esc(a.motivo)}</span></div>
+      <div><strong>Estado:</strong> <span class="ar-estado-badge ${eClass}">${esc(a.estado)}</span></div>
+      <div><strong>Activo:</strong> ${esc(a.activoCodigo || '')}</div>
+      <div><strong>Categor&iacute;a:</strong> ${esc(a.categoria || '')}</div>
+    </div>
+    <div style="background:#f8fafc;border-radius:var(--radius);padding:16px;margin-bottom:16px">
+      <div style="font-weight:700;margin-bottom:8px">Repuesto</div>
+      <div><strong>C&oacute;digo:</strong> ${esc(a.repuestoCodigo || '')}</div>
+      <div><strong>Tipo:</strong> ${esc(a.repuestoTipo || '')}</div>
+      <div><strong>Detalle:</strong> ${esc(a.repuestoDesc || '')}</div>
+      <div><strong>Serie:</strong> ${esc(a.serie || '')}</div>
+    </div>
+    ${a.observaciones ? '<div><strong>Observaciones:</strong> ' + esc(a.observaciones) + '</div>' : ''}
+  `, '<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>');
+}
+
+/* ── Confirmar Retorno ── */
+function _confirmarRetornoAsigRep(id) {
+  const asigs = DB.get('asignacionesRep');
+  const a = asigs.find(x => x.id === id);
+  if (!a || a.estado !== 'PEND. RETORNO') return;
+
+  // Open the repuesto's confirmar retorno modal
+  const rep = DB.get('repuestos').find(r => r.id === a.repuestoId);
+  if (rep) {
+    _openConfirmarRetorno(rep.id);
+    // After confirming retorno on the repuesto, also update asig status
+    const origConfirm = window._confirmarRetorno;
+    // We'll update asig status via a post-action
+  }
+}
+
+/* ── Revertir ── */
+function _revertirAsigRep(id) {
+  if (!confirm('Revertir esta asignacion? El repuesto volvera a estar disponible.')) return;
+  const asigs = DB.get('asignacionesRep');
+  const idx = asigs.findIndex(x => x.id === id);
+  if (idx < 0) return;
+  const a = asigs[idx];
+
+  asigs[idx].estado = 'REVERTIDA';
+  DB.set('asignacionesRep', asigs);
+
+  // Return repuesto to disponible
+  const repuestos = DB.get('repuestos');
+  const rIdx = repuestos.findIndex(r => r.id === a.repuestoId);
+  if (rIdx >= 0) {
+    repuestos[rIdx].estadoDisp = 'DISPONIBLE';
+    repuestos[rIdx].activoAsignadoId = null;
+    DB.set('repuestos', repuestos);
+  }
+
+  addMovimiento('REVERSION REPUESTO', a.repuestoCodigo + ' revertido de ' + a.activoCodigo + ' | Ticket original: ' + a.ticket);
+  showToast('Asignacion revertida');
+  renderAsignacionRepuestos(document.getElementById('contentArea'));
+}
+
+/* ── Export ── */
+function _exportAsigRep() {
+  const items = DB.get('asignacionesRep');
+  if (items.length === 0) { showToast('No hay asignaciones para exportar', 'error'); return; }
+  const headers = ['ID','FECHA','TICKET','MOTIVO','ACTIVO','CATEGORIA','REPUESTO_CODIGO','REPUESTO_TIPO','REPUESTO_DETALLE','SERIE','ESTADO','OBSERVACIONES'];
+  const rows = items.map(a => [a.id, a.fecha||'', a.ticket||'', a.motivo||'', a.activoCodigo||'', a.categoria||'', a.repuestoCodigo||'', a.repuestoTipo||'', a.repuestoDesc||'', a.serie||'', a.estado||'', a.observaciones||'']);
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Asignaciones Repuestos');
+  XLSX.writeFile(wb, 'Asignaciones_Repuestos.xlsx');
+  showToast('Exportado correctamente');
 }
 
 /* ═══════════════════════════════════════════════════════
