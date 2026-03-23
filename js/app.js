@@ -1,118 +1,163 @@
 /* ═══════════════════════════════════════════════════════
-   DATA LAYER - LocalStorage
+   DATA LAYER - IndexedDB con caché en memoria
+   Soporta cientos de MB (20K+ activos, 3K+ colaboradores)
+   API síncrona compatible: DB.get(), DB.set(), DB.getConfig(), DB.setConfig()
    ═══════════════════════════════════════════════════════ */
-const DB = {
-  get(key) {
-    try {
-      return JSON.parse(localStorage.getItem('ati_' + key)) || [];
-    } catch {
-      return [];
-    }
-  },
-  set(key, data) {
-    localStorage.setItem('ati_' + key, JSON.stringify(data));
-  },
-  getConfig(key, def) {
-    try {
-      return JSON.parse(localStorage.getItem('ati_cfg_' + key)) || def;
-    } catch {
-      return def;
-    }
-  },
-  setConfig(key, val) {
-    localStorage.setItem('ati_cfg_' + key, JSON.stringify(val));
+const DB = (() => {
+  const DBNAME = 'ati_cmddb';
+  const DBVER = 1;
+  const STORE = 'data';
+  const _cache = {};         // caché en memoria para lecturas síncronas
+  let _idb = null;           // referencia a la BD IndexedDB
+  let _ready = false;        // indica si ya cargó todo el caché
+
+  // Abrir/crear la BD IndexedDB
+  function _openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DBNAME, DBVER);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE)) {
+          db.createObjectStore(STORE);
+        }
+      };
+      req.onsuccess = (e) => { _idb = e.target.result; resolve(_idb); };
+      req.onerror = (e) => { console.error('IndexedDB error:', e); reject(e); };
+    });
   }
+
+  // Cargar TODOS los datos de IndexedDB al caché en memoria
+  function _loadAllToCache() {
+    return new Promise((resolve, reject) => {
+      const tx = _idb.transaction(STORE, 'readonly');
+      const store = tx.objectStore(STORE);
+      const req = store.getAll();
+      const reqKeys = store.getAllKeys();
+      let keys = [], vals = [];
+      reqKeys.onsuccess = () => { keys = reqKeys.result; };
+      req.onsuccess = () => {
+        vals = req.result;
+        keys.forEach((k, i) => { _cache[k] = vals[i]; });
+        _ready = true;
+        resolve();
+      };
+      req.onerror = (e) => reject(e);
+    });
+  }
+
+  // Migrar datos existentes de localStorage a IndexedDB (una sola vez)
+  function _migrateFromLocalStorage() {
+    return new Promise((resolve) => {
+      const keysToMigrate = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith('ati_') || k.startsWith('ati_cfg_'))) {
+          keysToMigrate.push(k);
+        }
+      }
+      if (keysToMigrate.length === 0) { resolve(false); return; }
+
+      const tx = _idb.transaction(STORE, 'readwrite');
+      const store = tx.objectStore(STORE);
+      keysToMigrate.forEach(k => {
+        try {
+          const val = JSON.parse(localStorage.getItem(k));
+          store.put(val, k);
+          _cache[k] = val;
+        } catch { /* ignorar claves corruptas */ }
+      });
+      tx.oncomplete = () => {
+        // Limpiar localStorage después de migrar exitosamente
+        keysToMigrate.forEach(k => localStorage.removeItem(k));
+        console.log(`✅ Migración completada: ${keysToMigrate.length} claves migradas de localStorage a IndexedDB`);
+        resolve(true);
+      };
+      tx.onerror = () => resolve(false);
+    });
+  }
+
+  // Escribir en IndexedDB en segundo plano (no bloquea)
+  function _persist(key, val) {
+    if (!_idb) return;
+    try {
+      const tx = _idb.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(val, key);
+    } catch (e) { console.error('DB persist error:', key, e); }
+  }
+
+  // Eliminar una clave de IndexedDB
+  function _remove(key) {
+    if (!_idb) return;
+    try {
+      const tx = _idb.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).delete(key);
+    } catch (e) { console.error('DB remove error:', key, e); }
+  }
+
+  // Inicialización async — se llama antes de arrancar la app
+  async function init() {
+    await _openDB();
+    await _migrateFromLocalStorage();
+    await _loadAllToCache();
+    console.log('✅ IndexedDB lista — claves en caché:', Object.keys(_cache).length);
+  }
+
+  return {
+    init,
+    isReady() { return _ready; },
+
+    get(key) {
+      const v = _cache['ati_' + key];
+      return Array.isArray(v) ? v : (v ? v : []);
+    },
+    set(key, data) {
+      _cache['ati_' + key] = data;
+      _persist('ati_' + key, data);
+    },
+    getConfig(key, def) {
+      const v = _cache['ati_cfg_' + key];
+      return v !== undefined ? v : def;
+    },
+    setConfig(key, val) {
+      _cache['ati_cfg_' + key] = val;
+      _persist('ati_cfg_' + key, val);
+    },
+    remove(key) {
+      delete _cache['ati_' + key];
+      _remove('ati_' + key);
+    },
+    removeConfig(key) {
+      delete _cache['ati_cfg_' + key];
+      _remove('ati_cfg_' + key);
+    }
+  };
+})();
+
+/* ═══════════════════════════════════════════════════════
+   JERARQUÍA: Estado CMDB → Estado Equipo (sub-estado)
+   ═══════════════════════════════════════════════════════ */
+const ESTADO_EQUIPO_MAP = {
+  'DISPONIBLE':    ['NUEVO', 'USADO'],
+  'ASIGNADO':      ['NUEVO', 'USADO'],
+  'MANTENIMIENTO': ['REPARACIÓN', 'GARANTÍA'],
+  'BAJA':          ['DESTRUCCIÓN', 'DONACIÓN', 'VENTA']
 };
+// Lista plana de todos los sub-estados válidos
+const ALL_ESTADOS_EQUIPO = Object.values(ESTADO_EQUIPO_MAP).flat();
 
 /* ═══════════════════════════════════════════════════════
    INITIALIZE SAMPLE DATA
    ═══════════════════════════════════════════════════════ */
 function initSampleData() {
-  if (DB.get('activos').length === 0) {
-    const activos = [
-      {
-        id: 1, codigo: 'ATI-00001', tipo: 'LAPTOP', equipo: 'LAPTOP', marca: 'DELL',
-        modelo: 'LATITUDE 5540', serie: 'SN1234567890', invEntel: 'INV10001',
-        gama: 'GAMA A', estado: 'Disponible', estadoEquipo: 'NUEVO',
-        disco: '512 GB', memoria: '16', ubicacion: 'Almacén San Borja',
-        ubicacionAlmacen: 'GABINETE 1', fechaCompra: '2024-01-15',
-        fechaIngreso: '2024-02-01', casoPedidoIngreso: 'PEDIDO 500001',
-        origenEquipo: 'PROPIO', fechaSalida: '', casoPedidoSalida: '',
-        destinoEquipo: '', responsableActivos: '', responsable: '',
-        observaciones: '', valor: 4500
-      },
-      {
-        id: 2, codigo: 'ATI-00002', tipo: 'MONITOR', equipo: 'MONITOR', marca: 'HP',
-        modelo: 'E24 G5', serie: 'SN0987654321', invEntel: 'INV10002',
-        gama: 'GAMA B', estado: 'Disponible', estadoEquipo: 'NUEVO',
-        disco: '', memoria: '', ubicacion: 'Almacén San Borja',
-        ubicacionAlmacen: 'ESTANTE A', fechaCompra: '2024-03-10',
-        fechaIngreso: '2024-03-20', casoPedidoIngreso: 'PEDIDO 500002',
-        origenEquipo: 'PROPIO', fechaSalida: '', casoPedidoSalida: '',
-        destinoEquipo: '', responsableActivos: '', responsable: '',
-        observaciones: '', valor: 1200
-      }
-    ];
-    DB.set('activos', activos);
-  }
+  if (DB.get('activos').length === 0) DB.set('activos', []);
 
   if (!DB.get('sitiosMoviles') || !Array.isArray(DB.get('sitiosMoviles'))) DB.set('sitiosMoviles', []);
   if (!DB.get('repuestos') || !Array.isArray(DB.get('repuestos'))) DB.set('repuestos', []);
   if (!DB.get('asignacionesRep') || !Array.isArray(DB.get('asignacionesRep'))) DB.set('asignacionesRep', []);
 
-  if (DB.get('colaboradores').length === 0) {
-    const nombres = [
-      'Juan Pérez', 'María García', 'Carlos López', 'Ana Martínez',
-      'Luis Rodríguez', 'Carmen Sánchez', 'Pedro Díaz', 'Laura Torres',
-      'José Ramírez', 'Sofía Flores', 'Diego Vargas', 'Valentina Rojas',
-      'Andrés Silva', 'Camila Morales', 'Fernando Castro'
-    ];
-    const areas = ['TI', 'Finanzas', 'RRHH', 'Operaciones', 'Comercial', 'Legal'];
-    const cargos = ['Analista', 'Coordinador', 'Jefe', 'Gerente', 'Asistente', 'Especialista'];
-    const perfiles = ['Empleado', 'Practicante', 'Externo', 'Intermediario'];
-    const sedesColab = ['Sede Central', 'Sede San Isidro', 'Sede Miraflores', 'Sede San Borja', 'Sede La Molina'];
-    const tiposPuesto = ['Presencial', 'Remoto', 'Híbrido'];
-    const colabs = nombres.map((n, i) => ({
-      id: i + 1,
-      nombre: n,
-      dni: String(10000000 + Math.floor(Math.random() * 89999999)),
-      perfil: perfiles[Math.floor(Math.random() * perfiles.length)],
-      area: areas[Math.floor(Math.random() * areas.length)],
-      cargo: cargos[Math.floor(Math.random() * cargos.length)],
-      ubicacion: sedesColab[Math.floor(Math.random() * sedesColab.length)],
-      tipoPuesto: tiposPuesto[Math.floor(Math.random() * tiposPuesto.length)],
-      telefono: '9' + String(10000000 + Math.floor(Math.random() * 89999999)),
-      email: n.toLowerCase().replace(/ /g, '.').normalize("NFD").replace(/[\u0300-\u036f]/g, "") + '@empresa.com',
-      estado: Math.random() > 0.15 ? 'Activo' : 'Cesado',
-      fechaIngreso: new Date(2020 + Math.floor(Math.random() * 4), Math.floor(Math.random() * 12), Math.floor(Math.random() * 28) + 1).toISOString().split('T')[0]
-    }));
-    DB.set('colaboradores', colabs);
-  }
-
-  if (DB.get('asignaciones').length === 0) {
-    const activos = DB.get('activos').filter(a => a.estado === 'Asignado');
-    const colabs = DB.get('colaboradores').filter(c => c.estado === 'Activo');
-    const asig = [];
-    activos.forEach((a, i) => {
-      if (colabs.length > 0) {
-        const c = colabs[i % colabs.length];
-        asig.push({
-          id: i + 1,
-          activoId: a.id,
-          activoCodigo: a.codigo,
-          activoTipo: a.tipo,
-          activoMarca: a.marca,
-          colaboradorId: c.id,
-          colaboradorNombre: _fullName(c),
-          area: c.area,
-          fechaAsignacion: a.fechaIngreso,
-          estado: 'Vigente',
-          observaciones: ''
-        });
-      }
-    });
-    DB.set('asignaciones', asig);
-  }
+  // Inicializar colecciones vacías si no existen
+  if (DB.get('colaboradores').length === 0) DB.set('colaboradores', []);
+  if (DB.get('asignaciones').length === 0) DB.set('asignaciones', []);
 
   if (DB.get('movimientos').length === 0) DB.set('movimientos', []);
   if (DB.get('bajasPendientes').length === 0) DB.set('bajasPendientes', []);
@@ -151,13 +196,13 @@ function initSampleData() {
   if (!DB.getConfig('estados', null))
     DB.setConfig('estados', ['Disponible', 'Asignado', 'Mantenimiento', 'Dado de Baja']);
   if (!DB.getConfig('ubicaciones', null))
-    DB.setConfig('ubicaciones', ['ALMACÉN SAN BORJA', 'ALMACÉN NORTE', 'ALMACÉN SUR', 'ALMACÉN CENTRAL', 'DATA CENTER', 'ALMACEN TI PR']);
+    DB.setConfig('ubicaciones', ['CO SAN BORJA', 'PLAZA REPUBLICA']);
   if (!DB.getConfig('areas', null))
     DB.setConfig('areas', ['TI', 'FINANZAS', 'RRHH', 'OPERACIONES', 'COMERCIAL', 'LEGAL']);
   if (!DB.getConfig('gamas', null))
     DB.setConfig('gamas', ['GAMA A', 'GAMA B', 'GAMA C', 'GAMA D']);
   if (!DB.getConfig('estadosEquipo', null))
-    DB.setConfig('estadosEquipo', ['NUEVO', 'BUENO', 'REGULAR', 'MALO', 'OBSOLETO']);
+    DB.setConfig('estadosEquipo', ['NUEVO', 'USADO', 'REPARACIÓN', 'GARANTÍA', 'DESTRUCCIÓN', 'DONACIÓN', 'VENTA']);
   if (!DB.getConfig('origenes', null))
     DB.setConfig('origenes', ['PROPIO', 'ALQUILADO', 'TERCERO']);
   if (!DB.getConfig('tipoDocumento', null))
@@ -293,7 +338,7 @@ function _migrateConfigToUpper() {
   if (gestorChanged) DB.set('gestores', gestores);
 }
 
-initSampleData();
+// initSampleData se llama después de DB.init() en DOMContentLoaded
 
 /* ═══════════════════════════════════════════════════════
    AUTHENTICATION / LOGIN
@@ -1391,7 +1436,7 @@ function _renderIngresoTable() {
               : pagSlice(filtered, 'ingreso').map(a => {
                   const stock = (a.series || []).length;
                   const eqBadge = a.estadoEquipo
-                    ? `<span class="badge ${a.estadoEquipo === 'NUEVO' ? 'badge-success' : a.estadoEquipo === 'BUENO' ? 'badge-info' : a.estadoEquipo === 'REGULAR' ? 'badge-warning' : 'badge-danger'}" style="font-size:10px">${esc(a.estadoEquipo)}</span>`
+                    ? `<span class="badge ${['NUEVO'].includes(a.estadoEquipo) ? 'badge-success' : ['USADO'].includes(a.estadoEquipo) ? 'badge-info' : ['REPARACIÓN','GARANTÍA'].includes(a.estadoEquipo) ? 'badge-warning' : 'badge-danger'}" style="font-size:10px">${esc(a.estadoEquipo)}</span>`
                     : '—';
                   const guiaText = a.nDocumento ? `${esc(a.nDocumento)}` : '—';
                   return `
@@ -1436,7 +1481,9 @@ function openActivoModal(id) {
   const marcas     = DB.getConfig('marcas', []);
   const ubicaciones = DB.getConfig('ubicaciones', []);
   const gamas      = DB.getConfig('gamas', []);
-  const estadosEquipo = DB.getConfig('estadosEquipo', []);
+  // Al registrar/editar, el estado equipo depende del estado CMDB del activo
+  const _estadoCMDB = (a?.estado || 'Disponible').toUpperCase();
+  const estadosEquipo = ESTADO_EQUIPO_MAP[_estadoCMDB] || ESTADO_EQUIPO_MAP['DISPONIBLE'];
   const origenes   = DB.getConfig('origenes', []);
   const tiposDoc   = DB.getConfig('tipoDocumento', []);
   const sistemasOS = DB.getConfig('sistemasOS', []);
@@ -1797,7 +1844,7 @@ function procesarExcel(file) {
       const dateFields = ['fechaIngreso', 'adendaFechaInicio', 'adendaFechaFin'];
       // Valores válidos desde configuración (case-insensitive)
       const _vTipos     = DB.getConfig('tipos', []).map(v => v.toUpperCase());
-      const _vEstadosEq = DB.getConfig('estadosEquipo', []).map(v => v.toUpperCase());
+      const _vEstadosEq = ALL_ESTADOS_EQUIPO;
       const _vOrigenes  = DB.getConfig('origenes', []).map(v => v.toUpperCase());
       const _vUbicaciones = DB.getConfig('ubicaciones', []).map(v => v.toUpperCase());
 
@@ -1824,8 +1871,11 @@ function procesarExcel(file) {
         // Validar valores contra catálogos
         if (mapped.tipo && _vTipos.length && !_vTipos.includes(mapped.tipo.toUpperCase()))
           fieldErrors.tipo = 'No existe en catálogo';
-        if (mapped.estadoEquipo && _vEstadosEq.length && !_vEstadosEq.includes(mapped.estadoEquipo.toUpperCase()))
-          fieldErrors.estadoEquipo = 'No existe en catálogo';
+        if (mapped.estadoEquipo) {
+          const _validForDisp = ESTADO_EQUIPO_MAP['DISPONIBLE'] || [];
+          if (!_validForDisp.includes(mapped.estadoEquipo.toUpperCase()))
+            fieldErrors.estadoEquipo = 'Solo válido: ' + _validForDisp.join(', ');
+        }
         if (mapped.origenEquipo && _vOrigenes.length && !_vOrigenes.includes(mapped.origenEquipo.toUpperCase()))
           fieldErrors.origenEquipo = 'No existe en catálogo';
         if (mapped.ubicacion && _vUbicaciones.length && !_vUbicaciones.includes(mapped.ubicacion.toUpperCase()))
@@ -4586,6 +4636,23 @@ function procesarExcelColab(file) {
       }
 
       const perfilesValidos = ['EMPLEADO', 'PRACTICANTE', 'EXTERNO', 'INTERMEDIARIO'];
+      // DNIs existentes en BD
+      const _existingDNIs = new Set(DB.get('colaboradores').map(c => (c.dni || '').toUpperCase().trim()).filter(Boolean));
+      // DNIs de sitios móviles
+      const _sitiosDNIs = new Set(DB.get('sitiosMoviles').map(s => (s.dni || '').toUpperCase().trim()).filter(Boolean));
+      // DNIs en el propio Excel (para detectar duplicados internos)
+      const _excelDNIs = {};
+
+      // Primera pasada: contar DNIs en el excel
+      rows.forEach((row, i) => {
+        const rowKeys = Object.keys(row);
+        const dniCol = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === 'DNI') || 'DNI';
+        const dniVal = String(row[dniCol] || '').trim().toUpperCase();
+        if (dniVal) {
+          if (!_excelDNIs[dniVal]) _excelDNIs[dniVal] = [];
+          _excelDNIs[dniVal].push(i);
+        }
+      });
 
       _cargaMasivaColabData = rows.map((row, i) => {
         const mapped = {};
@@ -4614,13 +4681,23 @@ function procesarExcelColab(file) {
         mapped.ubicacion = mapped.ubicacionFisica || mapped.ubicacion || '';
         mapped.tipoPuesto = mapped.puesto || mapped.tipoPuesto || '';
 
-        const errors = [];
-        if (!mapped.nombre) errors.push('NOMBRE');
-        if (!mapped.apellido) errors.push('APELLIDO');
-        if (!mapped.dni) errors.push('DNI');
-        if (!mapped.modalidadContratacion) errors.push('MODALIDAD CONTRATACIÓN');
-        else if (!perfilesValidos.includes(mapped.modalidadContratacion)) errors.push('MODALIDAD CONTRATACIÓN (valor inválido)');
-        return { ...mapped, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
+        // Validación detallada por campo
+        const fieldErrors = {};
+        if (!mapped.nombre) fieldErrors.nombre = 'Vacío';
+        if (!mapped.apellido) fieldErrors.apellido = 'Vacío';
+        if (!mapped.dni) fieldErrors.dni = 'Vacío';
+        else {
+          const dniUp = mapped.dni.toUpperCase().trim();
+          if (_existingDNIs.has(dniUp)) fieldErrors.dni = 'Ya existe en BD';
+          else if (_sitiosDNIs.has(dniUp)) fieldErrors.dni = 'Duplicado en Sitios Móviles';
+          else if (_excelDNIs[dniUp] && _excelDNIs[dniUp].length > 1) fieldErrors.dni = 'Duplicado en Excel';
+        }
+        if (!mapped.modalidadContratacion) fieldErrors.modalidadContratacion = 'Vacío';
+        else if (!perfilesValidos.includes(mapped.modalidadContratacion)) fieldErrors.modalidadContratacion = 'Valor inválido (use: ' + perfilesValidos.join(', ') + ')';
+        if (mapped.fechaIngreso && !/^\d{4}-\d{2}-\d{2}$/.test(mapped.fechaIngreso)) fieldErrors.fechaIngreso = 'Formato fecha inválido';
+
+        const errors = Object.keys(fieldErrors).map(k => k + ': ' + fieldErrors[k]);
+        return { ...mapped, _row: i + 2, _errors: errors, _fieldErrors: fieldErrors, _valid: errors.length === 0 };
       });
 
       _cargaMasivaColabPage = 1;
@@ -4632,6 +4709,8 @@ function procesarExcelColab(file) {
   reader.readAsArrayBuffer(file);
 }
 
+let _cmpShowOnlyErrors = false;
+
 function _renderCargaMasivaColabPreview() {
   const container = document.getElementById('cmpContainer');
   if (!container) return;
@@ -4640,10 +4719,14 @@ function _renderCargaMasivaColabPreview() {
   const validos = _cargaMasivaColabData.filter(r => r._valid).length;
   const errores = total - validos;
 
-  const tp = Math.max(1, Math.ceil(total / _CMP_PAGE_SIZE));
+  // Filtrar datos según toggle
+  const filteredData = _cmpShowOnlyErrors ? _cargaMasivaColabData.filter(r => !r._valid) : _cargaMasivaColabData;
+  const filteredTotal = filteredData.length;
+
+  const tp = Math.max(1, Math.ceil(filteredTotal / _CMP_PAGE_SIZE));
   if (_cargaMasivaColabPage > tp) _cargaMasivaColabPage = tp;
   const start = (_cargaMasivaColabPage - 1) * _CMP_PAGE_SIZE;
-  const pageData = _cargaMasivaColabData.slice(start, start + _CMP_PAGE_SIZE);
+  const pageData = filteredData.slice(start, start + _CMP_PAGE_SIZE);
 
   container.innerHTML = `
     <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">
@@ -4651,9 +4734,9 @@ function _renderCargaMasivaColabPreview() {
         <div style="font-size:22px;font-weight:700;color:#16a34a">${validos}</div>
         <div style="font-size:11px;color:#15803d">Válidos</div>
       </div>
-      <div style="flex:1;min-width:100px;padding:10px 14px;background:${errores > 0 ? '#fef2f2' : '#f8fafc'};border-radius:8px;text-align:center">
+      <div style="flex:1;min-width:100px;padding:10px 14px;background:${errores > 0 ? '#fef2f2' : '#f8fafc'};border-radius:8px;text-align:center;cursor:${errores > 0 ? 'pointer' : 'default'}" ${errores > 0 ? 'onclick="_cmpShowOnlyErrors=!_cmpShowOnlyErrors;_cargaMasivaColabPage=1;_renderCargaMasivaColabPreview()"' : ''}>
         <div style="font-size:22px;font-weight:700;color:${errores > 0 ? '#dc2626' : '#94a3b8'}">${errores}</div>
-        <div style="font-size:11px;color:${errores > 0 ? '#b91c1c' : '#64748b'}">Con errores</div>
+        <div style="font-size:11px;color:${errores > 0 ? '#b91c1c' : '#64748b'}">Con errores ${_cmpShowOnlyErrors ? '(filtrado)' : ''}</div>
       </div>
       <div style="flex:1;min-width:100px;padding:10px 14px;background:#f8fafc;border-radius:8px;text-align:center">
         <div style="font-size:22px;font-weight:700;color:#334155">${total}</div>
@@ -4661,13 +4744,18 @@ function _renderCargaMasivaColabPreview() {
       </div>
     </div>
 
-    ${errores > 0 ? '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b">⚠️ Las filas con error (campos obligatorios: NOMBRE, APELLIDO, DNI, MODALIDAD CONTRATACIÓN) no se importarán.</div>' : ''}
+    ${errores > 0 ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b;display:flex;align-items:center;justify-content:space-between">
+      <span>⚠️ <strong>${errores} fila(s) con error</strong> no se importarán.</span>
+      <button class="btn btn-sm" onclick="_cmpShowOnlyErrors=!_cmpShowOnlyErrors;_cargaMasivaColabPage=1;_renderCargaMasivaColabPreview()" style="font-size:11px;padding:3px 10px;background:${_cmpShowOnlyErrors ? '#dc2626' : '#fff'};color:${_cmpShowOnlyErrors ? '#fff' : '#dc2626'};border:1px solid #dc2626;border-radius:4px;cursor:pointer">${_cmpShowOnlyErrors ? '📋 Ver todos' : '⚠ Ver solo errores'}</button>
+    </div>` : ''}
 
     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px">
       <table style="width:100%;font-size:12px">
         <thead>
           <tr>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">#</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">✓</th>
+            <th style="padding:8px 6px;font-size:11px;background:#fef2f2;color:#991b1b;min-width:220px">ERROR</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Nombre *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Apellido *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">DNI *</th>
@@ -4676,33 +4764,34 @@ function _renderCargaMasivaColabPreview() {
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Área</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Ubic. Física</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Puesto</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Estado</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary);text-align:center">✓</th>
           </tr>
         </thead>
         <tbody>
-          ${pageData.map(r => `
+          ${pageData.map(r => {
+            const fe = r._fieldErrors || {};
+            const _cs = (field) => fe[field] ? 'background:#fef2f2;color:#dc2626;font-weight:600' : '';
+            return `
             <tr style="${r._valid ? '' : 'background:#fef2f2'}">
               <td style="padding:6px;color:var(--text-light)">${r._row}</td>
-              <td style="padding:6px;${!r.nombre ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.nombre || '⚠ vacío')}</td>
-              <td style="padding:6px;${!r.apellido ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.apellido || '⚠ vacío')}</td>
-              <td style="padding:6px;font-family:monospace;${!r.dni ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.dni || '⚠ vacío')}</td>
+              <td style="padding:6px;text-align:center">${r._valid ? '<span style="color:#16a34a;font-weight:700">✓</span>' : '<span style="color:#dc2626;font-weight:700">✗</span>'}</td>
+              <td style="padding:6px;font-size:10px;color:#dc2626;font-weight:${r._errors.length ? '600' : 'normal'}">${r._errors.length > 0 ? r._errors.map(e => esc(e)).join(' | ') : '<span style="color:#16a34a">—</span>'}</td>
+              <td style="padding:6px;${_cs('nombre')}">${esc(r.nombre || '⚠ vacío')}</td>
+              <td style="padding:6px;${_cs('apellido')}">${esc(r.apellido || '⚠ vacío')}</td>
+              <td style="padding:6px;font-family:monospace;${_cs('dni')}">${esc(r.dni || '⚠ vacío')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.email || '—')}</td>
-              <td style="padding:6px;${!r.modalidadContratacion || r._errors.some(e => e.startsWith('MODALIDAD')) ? 'color:#dc2626;font-weight:600' : ''}">${esc(r.modalidadContratacion || '⚠ vacío')}</td>
+              <td style="padding:6px;${_cs('modalidadContratacion')}">${esc(r.modalidadContratacion || '⚠ vacío')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.area || '—')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.ubicacionFisica || '—')}</td>
               <td style="padding:6px;font-size:11px">${esc(r.puesto || '—')}</td>
-              <td style="padding:6px;font-size:11px">${esc(r.estado || '—')}</td>
-              <td style="padding:6px;text-align:center">${r._valid ? '<span style="color:#16a34a">✓</span>' : '<span style="color:#dc2626" title="Faltan: '+r._errors.join(', ')+'">✗</span>'}</td>
-            </tr>
-          `).join('')}
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>
     </div>
 
     ${tp > 1 ? `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--text-light)">
-        <span>Mostrando ${start + 1}–${Math.min(start + _CMP_PAGE_SIZE, total)} de ${total}</span>
+        <span>Mostrando ${start + 1}–${Math.min(start + _CMP_PAGE_SIZE, filteredTotal)} de ${filteredTotal}${_cmpShowOnlyErrors ? ' (solo errores)' : ''}</span>
         <div style="display:flex;gap:4px">
           ${_cargaMasivaColabPage > 1 ? '<button class="btn btn-sm" onclick="_cargaMasivaColabPage--;_renderCargaMasivaColabPreview()" style="font-size:11px;padding:3px 8px">‹ Ant</button>' : ''}
           <span style="padding:3px 8px;font-weight:600">${_cargaMasivaColabPage} / ${tp}</span>
@@ -6920,7 +7009,7 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
           const _eqBadge = (eq) => {
             if (!eq) return '<span class="badge badge-neutral" style="font-size:10px">—</span>';
             const up = eq.toUpperCase();
-            const cls = up === 'NUEVO' ? 'badge-success' : up === 'BUENO' ? 'badge-info' : up === 'REGULAR' ? 'badge-warning' : 'badge-danger';
+            const cls = up === 'NUEVO' ? 'badge-success' : up === 'USADO' ? 'badge-info' : ['REPARACIÓN','GARANTÍA'].includes(up) ? 'badge-warning' : 'badge-danger';
             return '<span class="badge ' + cls + '" style="font-size:10px">' + esc(eq) + '</span>';
           };
           return `
@@ -7175,7 +7264,7 @@ function devolverActivo(asigId) {
 function _onSingleDestinoChange() {
   const dest = document.getElementById('devSingleDest').value;
   const sub = document.getElementById('devSingleSub');
-  const subOpciones = { 'DISPONIBLE': ['USADO'], 'MANTENIMIENTO': ['REPARACIÓN'], 'BAJA': ['OBSOLESCENCIA', 'DESTRUCCIÓN', 'PÉRDIDA'], 'NO RECUPERABLE': [] };
+  const subOpciones = { 'DISPONIBLE': ['NUEVO', 'USADO'], 'MANTENIMIENTO': ['REPARACIÓN', 'GARANTÍA'], 'BAJA': ['DESTRUCCIÓN', 'DONACIÓN', 'VENTA'], 'NO RECUPERABLE': [] };
   const opts = subOpciones[dest] || [];
   if (opts.length === 0) { sub.style.display = 'none'; sub.innerHTML = ''; }
   else { sub.style.display = ''; sub.innerHTML = opts.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join(''); }
@@ -8105,9 +8194,9 @@ function _onDestinoChange(idx) {
   if (!subSelect) return;
 
   const subOpciones = {
-    'DISPONIBLE':      ['USADO'],
-    'MANTENIMIENTO':   ['REPARACIÓN'],
-    'BAJA':            ['OBSOLESCENCIA', 'DESTRUCCIÓN', 'PÉRDIDA'],
+    'DISPONIBLE':      ['NUEVO', 'USADO'],
+    'MANTENIMIENTO':   ['REPARACIÓN', 'GARANTÍA'],
+    'BAJA':            ['DESTRUCCIÓN', 'DONACIÓN', 'VENTA'],
     'NO RECUPERABLE':  []
   };
 
@@ -9538,14 +9627,14 @@ const _bitArchivos = {
         old.forEach(item => store.put(item));
         await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
         db.close();
-        localStorage.removeItem('ati_bitacoraArchivos');
+        DB.remove('bitacoraArchivos');
       }
     } catch(e) { console.error('Error migrando archivos:', e); }
   }
 };
 
 function _initBitacoraData() {
-  if (!localStorage.getItem('ati_bitacoraMovimientos')) {
+  if (!DB.get('bitacoraMovimientos') || DB.get('bitacoraMovimientos').length === 0) {
     DB.set('bitacoraMovimientos', []);
   }
   // Migrar archivos viejos de localStorage a IndexedDB
@@ -10339,9 +10428,9 @@ let _retornoEstadoEq = '';
 let _retornoDenunciaFile = null;
 
 const _RETORNO_ESTADOS = {
-  'Disponible':       ['NUEVO', 'USADO'],
-  'Mantenimiento': ['GARANTÍA', 'REPARACIÓN'],
-  'Baja':             ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN', 'ROBO']
+  'Disponible':    ['NUEVO', 'USADO'],
+  'Mantenimiento': ['REPARACIÓN', 'GARANTÍA'],
+  'Baja':          ['DESTRUCCIÓN', 'DONACIÓN', 'VENTA']
 };
 
 function _onRetornoDenunciaChange(input) {
@@ -10720,7 +10809,7 @@ function _renderBajasTable() {
   const _eqBadge = (eq) => {
     if (!eq) return '<span class="badge badge-neutral" style="font-size:10px">—</span>';
     const u = eq.toUpperCase();
-    const cls = u === 'DESTRUCCIÓN' ? 'badge-danger' : u === 'VENTA' ? 'badge-info' : u === 'DONACIÓN' ? 'badge-success' : u === 'ROBO' ? 'badge-danger' : 'badge-warning';
+    const cls = u === 'DESTRUCCIÓN' ? 'badge-danger' : u === 'VENTA' ? 'badge-info' : u === 'DONACIÓN' ? 'badge-success' : 'badge-warning';
     return '<span class="badge ' + cls + '" style="font-size:10px">' + esc(eq) + '</span>';
   };
 
@@ -11934,7 +12023,7 @@ function resetAllData() {
     'bitacoraMovimientos',
     'bitacoraArchivos'
   ];
-  keysToReset.forEach(k => localStorage.removeItem('ati_' + k));
+  keysToReset.forEach(k => DB.remove(k));
 
   showToast('Datos operativos eliminados correctamente.', 'info');
   setTimeout(() => renderPage(), 500);
@@ -11943,7 +12032,20 @@ function resetAllData() {
 /* ═══════════════════════════════════════════════════════
    APP INITIALIZATION
    ═══════════════════════════════════════════════════════ */
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', async function () {
+  // 1. Inicializar IndexedDB y cargar caché en memoria
+  try {
+    await DB.init();
+  } catch (e) {
+    console.error('Error inicializando IndexedDB:', e);
+    alert('Error al inicializar la base de datos. Intente recargar la página.');
+    return;
+  }
+
+  // 2. Inicializar datos por defecto / migraciones
+  initSampleData();
+
+  // 3. Restaurar sesión y arrancar la app
   const hasSession = checkSession();
   if (hasSession) {
     restoreSidebarState();
