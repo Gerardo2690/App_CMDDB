@@ -4,131 +4,37 @@
    API síncrona compatible: DB.get(), DB.set(), DB.getConfig(), DB.setConfig()
    ═══════════════════════════════════════════════════════ */
 const DB = (() => {
-  const DBNAME = 'ati_cmddb';
-  const DBVER = 1;
-  const STORE = 'data';
-  const _cache = {};         // caché en memoria para lecturas síncronas
-  let _idb = null;           // referencia a la BD IndexedDB
-  let _ready = false;        // indica si ya cargó todo el caché
-
-  // Abrir/crear la BD IndexedDB
-  function _openDB() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DBNAME, DBVER);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          db.createObjectStore(STORE);
-        }
-      };
-      req.onsuccess = (e) => { _idb = e.target.result; resolve(_idb); };
-      req.onerror = (e) => { console.error('IndexedDB error:', e); reject(e); };
-    });
-  }
-
-  // Cargar TODOS los datos de IndexedDB al caché en memoria
-  function _loadAllToCache() {
-    return new Promise((resolve, reject) => {
-      const tx = _idb.transaction(STORE, 'readonly');
-      const store = tx.objectStore(STORE);
-      const req = store.getAll();
-      const reqKeys = store.getAllKeys();
-      let keys = [], vals = [];
-      reqKeys.onsuccess = () => { keys = reqKeys.result; };
-      req.onsuccess = () => {
-        vals = req.result;
-        keys.forEach((k, i) => { _cache[k] = vals[i]; });
-        _ready = true;
-        resolve();
-      };
-      req.onerror = (e) => reject(e);
-    });
-  }
-
-  // Migrar datos existentes de localStorage a IndexedDB (una sola vez)
-  function _migrateFromLocalStorage() {
-    return new Promise((resolve) => {
-      const keysToMigrate = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && (k.startsWith('ati_') || k.startsWith('ati_cfg_'))) {
-          keysToMigrate.push(k);
-        }
-      }
-      if (keysToMigrate.length === 0) { resolve(false); return; }
-
-      const tx = _idb.transaction(STORE, 'readwrite');
-      const store = tx.objectStore(STORE);
-      keysToMigrate.forEach(k => {
-        try {
-          const val = JSON.parse(localStorage.getItem(k));
-          store.put(val, k);
-          _cache[k] = val;
-        } catch { /* ignorar claves corruptas */ }
-      });
-      tx.oncomplete = () => {
-        // Limpiar localStorage después de migrar exitosamente
-        keysToMigrate.forEach(k => localStorage.removeItem(k));
-        console.log(`✅ Migración completada: ${keysToMigrate.length} claves migradas de localStorage a IndexedDB`);
-        resolve(true);
-      };
-      tx.onerror = () => resolve(false);
-    });
-  }
-
-  // Escribir en IndexedDB en segundo plano (no bloquea)
-  function _persist(key, val) {
-    if (!_idb) return;
-    try {
-      const tx = _idb.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).put(val, key);
-    } catch (e) { console.error('DB persist error:', key, e); }
-  }
-
-  // Eliminar una clave de IndexedDB
-  function _remove(key) {
-    if (!_idb) return;
-    try {
-      const tx = _idb.transaction(STORE, 'readwrite');
-      tx.objectStore(STORE).delete(key);
-    } catch (e) { console.error('DB remove error:', key, e); }
-  }
-
-  // Inicialización async — se llama antes de arrancar la app
-  async function init() {
-    await _openDB();
-    await _migrateFromLocalStorage();
-    await _loadAllToCache();
-    console.log('✅ IndexedDB lista — claves en caché:', Object.keys(_cache).length);
-  }
-
+  // ── LocalStorage como almacenamiento principal (sincrono, confiable) ──
   return {
-    init,
-    isReady() { return _ready; },
+    init() { return Promise.resolve(); },
+    isReady() { return true; },
+    flush() { return Promise.resolve(); },
 
     get(key) {
-      const v = _cache['ati_' + key];
-      return Array.isArray(v) ? v : (v ? v : []);
+      try {
+        const v = JSON.parse(localStorage.getItem('ati_' + key));
+        return Array.isArray(v) ? v : (v ? v : []);
+      } catch { return []; }
     },
     set(key, data) {
-      _cache['ati_' + key] = data;
-      _persist('ati_' + key, data);
+      try { localStorage.setItem('ati_' + key, JSON.stringify(data)); }
+      catch (e) { console.error('DB set error:', key, e); }
     },
     getConfig(key, def) {
-      const v = _cache['ati_cfg_' + key];
-      return v !== undefined ? v : def;
+      try {
+        const v = JSON.parse(localStorage.getItem('ati_cfg_' + key));
+        return v !== undefined && v !== null ? v : def;
+      } catch { return def; }
     },
     setConfig(key, val) {
-      _cache['ati_cfg_' + key] = val;
-      _persist('ati_cfg_' + key, val);
+      try { localStorage.setItem('ati_cfg_' + key, JSON.stringify(val)); }
+      catch (e) { console.error('DB setConfig error:', key, e); }
     },
     remove(key) {
-      delete _cache['ati_' + key];
-      _remove('ati_' + key);
+      localStorage.removeItem('ati_' + key);
     },
     removeConfig(key) {
-      delete _cache['ati_cfg_' + key];
-      _remove('ati_cfg_' + key);
+      localStorage.removeItem('ati_cfg_' + key);
     }
   };
 })();
@@ -245,6 +151,47 @@ function initSampleData() {
 
   // ── Migración: normalizar repuestos existentes con nuevos campos ──
   _migrateRepuestos();
+
+  // ── Migración: renombrar codInventario → codInv, inv → codInv ──
+  _migrateCodInv();
+}
+
+function _migrateCodInv() {
+  // Migrar series de activos: codInventario → codInv
+  const activos = DB.get('activos');
+  let aChanged = false;
+  activos.forEach(a => {
+    if (a.series && Array.isArray(a.series)) {
+      a.series.forEach(s => {
+        if (s.codInventario !== undefined && s.codInv === undefined) {
+          s.codInv = s.codInventario;
+          delete s.codInventario;
+          aChanged = true;
+        }
+      });
+    }
+    // Migrar codInventario a nivel activo (si existe por error legacy)
+    if (a.codInventario !== undefined && a.codInv === undefined) {
+      a.codInv = a.codInventario;
+      delete a.codInventario;
+      aChanged = true;
+    }
+  });
+  if (aChanged) DB.set('activos', activos);
+
+  // Migrar bitacora: inv → codInv
+  const movs = DB.get('bitacoraMovimientos');
+  if (movs && movs.length > 0) {
+    let bChanged = false;
+    movs.forEach(m => {
+      if (m.inv !== undefined && m.codInv === undefined) {
+        m.codInv = m.inv;
+        delete m.inv;
+        bChanged = true;
+      }
+    });
+    if (bChanged) DB.set('bitacoraMovimientos', movs);
+  }
 }
 
 function _migrateRepuestos() {
@@ -1731,7 +1678,7 @@ function saveActivo(id) {
       equipo: campos.equipo || tipo || '',
       modelo: modelo || '',
       serie: '',
-      inv: '',
+      codInv: '',
       motivo: ''
     });
   }
@@ -1779,34 +1726,47 @@ const _CM_COLUMNS = [
   { excel: 'TIPO_DOCUMENTO',    field: 'tipoDocumento' },
   { excel: 'N_DOCUMENTO',       field: 'nDocumento' },
   { excel: 'SERIE',             field: 'serie' },
-  { excel: 'COD_INVENTARIO',    field: 'codInventario' },
+  { excel: 'COD_INV',            field: 'codInv' },
   { excel: 'RAM',               field: 'ram' },
   { excel: 'ALMACENAMIENTO',    field: 'almacenamiento' },
   { excel: 'OBSERVACIONES',     field: 'observaciones' }
 ];
 
+let _cmEquiposStep = 1;
 function openCargaMasivaModal() {
   _cargaMasivaData = [];
   _cargaMasivaPage = 1;
-  openModal('Carga Masiva de Equipos', `
-    <div id="cmContainer">
-      <div style="text-align:center;padding:20px 0">
-        <div style="font-size:48px;margin-bottom:12px">📥</div>
-        <p style="color:var(--text);font-weight:600;margin-bottom:4px">Importar equipos desde Excel</p>
-        <p style="color:var(--text-light);font-size:13px;margin-bottom:20px">Sube un archivo .xlsx o .xls con los datos de los equipos</p>
-        <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
-          <label style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:var(--primary);color:#fff;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500">
-            📂 Seleccionar archivo
-            <input type="file" id="cmFileInput" accept=".xlsx,.xls" style="display:none" onchange="procesarExcel(this.files[0])">
-          </label>
-          <button class="btn" onclick="descargarPlantillaExcel()" style="font-size:13px">📋 Descargar Plantilla</button>
-        </div>
-        <p style="font-size:11px;color:var(--text-light);margin-top:12px">Descarga la plantilla para ver el formato correcto de columnas</p>
-      </div>
-    </div>
-  `, `
+  _cmEquiposStep = 1;
+  openModal('Carga Masiva de Equipos', '<div id="cmContainer"></div>', `
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
+  _renderCmEquiposStep();
+}
+
+function _renderCmEquiposStep() {
+  const w = document.getElementById('cmContainer');
+  if (!w) return;
+  const _stepHTML = (active, done, n, label) => '<div class="rep-cm-step ' + (done ? 'done' : active ? 'active' : '') + '"><span class="rep-cm-step-num">' + (done ? '&#10003;' : n) + '</span><span class="rep-cm-step-label">' + label + '</span></div>';
+  const steps = '<div class="rep-cm-steps">'
+    + _stepHTML(_cmEquiposStep===1, _cmEquiposStep>1, 1, 'Descargar plantilla')
+    + _stepHTML(_cmEquiposStep===2, _cmEquiposStep>2, 2, 'Subir archivo')
+    + _stepHTML(_cmEquiposStep===3, _cmEquiposStep>3, 3, 'Revisar preview')
+    + _stepHTML(_cmEquiposStep===4, false, 4, 'Confirmar')
+    + '</div>';
+
+  if (_cmEquiposStep === 1) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:12px">&#128203;</div><h3 style="margin-bottom:8px">Paso 1: Descargar Plantilla</h3><p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">Descarga la plantilla Excel con el formato correcto para importar equipos.</p><button class="btn btn-primary" onclick="descargarPlantillaExcel();_cmEquiposStep=2;_renderCmEquiposStep()">&#128203; Descargar Plantilla</button><button class="btn btn-secondary" onclick="_cmEquiposStep=2;_renderCmEquiposStep()" style="margin-left:8px">Ya tengo la plantilla &rarr;</button></div></div>';
+  } else if (_cmEquiposStep === 2) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div class="rep-cm-dropzone" id="cmDropZone" onclick="document.getElementById(\'cmFileInput2\').click()"><div style="font-size:48px;margin-bottom:12px">&#128229;</div><p style="font-weight:600;color:var(--text);margin-bottom:4px">Arrastra o selecciona tu archivo Excel</p><p style="font-size:13px;color:var(--text-secondary)">.xlsx o .xls</p><input type="file" id="cmFileInput2" accept=".xlsx,.xls" style="display:none" onchange="procesarExcel(this.files[0])"></div></div></div>';
+    const dz = document.getElementById('cmDropZone');
+    if (dz) { dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); }; dz.ondragleave = () => dz.classList.remove('dragover'); dz.ondrop = e => { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) procesarExcel(e.dataTransfer.files[0]); }; }
+  } else if (_cmEquiposStep === 3) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" id="cmPreviewWrap"></div></div>';
+    _renderCargaMasivaPreview();
+  } else if (_cmEquiposStep === 4) {
+    const validos = _cargaMasivaData.filter(r => r._valid).length;
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:12px">&#9989;</div><h3 style="margin-bottom:8px">Confirmar Importaci&oacute;n</h3><p style="color:var(--text-secondary);margin-bottom:20px">Se importar&aacute;n <strong>' + validos + '</strong> equipos v&aacute;lidos.</p><button class="btn btn-primary" onclick="ejecutarCargaMasiva()" style="font-size:14px;padding:12px 32px">&#128229; Importar ' + validos + ' equipos</button><button class="btn btn-secondary" onclick="_cmEquiposStep=3;_renderCmEquiposStep()" style="margin-left:8px">&larr; Volver</button></div></div>';
+  }
 }
 
 function descargarPlantillaExcel() {
@@ -1926,7 +1886,8 @@ function procesarExcel(file) {
       });
 
       _cargaMasivaPage = 1;
-      _renderCargaMasivaPreview();
+      _cmEquiposStep = 3;
+      _renderCmEquiposStep();
     } catch (err) {
       showToast('Error al leer el archivo: ' + err.message, 'error');
     }
@@ -1935,7 +1896,7 @@ function procesarExcel(file) {
 }
 
 function _renderCargaMasivaPreview() {
-  const container = document.getElementById('cmContainer');
+  const container = document.getElementById('cmPreviewWrap') || document.getElementById('cmContainer');
   if (!container) return;
 
   const total = _cargaMasivaData.length;
@@ -2013,7 +1974,7 @@ function _renderCargaMasivaPreview() {
               <td style="padding:6px;${cellStyle('marca', r.marca)}" ${fe.marca ? 'title="'+esc(fe.marca)+'"' : ''}>${esc(r.marca || '—')}</td>
               <td style="padding:6px;${cellStyle('modelo', r.modelo)}" ${fe.modelo ? 'title="'+esc(fe.modelo)+'"' : ''}>${esc(r.modelo || '—')}</td>
               <td style="padding:6px;font-size:11px;${cellStyle('serie', r.serie)}" ${fe.serie ? 'title="'+esc(fe.serie)+'"' : ''}>${esc(r.serie || '—')}</td>
-              <td style="padding:6px;font-size:11px;${r.codInventario ? ok : ''}">${esc(r.codInventario || '—')}</td>
+              <td style="padding:6px;font-size:11px;${r.codInv ? ok : ''}">${esc(r.codInv || '—')}</td>
               <td style="padding:6px;font-size:11px;${r.ram ? ok : ''}">${esc(r.ram || '—')}</td>
               <td style="padding:6px;font-size:11px;${r.almacenamiento ? ok : ''}">${esc(r.almacenamiento || '—')}</td>
               <td style="padding:6px;${cellStyle('estadoEquipo', r.estadoEquipo)}" ${fe.estadoEquipo ? 'title="'+esc(fe.estadoEquipo)+'"' : ''}>${esc(r.estadoEquipo || '—')}</td>
@@ -2041,18 +2002,11 @@ function _renderCargaMasivaPreview() {
       </div>
     ` : ''}
 
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-      <label style="display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:12px;color:var(--text-light)">
-        📂 Cambiar archivo
-        <input type="file" accept=".xlsx,.xls" style="display:none" onchange="procesarExcel(this.files[0])">
-      </label>
-      ${validos > 0 ? `<button class="btn btn-primary" onclick="ejecutarCargaMasiva()" style="font-size:13px">📥 Importar ${nLotes} lote${nLotes > 1 ? 's' : ''} (${validos} series)</button>` : ''}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+      <button class="btn btn-secondary" onclick="_cmEquiposStep=2;_cargaMasivaData=[];_renderCmEquiposStep()">&larr; Subir otro archivo</button>
+      ${validos > 0 ? `<button class="btn btn-primary" onclick="_cmEquiposStep=4;_renderCmEquiposStep()">Continuar con ${validos} v&aacute;lidos &rarr;</button>` : '<span style="color:#dc2626;font-weight:600">No hay registros v&aacute;lidos</span>'}
     </div>
   `;
-
-  // Actualizar footer del modal
-  const footer = document.getElementById('modalFooter');
-  if (footer) footer.innerHTML = `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`;
 }
 
 /**
@@ -2104,7 +2058,7 @@ function _generarSerieInterna(equipo, seriesExistentesGlobal) {
   return abr + String(maxCorr).padStart(8, '0');
 }
 
-function ejecutarCargaMasiva() {
+async function ejecutarCargaMasiva() {
   const validos = _cargaMasivaData.filter(r => r._valid);
   if (validos.length === 0) { showToast('No hay registros válidos para importar', 'error'); return; }
 
@@ -2130,7 +2084,7 @@ function ejecutarCargaMasiva() {
     if (serieVal) {
       lotes[key].series.push({
         serie: serieVal,
-        codInventario: r.codInventario || '',
+        codInv: r.codInv || '',
         ram: r.ram || '',
         almacenamiento: r.almacenamiento || ''
       });
@@ -2218,13 +2172,14 @@ function ejecutarCargaMasiva() {
         equipo: rd.equipo || rd.tipo || '',
         modelo: rd.modelo || '',
         serie: s.serie || '',
-        inv: s.codInventario || '',
+        codInv: s.codInv || '',
         motivo: ''
       });
     });
   });
 
   _cargaMasivaData = [];
+  await DB.flush();
   closeModal();
   showToast(resumen.join(', ') + ' — ' + totalSeries + ' series importadas');
   renderIngreso(document.getElementById('contentArea'));
@@ -2411,7 +2366,7 @@ function openSeriesModal(activoId) {
           <input class="form-control" id="fNuevaSerie" placeholder="N° de serie" onkeydown="if(event.key==='Enter')addSerie(${activoId})">
         </div>
         <div style="flex:1">
-          <label style="font-size:12px;font-weight:500;color:var(--text);display:block;margin-bottom:4px">Cod. Inventario</label>
+          <label style="font-size:12px;font-weight:500;color:var(--text);display:block;margin-bottom:4px">Cod. Inv</label>
           <input class="form-control" id="fNuevaCodInv" placeholder="Opcional" onkeydown="if(event.key==='Enter')addSerie(${activoId})">
         </div>
         <button class="btn btn-primary" onclick="addSerie(${activoId})" style="height:38px;width:38px;padding:0;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700" title="Agregar serie">+</button>
@@ -2465,7 +2420,7 @@ function generarSeriesAuto(activoId) {
   for (let i = 1; i <= cant; i++) {
     a.series.push({
       serie: prefijo + String(maxNum + i).padStart(5, '0'),
-      codInventario: '',
+      codInv: '',
       ram: '',
       almacenamiento: ''
     });
@@ -2506,7 +2461,7 @@ function guardarSeries() {
 }
 
 function _normalizeSerie(s) {
-  if (typeof s === 'string') return { serie: s, ram: '', almacenamiento: '', codInventario: '' };
+  if (typeof s === 'string') return { serie: s, ram: '', almacenamiento: '', codInv: '' };
   return s;
 }
 
@@ -2541,7 +2496,7 @@ function _renderSeriesList(series, activoId) {
     const s = _normalizeSerie(raw);
     return `<tr>
       <td style="font-family:monospace;font-weight:700;font-size:12px">${esc(s.serie)}</td>
-      <td style="font-size:12px">${esc(s.codInventario || '—')}</td>
+      <td style="font-size:12px">${esc(s.codInv || '—')}</td>
       ${showRamAlm ? `<td style="font-size:12px">${s.ram ? `<span class="badge badge-info" style="font-size:10px">${esc(s.ram)}</span>` : '—'}</td>
       <td style="font-size:12px">${s.almacenamiento ? `<span class="badge badge-purple" style="font-size:10px">${esc(s.almacenamiento)}</span>` : '—'}</td>` : ''}
       <td><button class="btn-icon" style="width:26px;height:26px;border:none" onclick="removeSerie(${activoId},${idx})" title="Eliminar">🗑️</button></td>
@@ -2602,7 +2557,7 @@ function addSerie(activoId) {
 
   activos[idx].series.push(upperFields({
     serie,
-    codInventario: codInvInput ? codInvInput.value.trim() : '',
+    codInv: codInvInput ? codInvInput.value.trim() : '',
     ram: ramSelect ? ramSelect.value : '',
     almacenamiento: almSelect ? almSelect.value : ''
   }));
@@ -3097,7 +3052,7 @@ function _renderRepCmPreview(w) {
   `;
 }
 
-function _ejecutarCargaMasivaRep() {
+async function _ejecutarCargaMasivaRep() {
   const validos = _cargaMasivaRepData.filter(r => r._valid);
   if (validos.length === 0) return;
 
@@ -3133,6 +3088,7 @@ function _ejecutarCargaMasivaRep() {
   _cargaMasivaRepData = [];
   _repCmStep = 1;
   addMovimiento('CARGA MASIVA REPUESTOS', validos.length + ' repuestos importados desde Excel');
+  await DB.flush();
   closeModal();
   showToast(validos.length + ' repuestos importados correctamente');
   renderRepuestos(document.getElementById('contentArea'));
@@ -4581,28 +4537,36 @@ let _cargaMasivaColabData = [];
 let _cargaMasivaColabPage = 1;
 const _CMP_PAGE_SIZE = 50;
 
+let _cmColabStep = 1;
 function openCargaMasivaColabModal() {
   _cargaMasivaColabData = [];
   _cargaMasivaColabPage = 1;
-  openModal('Carga Masiva de Colaboradores', `
-    <div id="cmpContainer">
-      <div style="text-align:center;padding:20px 0">
-        <div style="font-size:48px;margin-bottom:12px">📥</div>
-        <p style="color:var(--text);font-weight:600;margin-bottom:4px">Importar colaboradores desde Excel</p>
-        <p style="color:var(--text-light);font-size:13px;margin-bottom:20px">Sube un archivo .xlsx o .xls con los datos de los colaboradores</p>
-        <div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">
-          <label style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;background:var(--primary);color:#fff;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500">
-            📂 Seleccionar archivo
-            <input type="file" id="cmpFileInput" accept=".xlsx,.xls" style="display:none" onchange="procesarExcelColab(this.files[0])">
-          </label>
-          <button class="btn" onclick="descargarPlantillaColab()" style="font-size:13px">📋 Descargar Plantilla</button>
-        </div>
-        <p style="font-size:11px;color:var(--text-light);margin-top:12px">Descarga la plantilla para ver el formato correcto de columnas</p>
-      </div>
-    </div>
-  `, `
+  _cmColabStep = 1;
+  openModal('Carga Masiva de Colaboradores', '<div id="cmpContainer"></div>', `
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
+  _renderCmColabStep();
+}
+
+function _renderCmColabStep() {
+  const w = document.getElementById('cmpContainer');
+  if (!w) return;
+  const _s = (active, done, n, label) => '<div class="rep-cm-step ' + (done ? 'done' : active ? 'active' : '') + '"><span class="rep-cm-step-num">' + (done ? '&#10003;' : n) + '</span><span class="rep-cm-step-label">' + label + '</span></div>';
+  const steps = '<div class="rep-cm-steps">' + _s(_cmColabStep===1,_cmColabStep>1,1,'Descargar plantilla') + _s(_cmColabStep===2,_cmColabStep>2,2,'Subir archivo') + _s(_cmColabStep===3,_cmColabStep>3,3,'Revisar preview') + _s(_cmColabStep===4,false,4,'Confirmar') + '</div>';
+
+  if (_cmColabStep === 1) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:12px">&#128203;</div><h3 style="margin-bottom:8px">Paso 1: Descargar Plantilla</h3><p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">Descarga la plantilla Excel con el formato correcto para importar colaboradores.</p><button class="btn btn-primary" onclick="descargarPlantillaColab();_cmColabStep=2;_renderCmColabStep()">&#128203; Descargar Plantilla</button><button class="btn btn-secondary" onclick="_cmColabStep=2;_renderCmColabStep()" style="margin-left:8px">Ya tengo la plantilla &rarr;</button></div></div>';
+  } else if (_cmColabStep === 2) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div class="rep-cm-dropzone" id="cmpDropZone" onclick="document.getElementById(\'cmpFileInput2\').click()"><div style="font-size:48px;margin-bottom:12px">&#128229;</div><p style="font-weight:600;color:var(--text);margin-bottom:4px">Arrastra o selecciona tu archivo Excel</p><p style="font-size:13px;color:var(--text-secondary)">.xlsx o .xls</p><input type="file" id="cmpFileInput2" accept=".xlsx,.xls" style="display:none" onchange="procesarExcelColab(this.files[0])"></div></div></div>';
+    const dz = document.getElementById('cmpDropZone');
+    if (dz) { dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); }; dz.ondragleave = () => dz.classList.remove('dragover'); dz.ondrop = e => { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) procesarExcelColab(e.dataTransfer.files[0]); }; }
+  } else if (_cmColabStep === 3) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" id="cmpPreviewWrap"></div></div>';
+    _renderCargaMasivaColabPreview();
+  } else if (_cmColabStep === 4) {
+    const validos = _cargaMasivaColabData.filter(r => r._valid).length;
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:12px">&#9989;</div><h3 style="margin-bottom:8px">Confirmar Importaci&oacute;n</h3><p style="color:var(--text-secondary);margin-bottom:20px">Se importar&aacute;n <strong>' + validos + '</strong> colaboradores.</p><button class="btn btn-primary" onclick="ejecutarCargaMasivaColab()" style="font-size:14px;padding:12px 32px">&#128229; Importar ' + validos + ' colaboradores</button><button class="btn btn-secondary" onclick="_cmColabStep=3;_renderCmColabStep()" style="margin-left:8px">&larr; Volver</button></div></div>';
+  }
 }
 
 function descargarPlantillaColab() {
@@ -4701,7 +4665,8 @@ function procesarExcelColab(file) {
       });
 
       _cargaMasivaColabPage = 1;
-      _renderCargaMasivaColabPreview();
+      _cmColabStep = 3;
+      _renderCmColabStep();
     } catch (err) {
       showToast('Error al leer el archivo: ' + err.message, 'error');
     }
@@ -4712,7 +4677,7 @@ function procesarExcelColab(file) {
 let _cmpShowOnlyErrors = false;
 
 function _renderCargaMasivaColabPreview() {
-  const container = document.getElementById('cmpContainer');
+  const container = document.getElementById('cmpPreviewWrap') || document.getElementById('cmpContainer');
   if (!container) return;
 
   const total = _cargaMasivaColabData.length;
@@ -4800,20 +4765,14 @@ function _renderCargaMasivaColabPreview() {
       </div>
     ` : ''}
 
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
-      <label style="display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid var(--border);border-radius:8px;cursor:pointer;font-size:12px;color:var(--text-light)">
-        📂 Cambiar archivo
-        <input type="file" accept=".xlsx,.xls" style="display:none" onchange="procesarExcelColab(this.files[0])">
-      </label>
-      ${validos > 0 ? `<button class="btn btn-primary" onclick="ejecutarCargaMasivaColab()" style="font-size:13px">📥 Importar ${validos} colaborador${validos > 1 ? 'es' : ''}</button>` : ''}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+      <button class="btn btn-secondary" onclick="_cmColabStep=2;_cargaMasivaColabData=[];_renderCmColabStep()">&larr; Subir otro archivo</button>
+      ${validos > 0 ? `<button class="btn btn-primary" onclick="_cmColabStep=4;_renderCmColabStep()">Continuar con ${validos} v&aacute;lidos &rarr;</button>` : '<span style="color:#dc2626;font-weight:600">No hay registros v&aacute;lidos</span>'}
     </div>
   `;
-
-  const footer = document.getElementById('modalFooter');
-  if (footer) footer.innerHTML = '<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>';
 }
 
-function ejecutarCargaMasivaColab() {
+async function ejecutarCargaMasivaColab() {
   const validos = _cargaMasivaColabData.filter(r => r._valid);
   if (validos.length === 0) { showToast('No hay registros válidos para importar', 'error'); return; }
 
@@ -4847,6 +4806,7 @@ function ejecutarCargaMasivaColab() {
 
   DB.set('colaboradores', colabs);
   addMovimiento('Carga Masiva Colaboradores', `Se importaron ${validos.length} colaboradores desde Excel`);
+  await DB.flush();
   closeModal();
   showToast(`${validos.length} colaboradores importados correctamente`);
   renderPadron(document.getElementById('contentArea'));
@@ -4873,7 +4833,10 @@ function renderAsignacion(el) {
         <h1>Asignación de Activos</h1>
         <div class="subtitle">Gestión de asignaciones de equipos a colaboradores</div>
       </div>
-      <button class="btn btn-primary" onclick="openAsignacionModal()">+ Nueva Asignación</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="openAsignacionModal()">+ Nueva Asignaci&oacute;n</button>
+        <button class="btn" onclick="_openCargaMasivaAsigModal()" style="background:#059669;color:#fff;border-color:#059669">&#128229; Carga Masiva</button>
+      </div>
     </div>
 
     <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)">
@@ -5124,7 +5087,7 @@ function _renderAsignacionModal(fresh) {
     (a.series||[]).forEach(s => {
       const key = a.id + '||' + (s.serie||'').toUpperCase().trim();
       if (!seriesAsig.has(key)) {
-        stock.push({ activoId: a.id, tipo: (a.tipo||'').toUpperCase().trim(), equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie||'', codInventario: s.codInventario||'', ubicacion: a.ubicacion||'', codigo: a.codigo||'', gama: a.gama||'' });
+        stock.push({ activoId: a.id, tipo: (a.tipo||'').toUpperCase().trim(), equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie||'', codInv: s.codInv||'', ubicacion: a.ubicacion||'', codigo: a.codigo||'', gama: a.gama||'' });
       }
     });
   });
@@ -5911,7 +5874,7 @@ function _renderReemplazoModal() {
       (a.series || []).forEach(s => {
         const key = a.id + '||' + (s.serie || '').toUpperCase().trim();
         if (!seriesAsignadas.has(key)) {
-          stock.push({ activoId: a.id, tipo: a.tipo, equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie || '', codInventario: s.codInventario || '', ubicacion: a.ubicacion || '', codigo: a.codigo || '', gama: a.gama || '' });
+          stock.push({ activoId: a.id, tipo: a.tipo, equipo: a.equipo||a.tipo||'', marca: a.marca, modelo: a.modelo, serie: s.serie || '', codInv: s.codInv || '', ubicacion: a.ubicacion || '', codigo: a.codigo || '', gama: a.gama || '' });
         }
       });
     });
@@ -6228,7 +6191,7 @@ function _ejecutarReemplazo() {
       equipo: _oldAct.equipo || _oldAct.tipo || '',
       modelo: _oldAct.modelo || '',
       serie: _reemOldAsig.serieAsignada || '',
-      inv: _oldAct.codInventario || '',
+      codInv: _oldAct.codInv || '',
       correo: colab.email || '',
       ticket: ticket || '',
       motivo: motivo || 'REEMPLAZO'
@@ -6244,7 +6207,7 @@ function _ejecutarReemplazo() {
       equipo: _newAct.equipo || _newAct.tipo || '',
       modelo: _newAct.modelo || '',
       serie: _reemNewItem.serie || '',
-      inv: _newAct.codInventario || '',
+      codInv: _newAct.codInv || '',
       correo: colab.email || '',
       ticket: ticket || '',
       motivo: motivo || 'REEMPLAZO'
@@ -6279,7 +6242,7 @@ function openStockModal() {
       // Solo mostrar series que no estén asignadas (vigentes)
       const key = a.id + '||' + (s.serie || '').toUpperCase().trim();
       if (!seriesAsignadas.has(key)) {
-        stock.push({ activoId: a.id, tipo: (a.tipo || '').toUpperCase().trim(), equipo: (a.equipo || a.tipo || '').toUpperCase().trim(), marca: a.marca, modelo: a.modelo, serie: s.serie || '', codInventario: s.codInventario || '', estadoEquipo: a.estadoEquipo || '' });
+        stock.push({ activoId: a.id, tipo: (a.tipo || '').toUpperCase().trim(), equipo: (a.equipo || a.tipo || '').toUpperCase().trim(), marca: a.marca, modelo: a.modelo, serie: s.serie || '', codInv: s.codInv || '', estadoEquipo: a.estadoEquipo || '' });
       }
     });
   });
@@ -6360,7 +6323,7 @@ function _renderStockTable() {
     filtered = filtered.filter(r =>
       r.equipo.toLowerCase().includes(s) || r.marca.toLowerCase().includes(s) ||
       r.modelo.toLowerCase().includes(s) || r.serie.toLowerCase().includes(s) ||
-      r.codInventario.toLowerCase().includes(s)
+      r.codInv.toLowerCase().includes(s)
     );
   }
 
@@ -6380,7 +6343,7 @@ function _renderStockTable() {
         <th style="padding:8px 6px;background:var(--bg-secondary);position:sticky;top:0">Marca</th>
         <th style="padding:8px 6px;background:var(--bg-secondary);position:sticky;top:0">Modelo</th>
         <th style="padding:8px 6px;background:var(--bg-secondary);position:sticky;top:0">Serie</th>
-        <th style="padding:8px 6px;background:var(--bg-secondary);position:sticky;top:0">Inv.</th>
+        <th style="padding:8px 6px;background:var(--bg-secondary);position:sticky;top:0">Cod. Inv</th>
         <th style="padding:8px 6px;background:var(--bg-secondary);position:sticky;top:0">Estado</th>
       </tr>
     </thead>
@@ -6395,7 +6358,7 @@ function _renderStockTable() {
           <td style="padding:6px">${esc(r.marca)}</td>
           <td style="padding:6px">${esc(r.modelo)}</td>
           <td style="padding:6px;font-family:monospace;font-size:11px">${esc(r.serie || '—')}</td>
-          <td style="padding:6px;font-family:monospace;font-size:11px">${esc(r.codInventario || '—')}</td>
+          <td style="padding:6px;font-family:monospace;font-size:11px">${esc(r.codInv || '—')}</td>
           <td style="padding:6px"><span class="badge badge-success" style="font-size:9px">Disponible</span></td>
         </tr>`;
       }).join('')}
@@ -6489,7 +6452,7 @@ function _refreshAsigActivosList() {
   }
 }
 
-function saveAsignacion() {
+async function saveAsignacion() {
   const fechaInput = (document.getElementById('fAsigFecha') || {}).value || _asigFecha || today();
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, '0');
@@ -6665,7 +6628,7 @@ function saveAsignacion() {
       equipo: _act.equipo || _act.tipo || '',
       modelo: _act.modelo || '',
       serie: sel.serie || '',
-      inv: _act.codInventario || '',
+      codInv: _act.codInv || '',
       correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
       ticket: ticket || '',
       motivo: _motSaveUp.includes('REEMPLAZO') || _motSaveUp.includes('RENOVACIÓN') || _motSaveUp.includes('RENOVACION') || _motSaveUp.includes('PRÉSTAMO') || _motSaveUp.includes('PRESTAMO') || isReposicionDano || isReposicionRobo ? motivo : (sitio ? 'ASIGNACIÓN SITIO' : '')
@@ -6684,7 +6647,7 @@ function saveAsignacion() {
         equipo: _act.equipo || _act.tipo || '',
         modelo: _act.modelo || '',
         serie: sel.serie || '',
-        inv: _act.codInventario || '',
+        codInv: _act.codInv || '',
         correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
         ticket: ticket || '',
         motivo: sitio ? 'ASIGNACIÓN SITIO' : ''
@@ -6692,6 +6655,7 @@ function saveAsignacion() {
     });
   }
 
+  await DB.flush();
   closeModal();
   showToast(isIngresoNuevo ? `Kit inicial (${_totalEquipos} activo(s)) asignado correctamente` : isReposicionRobo ? 'Reposición por robo registrada correctamente' : isReposicionDano ? 'Reposición por daño físico realizada correctamente' : isReemplazo ? (isRenovacion ? 'Renovación realizada correctamente' : 'Reemplazo realizado correctamente') : isPrestamo ? 'Préstamo registrado correctamente' : `${_asigSelectedActivos.length} activo(s) asignados correctamente`);
   _asigSelectedColab = null;
@@ -6702,6 +6666,358 @@ function saveAsignacion() {
   _asigAccSearch = '';
   _asigAccTipo = 'Todos';
   _asigAccPage = 0;
+  renderAsignacion(document.getElementById('contentArea'));
+}
+
+/* ── ASIGNACIONES — CARGA MASIVA ── */
+let _cmAsigData = [];
+let _cmAsigStep = 1;
+const _CM_ASIG_COLS = [
+  { excel: 'TICKET',              field: 'ticket',           required: true },
+  { excel: 'FECHA_ASIGNACION',    field: 'fechaAsignacion' },
+  { excel: 'MOTIVO',              field: 'motivo',           required: true },
+  { excel: 'CODIGO_ACTIVO',       field: 'codigoActivo',     required: true },
+  { excel: 'SERIE',               field: 'serie' },
+  { excel: 'TIPO_DESTINO',        field: 'tipoDestino' },
+  { excel: 'DNI_COLABORADOR',     field: 'dniColaborador' },
+  { excel: 'SITIO_CODIGO',        field: 'sitioCodigo' },
+  { excel: 'ACTA_ENTREGA',        field: 'actaEntrega' },
+  { excel: 'FECHA_FIN_PRESTAMO',  field: 'fechaFinPrestamo' },
+  { excel: 'OBSERVACIONES',       field: 'observaciones' }
+];
+
+function _openCargaMasivaAsigModal() {
+  _cmAsigData = [];
+  _cmAsigStep = 1;
+  openModal('Carga Masiva de Asignaciones', '<div id="cmAsigContainer"></div>', `
+    <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
+  `, 'modal-lg');
+  _renderCmAsigStep();
+}
+
+function _renderCmAsigStep() {
+  const w = document.getElementById('cmAsigContainer');
+  if (!w) return;
+
+  if (_cmAsigStep === 1) {
+    w.innerHTML = `
+      <div style="display:grid;grid-template-columns:220px 1fr;gap:24px;min-height:300px">
+        <div style="display:flex;flex-direction:column;gap:0">
+          <div class="rep-cm-step active"><span class="rep-cm-step-num">1</span><span class="rep-cm-step-label">Descargar plantilla</span></div>
+          <div class="rep-cm-step"><span class="rep-cm-step-num">2</span><span class="rep-cm-step-label">Subir archivo</span></div>
+          <div class="rep-cm-step"><span class="rep-cm-step-num">3</span><span class="rep-cm-step-label">Revisar preview</span></div>
+          <div class="rep-cm-step"><span class="rep-cm-step-num">4</span><span class="rep-cm-step-label">Confirmar</span></div>
+        </div>
+        <div style="text-align:center;padding:30px 0">
+          <div style="font-size:48px;margin-bottom:12px">&#128203;</div>
+          <h3 style="margin-bottom:8px">Paso 1: Descargar Plantilla</h3>
+          <p style="color:var(--text-secondary);font-size:13px;margin-bottom:8px">Columnas: TICKET, FECHA_ASIGNACION, MOTIVO, CODIGO_ACTIVO, SERIE, TIPO_DESTINO, DNI_COLABORADOR, SITIO_CODIGO, ACTA_ENTREGA, FECHA_FIN_PRESTAMO, OBSERVACIONES</p>
+          <p style="color:var(--text-muted);font-size:12px;margin-bottom:20px">MOTIVO: INGRESO NUEVO, ASIGNACION, REEMPLAZO, RENOVACION, PRESTAMO, REPOSICION DANO FISICO, REPOSICION ROBO</p>
+          <button class="btn btn-primary" onclick="_descargarPlantillaAsig();_cmAsigStep=2;_renderCmAsigStep()">&#128203; Descargar Plantilla</button>
+          <button class="btn btn-secondary" onclick="_cmAsigStep=2;_renderCmAsigStep()" style="margin-left:8px">Ya tengo la plantilla &rarr;</button>
+        </div>
+      </div>
+    `;
+  } else if (_cmAsigStep === 2) {
+    w.innerHTML = `
+      <div style="display:grid;grid-template-columns:220px 1fr;gap:24px;min-height:300px">
+        <div style="display:flex;flex-direction:column;gap:0">
+          <div class="rep-cm-step done"><span class="rep-cm-step-num">&#10003;</span><span class="rep-cm-step-label">Descargar plantilla</span></div>
+          <div class="rep-cm-step active"><span class="rep-cm-step-num">2</span><span class="rep-cm-step-label">Subir archivo</span></div>
+          <div class="rep-cm-step"><span class="rep-cm-step-num">3</span><span class="rep-cm-step-label">Revisar preview</span></div>
+          <div class="rep-cm-step"><span class="rep-cm-step-num">4</span><span class="rep-cm-step-label">Confirmar</span></div>
+        </div>
+        <div style="text-align:center;padding:30px 0">
+          <div class="rep-cm-dropzone" id="cmAsigDropZone" onclick="document.getElementById('cmAsigFileInput').click()">
+            <div style="font-size:48px;margin-bottom:12px">&#128229;</div>
+            <p style="font-weight:600;color:var(--text);margin-bottom:4px">Arrastra o selecciona tu archivo Excel</p>
+            <p style="font-size:13px;color:var(--text-secondary)">.xlsx o .xls</p>
+            <input type="file" id="cmAsigFileInput" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelAsig(this.files[0])">
+          </div>
+        </div>
+      </div>
+    `;
+    const dz = document.getElementById('cmAsigDropZone');
+    if (dz) {
+      dz.ondragover = function(e) { e.preventDefault(); dz.classList.add('dragover'); };
+      dz.ondragleave = function() { dz.classList.remove('dragover'); };
+      dz.ondrop = function(e) { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) _procesarExcelAsig(e.dataTransfer.files[0]); };
+    }
+  } else if (_cmAsigStep === 3) {
+    _renderCmAsigPreview(w);
+  } else if (_cmAsigStep === 4) {
+    const validos = _cmAsigData.filter(r => r._valid).length;
+    w.innerHTML = `
+      <div style="text-align:center;padding:40px 0">
+        <div style="font-size:48px;margin-bottom:12px">&#9989;</div>
+        <h3 style="margin-bottom:8px">Confirmar Importaci&oacute;n</h3>
+        <p style="color:var(--text-secondary);margin-bottom:20px">Se crear&aacute;n <strong>${validos}</strong> asignaciones.</p>
+        <button class="btn btn-primary" onclick="_ejecutarCargaMasivaAsig()" style="font-size:14px;padding:12px 32px">&#128229; Importar ${validos} asignaciones</button>
+        <button class="btn btn-secondary" onclick="_cmAsigStep=3;_renderCmAsigStep()" style="margin-left:8px">&larr; Volver</button>
+      </div>
+    `;
+  }
+}
+
+function _descargarPlantillaAsig() {
+  const headers = _CM_ASIG_COLS.map(c => c.excel);
+  const ej1 = ['WO-08001', '2026-03-23', 'ASIGNACION', 'ATI-00001', 'SN1234567890', 'COLABORADOR', '45678912', '', 'ACT00015', '', 'Equipo principal'];
+  const ej2 = ['WO-08002', '2026-03-23', 'PRESTAMO', 'ATI-00002', '', 'COLABORADOR', '12345678', '', '', '2026-04-30', 'Prestamo temporal'];
+  const ej3 = ['WO-08003', '2026-03-23', 'ASIGNACION', 'ATI-00003', '', 'SITIO', '', 'TDA-00001', 'ACT00020', '', 'Para tienda'];
+  const ws = XLSX.utils.aoa_to_sheet([headers, ej1, ej2, ej3]);
+  ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Asignaciones');
+  XLSX.writeFile(wb, 'Plantilla_Asignaciones_Masiva.xlsx');
+  showToast('Plantilla descargada');
+}
+
+function _procesarExcelAsig(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (rows.length === 0) { showToast('Archivo vacio', 'error'); return; }
+
+      const activos = DB.get('activos');
+      const colabs = DB.get('colaboradores');
+      const sitios = DB.get('sitiosMoviles') || [];
+      const asigExist = DB.get('asignaciones');
+      const motivosValidos = ['INGRESO NUEVO','ASIGNACION','REEMPLAZO','RENOVACION','PRESTAMO','REPOSICION DANO FISICO','REPOSICION ROBO'];
+
+      _cmAsigData = rows.map((row, i) => {
+        const mapped = {};
+        const rowKeys = Object.keys(row);
+        _CM_ASIG_COLS.forEach(col => {
+          const matchKey = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel) || col.excel;
+          let val = row[matchKey];
+          if (val === undefined || val === null) val = '';
+          mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
+        });
+
+        if (mapped.fechaAsignacion) mapped.fechaAsignacion = normalizeDate(mapped.fechaAsignacion);
+        if (mapped.fechaFinPrestamo) mapped.fechaFinPrestamo = normalizeDate(mapped.fechaFinPrestamo);
+
+        const errors = [];
+        const ticket = (mapped.ticket || '').toUpperCase();
+        const motivo = (mapped.motivo || '').toUpperCase();
+        const codActivo = (mapped.codigoActivo || '').toUpperCase();
+        const serie = (mapped.serie || '').toUpperCase();
+        const tipoDest = (mapped.tipoDestino || 'COLABORADOR').toUpperCase();
+        const dni = (mapped.dniColaborador || '').trim();
+        const sitioCod = (mapped.sitioCodigo || '').toUpperCase();
+        const isPrestamo = motivo.includes('PRESTAMO');
+
+        if (!ticket) errors.push('TICKET requerido');
+        if (!motivo || !motivosValidos.some(m => motivo.includes(m))) errors.push('MOTIVO invalido');
+        if (!codActivo) errors.push('CODIGO_ACTIVO requerido');
+
+        // Validar activo
+        const activo = activos.find(a => (a.codigo || '').toUpperCase() === codActivo);
+        if (!activo) { errors.push('Activo no encontrado: ' + codActivo); }
+        else {
+          // Validar serie si tiene series
+          if (activo.series && activo.series.length > 0) {
+            if (!serie) { errors.push('SERIE requerida (activo tiene series)'); }
+            else {
+              const serieExists = activo.series.some(s => (s.serie || '').toUpperCase() === serie);
+              if (!serieExists) errors.push('Serie no existe en activo');
+              else {
+                const yaAsignada = asigExist.some(a => a.activoId === activo.id && (a.serieAsignada || '').toUpperCase() === serie && a.estado === 'Vigente');
+                if (yaAsignada) errors.push('Serie ya asignada (vigente)');
+              }
+            }
+          }
+        }
+
+        // Validar destino
+        let colab = null, sitio = null;
+        if (tipoDest === 'SITIO') {
+          if (!sitioCod) errors.push('SITIO_CODIGO requerido');
+          else {
+            sitio = sitios.find(s => (s.codigo || '').toUpperCase() === sitioCod);
+            if (!sitio) errors.push('Sitio no encontrado: ' + sitioCod);
+          }
+        } else {
+          if (!dni) errors.push('DNI_COLABORADOR requerido');
+          else {
+            colab = colabs.find(c => (c.dni || '') === dni);
+            if (!colab) errors.push('Colaborador no encontrado: DNI ' + dni);
+            else if (colab.estado !== 'Activo') errors.push('Colaborador no activo');
+          }
+        }
+
+        if (isPrestamo && !mapped.fechaFinPrestamo) errors.push('FECHA_FIN_PRESTAMO requerida para prestamo');
+
+        return {
+          ...mapped,
+          ticket, motivo, codActivo, serie, tipoDest, dni, sitioCod,
+          _activo: activo || null,
+          _colab: colab || null,
+          _sitio: sitio || null,
+          _row: i + 2,
+          _errors: errors,
+          _valid: errors.length === 0
+        };
+      });
+
+      _cmAsigStep = 3;
+      _renderCmAsigStep();
+    } catch (err) { showToast('Error: ' + err.message, 'error'); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function _renderCmAsigPreview(w) {
+  const total = _cmAsigData.length;
+  const validos = _cmAsigData.filter(r => r._valid).length;
+  const invalidos = total - validos;
+
+  w.innerHTML = `
+    <div style="margin-bottom:16px;display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
+      <span style="font-size:14px;font-weight:700">Total: ${total}</span>
+      <span style="font-size:14px;color:#059669;font-weight:700">&#10003; V&aacute;lidos: ${validos}</span>
+      ${invalidos > 0 ? '<span style="font-size:14px;color:#dc2626;font-weight:700">&#10007; Con errores: ' + invalidos + '</span>' : ''}
+    </div>
+    <div style="max-height:380px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+      <table style="width:100%;font-size:11px;border-collapse:collapse">
+        <thead><tr style="background:#f8fafc;position:sticky;top:0">
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">#</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">TICKET</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">MOTIVO</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">ACTIVO</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">SERIE</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">DESTINO</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">ACTA</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">ESTADO</th>
+        </tr></thead>
+        <tbody>
+          ${_cmAsigData.map(r => {
+            const destLabel = r.tipoDest === 'SITIO' ? (r._sitio ? esc(r._sitio.nombre || r.sitioCod) : esc(r.sitioCod)) : (r._colab ? esc(_fullName(r._colab)) : 'DNI: ' + esc(r.dni));
+            return '<tr style="border-bottom:1px solid #f1f5f9;' + (!r._valid ? 'background:#fef2f2' : 'background:#f0fdf4') + '">'
+              + '<td style="padding:6px">' + r._row + '</td>'
+              + '<td style="padding:6px;font-weight:600">' + esc(r.ticket) + '</td>'
+              + '<td style="padding:6px">' + esc(r.motivo) + '</td>'
+              + '<td style="padding:6px">' + esc(r.codActivo) + '</td>'
+              + '<td style="padding:6px;font-family:monospace">' + esc(r.serie || '<sin serie>') + '</td>'
+              + '<td style="padding:6px">' + destLabel + '</td>'
+              + '<td style="padding:6px">' + (r.actaEntrega ? '<span style="color:#16a34a;font-weight:600">' + esc(r.actaEntrega) + '</span>' : '<span style="color:#94a3b8">—</span>') + '</td>'
+              + '<td style="padding:6px">' + (r._valid ? '<span style="color:#059669;font-weight:700">&#10003; OK</span>' : '<span style="color:#dc2626;font-size:10px">' + r._errors.join(', ') + '</span>') + '</td>'
+              + '</tr>';
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+      <button class="btn btn-secondary" onclick="_cmAsigStep=2;_cmAsigData=[];_renderCmAsigStep()">&larr; Subir otro archivo</button>
+      ${validos > 0 ? '<button class="btn btn-primary" onclick="_cmAsigStep=4;_renderCmAsigStep()">Continuar con ' + validos + ' v&aacute;lidos &rarr;</button>' : '<span style="color:#dc2626;font-weight:600">No hay registros v&aacute;lidos</span>'}
+    </div>
+  `;
+}
+
+async function _ejecutarCargaMasivaAsig() {
+  const validos = _cmAsigData.filter(r => r._valid);
+  if (validos.length === 0) return;
+
+  const activos = DB.get('activos');
+  const asig = DB.get('asignaciones');
+  const now = new Date();
+  const timeStr = 'T' + String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
+
+  validos.forEach(r => {
+    const activo = r._activo;
+    if (!activo) return;
+    const colab = r._colab;
+    const sitio = r._sitio;
+    const fecha = (r.fechaAsignacion || today()) + timeStr;
+    const motivoUp = (r.motivo || '').toUpperCase();
+    const isPrestamo = motivoUp.includes('PRESTAMO');
+    const isReemplazo = motivoUp.includes('REEMPLAZO') || motivoUp.includes('RENOVACION') || motivoUp.includes('REPOSICION');
+
+    // Mark old assignment as pending return if REEMPLAZO
+    if (isReemplazo && r.serie) {
+      const oldAsig = asig.find(a => a.activoId === activo.id && (a.serieAsignada || '').toUpperCase() === r.serie && a.estado === 'Vigente');
+      if (oldAsig) {
+        oldAsig.pendienteRetorno = true;
+        oldAsig.fechaReemplazo = fecha;
+        oldAsig.motivoReemplazo = r.motivo;
+        oldAsig.ticketReemplazo = r.ticket;
+      }
+    }
+
+    asig.push(upperFields({
+      id: nextId(asig),
+      activoId: activo.id,
+      activoCodigo: activo.codigo,
+      activoTipo: activo.tipo,
+      activoMarca: activo.marca,
+      activoModelo: activo.modelo,
+      serieAsignada: r.serie || '',
+      colaboradorId: colab ? colab.id : null,
+      colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
+      correoColab: colab ? (colab.email || '') : '',
+      area: colab ? colab.area : (sitio ? (sitio.area || '') : ''),
+      tipoDestino: sitio ? 'sitio' : 'colaborador',
+      sitioId: sitio ? sitio.id : null,
+      sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
+      fechaAsignacion: fecha,
+      tipoAsignacion: r.motivo,
+      motivo: r.motivo,
+      ticket: r.ticket,
+      observaciones: r.observaciones || '',
+      estado: 'Vigente',
+      fechaFinPrestamo: isPrestamo ? (r.fechaFinPrestamo || '') : '',
+      actaEntrega: (r.actaEntrega || '').toUpperCase().trim() || ''
+    }));
+
+    // Update activo estado
+    const totalSeries = (activo.series || []).length;
+    const seriesAsig = asig.filter(a => a.activoId === activo.id && a.estado === 'Vigente').length;
+    if (totalSeries === 0 || seriesAsig >= totalSeries) {
+      activo.estado = 'Asignado';
+    }
+    activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
+
+    // Auto bitacora SALIDA
+    _autoBitacora({
+      movimiento: 'SALIDA',
+      almacen: activo.ubicacion || 'Almacen TI',
+      tipoEquipo: activo.tipo || '',
+      equipo: activo.equipo || activo.tipo || '',
+      modelo: activo.modelo || '',
+      serie: r.serie || '',
+      codInv: activo.codInv || '',
+      correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
+      ticket: r.ticket || '',
+      motivo: r.motivo || ''
+    });
+
+    // Si tiene acta de entrega, sincronizar con bitacora
+    if (r.actaEntrega) {
+      const actaUp = (r.actaEntrega || '').toUpperCase().trim();
+      const bitMovs = DB.get('bitacoraMovimientos') || [];
+      const bitMov = bitMovs.find(m => m.movimiento === 'SALIDA' && (m.serie || '').toUpperCase() === (r.serie || '').toUpperCase() && (m.ticket || '').toUpperCase() === r.ticket);
+      if (bitMov) {
+        bitMov.actaCorrelativo = actaUp;
+        bitMov.estadoAsignacion = 'ATENDIDO';
+        DB.set('bitacoraMovimientos', bitMovs);
+      }
+    }
+  });
+
+  DB.set('activos', activos);
+  DB.set('asignaciones', asig);
+  addMovimiento('Carga Masiva Asignaciones', validos.length + ' asignaciones importadas desde Excel');
+  await DB.flush();
+
+  _cmAsigData = [];
+  _cmAsigStep = 1;
+  closeModal();
+  showToast(validos.length + ' asignaciones importadas correctamente');
   renderAsignacion(document.getElementById('contentArea'));
 }
 
@@ -6735,14 +7051,14 @@ function previewActaEntrega(asigId) {
   for (let i = 0; i < 4; i++) {
     const g = grupo[i];
     if (g) {
-      const inv = g.serieAsignada ? (activos.find(a => a.id === g.activoId)?.series?.find(s => s.serie === g.serieAsignada)?.codInventario || '') : '';
+      const _ci = g.serieAsignada ? (activos.find(a => a.id === g.activoId)?.series?.find(s => s.serie === g.serieAsignada)?.codInv || '') : '';
       equipRows += `<tr>
         <td style="text-align:center">${i + 1}</td>
         <td>${esc(g.activoTipo || '')} ${esc((activos.find(a=>a.id===g.activoId)||{}).equipo || '')}</td>
         <td>${esc(g.activoMarca || '')}</td>
         <td>${esc(g.activoModelo || '')}</td>
         <td>${esc(g.serieAsignada || 'N/A')}</td>
-        <td>${esc(inv || 'N/A')}</td>
+        <td>${esc(_ci || 'N/A')}</td>
       </tr>`;
     } else {
       equipRows += `<tr><td style="text-align:center">${i + 1}</td><td></td><td></td><td></td><td></td><td></td></tr>`;
@@ -6765,7 +7081,7 @@ function previewActaEntrega(asigId) {
       for (let i = 0; i < 4; i++) {
         const d = _devueltos[i];
         if (d) {
-          const dInv = d.serieAsignada ? (activos.find(a => a.id === d.activoId)?.series?.find(s => s.serie === d.serieAsignada)?.codInventario || '') : '';
+          const dInv = d.serieAsignada ? (activos.find(a => a.id === d.activoId)?.series?.find(s => s.serie === d.serieAsignada)?.codInv || '') : '';
           devRows += '<tr><td style="text-align:center">' + (i+1) + '</td><td>' + esc(d.activoTipo || '') + '</td><td>' + esc(d.activoMarca || '') + '</td><td>' + esc(d.activoModelo || '') + '</td><td>' + esc(d.serieAsignada || 'N/A') + '</td><td>' + esc(dInv || 'N/A') + '</td></tr>';
         } else {
           devRows += '<tr><td style="text-align:center">' + (i+1) + '</td><td></td><td></td><td></td><td></td><td></td></tr>';
@@ -6814,7 +7130,7 @@ function _buildActaPrintHTML(record, colab, grupo, activos, activoPrincipal, equ
       for (let i = 0; i < 4; i++) {
         const d = _devueltos[i];
         if (d) {
-          const dInv = d.serieAsignada ? (activos.find(a => a.id === d.activoId)?.series?.find(s => s.serie === d.serieAsignada)?.codInventario || '') : '';
+          const dInv = d.serieAsignada ? (activos.find(a => a.id === d.activoId)?.series?.find(s => s.serie === d.serieAsignada)?.codInv || '') : '';
           devRows += '<tr><td style="text-align:center">' + (i+1) + '</td><td>' + esc(d.activoTipo || '') + '</td><td>' + esc(d.activoMarca || '') + '</td><td>' + esc(d.activoModelo || '') + '</td><td>' + esc(d.serieAsignada || 'N/A') + '</td><td>' + esc(dInv || 'N/A') + '</td></tr>';
         } else {
           devRows += '<tr><td style="text-align:center">' + (i+1) + '</td><td></td><td></td><td></td><td></td><td></td></tr>';
@@ -7094,13 +7410,13 @@ function _copyDetalleAsignacion() {
 
   const equiposRowsHTML = d.equipos.map(a => {
     const act = activos.find(x => x.id === a.activoId);
-    const inv = (act && act.codInventario) ? act.codInventario : '—';
+    const _ci = (act && act.codInv) ? act.codInv : '—';
     return '<tr>'
       + '<td style="' + cs + '">' + esc(a.activoTipo || '') + '</td>'
       + '<td style="' + cs + '">' + esc(a.activoMarca || '') + '</td>'
       + '<td style="' + cs + '">' + esc(a.activoModelo || '') + '</td>'
       + '<td style="' + cs + '">' + esc(a.serieAsignada || '—') + '</td>'
-      + '<td style="' + cs + '">' + esc(inv) + '</td>'
+      + '<td style="' + cs + '">' + esc(_ci) + '</td>'
       + '</tr>';
   }).join('');
 
@@ -7119,8 +7435,8 @@ function _copyDetalleAsignacion() {
   const plainText = 'Ticket: ' + d.ticket + '\nMotivo: ' + d.motivo + '\nCorreo: ' + d.correo + '\n\nEquipos asignados:\n'
     + d.equipos.map(a => {
         const act = activos.find(x => x.id === a.activoId);
-        const inv = (act && act.codInventario) ? act.codInventario : '—';
-        return (a.activoTipo || '') + ' | ' + (a.activoMarca || '') + ' | ' + (a.activoModelo || '') + ' | ' + (a.serieAsignada || '—') + ' | ' + inv;
+        const _ci = (act && act.codInv) ? act.codInv : '—';
+        return (a.activoTipo || '') + ' | ' + (a.activoMarca || '') + ' | ' + (a.activoModelo || '') + ' | ' + (a.serieAsignada || '—') + ' | ' + _ci;
       }).join('\n');
 
   const _copyOk = () => {
@@ -7320,7 +7636,7 @@ function _ejecutarDevSingle(asigId) {
       marca: activo.marca || '',
       modelo: activo.modelo || '',
       serie: a.serieAsignada || '',
-      codInventario: activo.codInventario || '',
+      codInv: activo.codInv || '',
       almacen: activo.ubicacion || '',
       estadoEquipo: 'NO RECUPERABLE',
       motivoBaja: 'CESE-NO RECUPERABLE',
@@ -7352,7 +7668,7 @@ function _ejecutarDevSingle(asigId) {
       equipo: activo.equipo || activo.tipo || '',
       modelo: activo.modelo || a.activoModelo || '',
       serie: a.serieAsignada || '',
-      inv: activo.codInventario || '',
+      codInv: activo.codInv || '',
       correo: a.correoColab || '',
       motivo: _bitMotivo
     });
@@ -7744,22 +8060,35 @@ function _verDetalleSitio(id) {
   `, 'modal-lg');
 }
 
+let _cmSitiosStep = 1;
 function _openCargaMasivaSitiosModal() {
-  openModal('Carga Masiva — Sitios Móviles', `
-    <div style="text-align:center;padding:20px 0">
-      <p style="margin-bottom:16px;color:var(--text-secondary)">Sube un archivo Excel con los sitios móviles a registrar.</p>
-      <div style="display:flex;gap:10px;justify-content:center;margin-bottom:20px">
-        <button class="btn btn-secondary" onclick="_descargarPlantillaSitios()" style="font-size:12px">📄 Descargar Plantilla</button>
-        <label class="btn btn-primary" style="font-size:12px;cursor:pointer">
-          📂 Seleccionar Archivo
-          <input type="file" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelSitios(this.files[0])">
-        </label>
-      </div>
-      <div id="sitiosCmpContainer"></div>
-    </div>
-  `, `
+  _cargaMasivaSitiosData = [];
+  _cmSitiosStep = 1;
+  openModal('Carga Masiva — Sitios M&oacute;viles', '<div id="sitiosCmpContainer"></div>', `
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
+  _renderCmSitiosStep();
+}
+
+function _renderCmSitiosStep() {
+  const w = document.getElementById('sitiosCmpContainer');
+  if (!w) return;
+  const _s = (active, done, n, label) => '<div class="rep-cm-step ' + (done ? 'done' : active ? 'active' : '') + '"><span class="rep-cm-step-num">' + (done ? '&#10003;' : n) + '</span><span class="rep-cm-step-label">' + label + '</span></div>';
+  const steps = '<div class="rep-cm-steps">' + _s(_cmSitiosStep===1,_cmSitiosStep>1,1,'Descargar plantilla') + _s(_cmSitiosStep===2,_cmSitiosStep>2,2,'Subir archivo') + _s(_cmSitiosStep===3,_cmSitiosStep>3,3,'Revisar preview') + _s(_cmSitiosStep===4,false,4,'Confirmar') + '</div>';
+
+  if (_cmSitiosStep === 1) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:12px">&#128203;</div><h3 style="margin-bottom:8px">Paso 1: Descargar Plantilla</h3><p style="color:var(--text-secondary);font-size:13px;margin-bottom:20px">Descarga la plantilla con el formato correcto para sitios m&oacute;viles.</p><button class="btn btn-primary" onclick="_descargarPlantillaSitios();_cmSitiosStep=2;_renderCmSitiosStep()">&#128203; Descargar Plantilla</button><button class="btn btn-secondary" onclick="_cmSitiosStep=2;_renderCmSitiosStep()" style="margin-left:8px">Ya tengo la plantilla &rarr;</button></div></div>';
+  } else if (_cmSitiosStep === 2) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div class="rep-cm-dropzone" id="sitiosDropZone" onclick="document.getElementById(\'sitiosFileInput2\').click()"><div style="font-size:48px;margin-bottom:12px">&#128229;</div><p style="font-weight:600;color:var(--text);margin-bottom:4px">Arrastra o selecciona tu archivo Excel</p><p style="font-size:13px;color:var(--text-secondary)">.xlsx o .xls</p><input type="file" id="sitiosFileInput2" accept=".xlsx,.xls" style="display:none" onchange="_procesarExcelSitios(this.files[0])"></div></div></div>';
+    const dz = document.getElementById('sitiosDropZone');
+    if (dz) { dz.ondragover = e => { e.preventDefault(); dz.classList.add('dragover'); }; dz.ondragleave = () => dz.classList.remove('dragover'); dz.ondrop = e => { e.preventDefault(); dz.classList.remove('dragover'); if (e.dataTransfer.files.length) _procesarExcelSitios(e.dataTransfer.files[0]); }; }
+  } else if (_cmSitiosStep === 3) {
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" id="sitiosPreviewWrap"></div></div>';
+    _renderCargaMasivaSitiosPreview();
+  } else if (_cmSitiosStep === 4) {
+    const validos = _cargaMasivaSitiosData.filter(r => r._valid).length;
+    w.innerHTML = '<div class="rep-cm-layout">' + steps + '<div class="rep-cm-work" style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:12px">&#9989;</div><h3 style="margin-bottom:8px">Confirmar Importaci&oacute;n</h3><p style="color:var(--text-secondary);margin-bottom:20px">Se importar&aacute;n <strong>' + validos + '</strong> sitios m&oacute;viles.</p><button class="btn btn-primary" onclick="_ejecutarCargaMasivaSitios()" style="font-size:14px;padding:12px 32px">&#128229; Importar ' + validos + ' sitios</button><button class="btn btn-secondary" onclick="_cmSitiosStep=3;_renderCmSitiosStep()" style="margin-left:8px">&larr; Volver</button></div></div>';
+  }
 }
 
 function _descargarPlantillaSitios() {
@@ -7817,14 +8146,15 @@ function _procesarExcelSitios(file) {
         return { sede, area, piso, ubicacion: ubi, observacion: obs, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
       });
 
-      _renderCargaMasivaSitiosPreview();
+      _cmSitiosStep = 3;
+      _renderCmSitiosStep();
     } catch (err) { showToast('Error: ' + err.message, 'error'); }
   };
   reader.readAsArrayBuffer(file);
 }
 
 function _renderCargaMasivaSitiosPreview() {
-  const container = document.getElementById('sitiosCmpContainer');
+  const container = document.getElementById('sitiosPreviewWrap') || document.getElementById('sitiosCmpContainer');
   if (!container) return;
   const total = _cargaMasivaSitiosData.length;
   const validos = _cargaMasivaSitiosData.filter(r => r._valid).length;
@@ -7859,13 +8189,14 @@ function _renderCargaMasivaSitiosPreview() {
         </tbody>
       </table>
     </div>
-    <div style="margin-top:16px;text-align:right">
-      ${validos > 0 ? `<button class="btn btn-primary" onclick="_ejecutarCargaMasivaSitios()" style="font-size:13px">📥 Importar ${validos} sitio${validos > 1 ? 's' : ''}</button>` : '<span style="color:#dc2626;font-size:13px;font-weight:600">No hay registros válidos para importar</span>'}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+      <button class="btn btn-secondary" onclick="_cmSitiosStep=2;_cargaMasivaSitiosData=[];_renderCmSitiosStep()">&larr; Subir otro archivo</button>
+      ${validos > 0 ? `<button class="btn btn-primary" onclick="_cmSitiosStep=4;_renderCmSitiosStep()">Continuar con ${validos} v&aacute;lidos &rarr;</button>` : '<span style="color:#dc2626;font-weight:600">No hay registros v&aacute;lidos</span>'}
     </div>
   `;
 }
 
-function _ejecutarCargaMasivaSitios() {
+async function _ejecutarCargaMasivaSitios() {
   const validos = _cargaMasivaSitiosData.filter(r => r._valid);
   if (validos.length === 0) return;
   if (!confirm('¿Importar ' + validos.length + ' sitios móviles?')) return;
@@ -7877,6 +8208,7 @@ function _ejecutarCargaMasivaSitios() {
     sitios.push(_s);
   });
   DB.set('sitiosMoviles', sitios);
+  await DB.flush();
   closeModal();
   showToast(validos.length + ' sitios importados correctamente');
   renderSitiosMoviles(document.getElementById('contentArea'));
@@ -8307,7 +8639,7 @@ function _ejecutarDevolucion(colabId) {
         marca: activo.marca || '',
         modelo: activo.modelo || '',
         serie: item.serie || '',
-        codInventario: activo.codInventario || '',
+        codInv: activo.codInv || '',
         almacen: activo.ubicacion || '',
         estadoEquipo: 'NO RECUPERABLE',
         motivoBaja: 'CESE-NO RECUPERABLE',
@@ -8341,7 +8673,7 @@ function _ejecutarDevolucion(colabId) {
         equipo: _devActivo.equipo || _devActivo.tipo || '',
         modelo: _devActivo.modelo || '',
         serie: item.serie || '',
-        inv: _devActivo.codInventario || '',
+        codInv: _devActivo.codInv || '',
         correo: c ? (c.email || '') : '',
         motivo: _isNR ? 'CESE-NO RECUPERABLE' : 'CESE'
       });
@@ -9015,7 +9347,7 @@ function _buildInventarioRows() {
         marca: a.marca || '',
         modelo: a.modelo || '',
         serie: '',
-        codInventario: '',
+        codInv: '',
         fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
         motivo: asig ? asig.motivo || '' : '',
         actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
@@ -9046,7 +9378,7 @@ function _buildInventarioRows() {
           marca: a.marca || '',
           modelo: a.modelo || '',
           serie: s.serie || '',
-          codInventario: s.codInventario || '',
+          codInv: s.codInv || '',
           fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
           motivo: asig ? asig.motivo || '' : '',
           actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
@@ -9105,7 +9437,7 @@ function verDetalleSerie(activoId, serie) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:4px 0">
       ${_f('Código CMDB', activo.codigo, {mono:true, bg:'#f0f9ff', border:'#bae6fd'})}
       ${_f('N° de Serie', serie, {mono:true, bg:'#f0f9ff', border:'#bae6fd'})}
-      ${_f('Cod. Inventario', serieObj.codInventario, {mono:true})}
+      ${_f('Cod. Inv', serieObj.codInv, {mono:true})}
       ${_f('Tipo de Equipo', activo.tipo)}
       ${_f('Equipo', activo.equipo || activo.tipo)}
       ${(() => {
@@ -9479,7 +9811,7 @@ function _renderInvTable() {
            r.marca.toLowerCase().includes(s) ||
            r.modelo.toLowerCase().includes(s) ||
            r.serie.toLowerCase().includes(s) ||
-           r.codInventario.toLowerCase().includes(s) ||
+           r.codInv.toLowerCase().includes(s) ||
            r.estadoCMDB.toLowerCase().includes(s) ||
            r.estadoEquipo.toLowerCase().includes(s) ||
            r.colaborador.toLowerCase().includes(s) ||
@@ -9503,7 +9835,7 @@ function _renderInvTable() {
               <th style="${thStyle}">Marca</th>
               <th style="${thStyle}">Modelo</th>
               <th style="${thStyle}">Serie</th>
-              <th style="${thStyle}">Inv. Entel</th>
+              <th style="${thStyle}">Cod. Inv</th>
               <th style="${thStyle}">F. Asignación</th>
               <th style="${thStyle}">Motivo</th>
               <th style="${thStyle}">Acta Entrega</th>
@@ -9533,7 +9865,7 @@ function _renderInvTable() {
                       <td style="${tdStyle}">${esc(r.marca || '—')}</td>
                       <td style="${tdStyle}">${esc(r.modelo || '—')}</td>
                       <td style="${tdStyle};font-family:monospace">${r.serie ? `<a href="#" onclick="verDetalleSerie(${r.activoId},'${esc(r.serie)}');return false" style="color:var(--primary);text-decoration:underline;cursor:pointer;font-weight:600">${esc(r.serie)}</a>` : '—'}</td>
-                      <td style="${tdStyle};font-family:monospace">${esc(r.codInventario || '—')}</td>
+                      <td style="${tdStyle};font-family:monospace">${esc(r.codInv || '—')}</td>
                       <td style="${tdStyle}">${formatDate(r.fechaAsignacion)}</td>
                       <td style="${tdStyle}">${esc(r.motivo || '—')}</td>
                       <td style="${tdStyle}${r.actaEntrega === 'PENDIENTE' ? ';color:#dc2626;font-weight:600' : ''}">${esc(r.actaEntrega || '—')}</td>
@@ -9561,8 +9893,8 @@ function _renderInvTable() {
 
 function exportInventario() {
   const rows = _buildInventarioRows();
-  const headers = ['SEDE','TIPO_EQUIPO','EQUIPO','MARCA','MODELO','SERIE','INV_ENTEL','FECHA_ASIGNACION','MOTIVO','ACTA_ENTREGA','ESTADO_CMDB','ESTADO_EQUIPO','USO_EQUIPO','AREA_TRABAJO','CORREO','COLABORADOR_POSICION','JEFE_RESPONSABLE','TICKET'];
-  const data = rows.map(r => [r.sede,r.tipo,r.equipo,r.marca,r.modelo,r.serie,r.codInventario,formatDate(r.fechaAsignacion),r.motivo,r.actaEntrega,r.estadoCMDB,r.estadoEquipo,r.usoEquipo,r.areaTrabajo,r.correo,r.colaborador,r.jefe,r.ticket]);
+  const headers = ['SEDE','TIPO_EQUIPO','EQUIPO','MARCA','MODELO','SERIE','COD_INV','FECHA_ASIGNACION','MOTIVO','ACTA_ENTREGA','ESTADO_CMDB','ESTADO_EQUIPO','USO_EQUIPO','AREA_TRABAJO','CORREO','COLABORADOR_POSICION','JEFE_RESPONSABLE','TICKET'];
+  const data = rows.map(r => [r.sede,r.tipo,r.equipo,r.marca,r.modelo,r.serie,r.codInv,formatDate(r.fechaAsignacion),r.motivo,r.actaEntrega,r.estadoCMDB,r.estadoEquipo,r.usoEquipo,r.areaTrabajo,r.correo,r.colaborador,r.jefe,r.ticket]);
   const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
   const wb = XLSX.utils.book_new();
@@ -9677,7 +10009,7 @@ function _autoBitacora(opts) {
     equipo: (opts.equipo || '').toUpperCase(),
     modelo: (opts.modelo || '').toUpperCase(),
     serie: (opts.serie || '').toUpperCase(),
-    inv: (opts.inv || '').toUpperCase(),
+    codInv: (opts.codInv || '').toUpperCase(),
     correo: opts.correo || '',
     motivo: (opts.motivo || '').toUpperCase(),
     gestor: opts.gestor || (currentUser ? (currentUser.usuario || currentUser.nombre) : 'Sistema'),
@@ -9778,7 +10110,7 @@ function _renderBitTable() {
              (m.equipo || '').toLowerCase().includes(s) ||
              (m.modelo || '').toLowerCase().includes(s) ||
              (m.serie || '').toLowerCase().includes(s) ||
-             (m.inv || '').toLowerCase().includes(s) ||
+             (m.codInv || '').toLowerCase().includes(s) ||
              (m.correo || '').toLowerCase().includes(s) ||
              (m.gestor || '').toLowerCase().includes(s) ||
              (m.ticket || '').toLowerCase().includes(s) ||
@@ -9802,7 +10134,7 @@ function _renderBitTable() {
               <th style="min-width:140px">Equipo</th>
               <th style="min-width:130px">Modelo</th>
               <th style="min-width:130px">Serie</th>
-              <th style="min-width:100px">INV</th>
+              <th style="min-width:100px">COD. INV</th>
               <th style="min-width:120px">Motivo</th>
               <th style="min-width:120px">Estado Asign.</th>
               <th style="min-width:150px">Acta Asignacion</th>
@@ -9846,7 +10178,7 @@ function _renderBitTable() {
                     <td>${esc(m.equipo || '-')}</td>
                     <td style="font-size:12px">${esc(m.modelo || '-')}</td>
                     <td style="font-size:12px;font-family:monospace">${esc(m.serie || '-')}</td>
-                    <td style="font-size:12px">${esc(m.inv || '-')}</td>
+                    <td style="font-size:12px">${esc(m.codInv || '-')}</td>
                     <td style="font-size:11px">${esc(m.motivo || '-')}</td>
                     <td>${estadoBadge}</td>
                     <td>${actaHTML}</td>
@@ -9906,8 +10238,8 @@ function openBitacoraModal(editId) {
         <input id="bitSerie" class="form-control" placeholder="Numero de serie" value="${m ? esc(m.serie) : ''}">
       </div>
       <div class="form-group">
-        <label>INV (Cod. Patrimonial)</label>
-        <input id="bitInv" class="form-control" placeholder="Codigo de inventario" value="${m ? esc(m.inv) : ''}">
+        <label>COD. INV (Cod. Patrimonial)</label>
+        <input id="bitInv" class="form-control" placeholder="Cod. Inv (Patrimonial)" value="${m ? esc(m.codInv) : ''}">
       </div>
       <div class="form-group">
         <label>Ticket</label>
@@ -9955,7 +10287,7 @@ function saveBitacoraMovimiento(editId) {
   const equipo = document.getElementById('bitEquipo').value.trim();
   const modelo = document.getElementById('bitModelo').value.trim();
   const serie = document.getElementById('bitSerie').value.trim();
-  const inv = document.getElementById('bitInv').value.trim();
+  const codInv = document.getElementById('bitInv').value.trim();
   const ticket = document.getElementById('bitTicket').value.trim();
   const correo = document.getElementById('bitCorreo').value.trim();
   const gestor = document.getElementById('bitGestor').value;
@@ -9973,7 +10305,7 @@ function saveBitacoraMovimiento(editId) {
     equipo,
     modelo,
     serie,
-    inv,
+    codInv,
     correo
   });
   record.ticket = ticket;
@@ -10212,8 +10544,8 @@ function exportBitacoraExcel() {
   const movs = DB.get('bitacoraMovimientos');
   if (movs.length === 0) { showToast('No hay movimientos para exportar', 'error'); return; }
 
-  const headers = ['ID', 'MOVIMIENTO', 'FECHA', 'ALMACEN', 'EQUIPO', 'MODELO', 'SERIE', 'INV', 'ESTADO_ASIGNACION', 'ACTA_ASIGNACION', 'TICKET', 'CORREO', 'GESTOR'];
-  const data = movs.map(m => [m.id, m.movimiento, formatDate(m.fechaRegistro), _limpiarAlmacen(m.almacen), m.equipo, m.modelo, m.serie, m.inv, m.estadoAsignacion, m.actaCorrelativo || '', m.ticket || '', m.correo, m.gestor]);
+  const headers = ['ID', 'MOVIMIENTO', 'FECHA', 'ALMACEN', 'EQUIPO', 'MODELO', 'SERIE', 'COD_INV', 'ESTADO_ASIGNACION', 'ACTA_ASIGNACION', 'TICKET', 'CORREO', 'GESTOR'];
+  const data = movs.map(m => [m.id, m.movimiento, formatDate(m.fechaRegistro), _limpiarAlmacen(m.almacen), m.equipo, m.modelo, m.serie, m.codInv, m.estadoAsignacion, m.actaCorrelativo || '', m.ticket || '', m.correo, m.gestor]);
   const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
   const wb = XLSX.utils.book_new();
@@ -10597,7 +10929,7 @@ function _ejecutarRetorno() {
       equipo: activo.equipo || activo.tipo || '',
       modelo: activo.modelo || rec.activoModelo || '',
       serie: rec.serieAsignada || '',
-      inv: activo.codInventario || '',
+      codInv: activo.codInv || '',
       correo: rec.correoColab || '',
       motivo: _motivoBit
     });
@@ -10664,7 +10996,7 @@ function _buildBajasRows() {
         marca: a.marca || '',
         modelo: a.modelo || '',
         serie: s.serie || '',
-        codInventario: s.codInventario || '',
+        codInv: s.codInv || '',
         estadoCmdb: s.estadoSerie || a.estado || 'Baja',
         estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
         antiguedad,
@@ -10824,7 +11156,7 @@ function _renderBajasTable() {
             <th>Marca</th>
             <th>Modelo</th>
             <th>Serie</th>
-            <th>INV</th>
+            <th>Cod. Inv</th>
             <th>Estado CMDB</th>
             <th>Estado Equipo</th>
             <th>Antigüedad</th>
@@ -10851,7 +11183,7 @@ function _renderBajasTable() {
                     + '<td style="font-size:12px">' + esc(r.marca) + '</td>'
                     + '<td style="font-size:12px">' + esc(r.modelo) + '</td>'
                     + '<td style="font-size:11px;font-family:monospace">' + esc(r.serie || '—') + '</td>'
-                    + '<td style="font-size:11px;font-family:monospace">' + esc(r.codInventario || '—') + '</td>'
+                    + '<td style="font-size:11px;font-family:monospace">' + esc(r.codInv || '—') + '</td>'
                     + '<td><span class="badge badge-danger" style="font-size:10px">BAJA</span></td>'
                     + '<td>' + _eqBadge(r.estadoEquipo) + '</td>'
                     + '<td style="font-size:11px;color:#64748b">' + r.antiguedad + '</td>'
@@ -10914,7 +11246,7 @@ function _verDetalleBaja(activoId) {
         ${_f('Modelo', esc(a.modelo))}
         ${_f('SKU', esc(a.sku))}
         ${_f('Serie', (a.series||[]).map(s=>s.serie).join(', ') || '—')}
-        ${_f('INV', (a.series||[]).map(s=>s.codInventario).join(', ') || '—')}
+        ${_f('Cod. Inv', (a.series||[]).map(s=>s.codInv).join(', ') || '—')}
         ${_f('Almacén', esc(a.ubicacion))}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;background:#f8fafc;padding:14px;border-radius:8px">
@@ -10944,7 +11276,7 @@ function _exportBajasPendientes() {
     'MARCA': r.marca,
     'MODELO': r.modelo,
     'SERIE': r.serie,
-    'INV': r.codInventario,
+    'COD_INV': r.codInv,
     'CÓDIGO': r.codigo,
     'SKU': r.sku,
     'ESTADO CMDB': r.estadoCmdb,
@@ -11105,7 +11437,7 @@ function _confirmarEjecucionBajas() {
       marca: r.marca,
       modelo: r.modelo,
       serie: r.serie,
-      codInventario: r.codInventario,
+      codInv: r.codInv,
       almacen: r.almacen,
       estadoEquipo: r.estadoEquipo,
       motivoBaja: r.motivoBaja,
@@ -11131,7 +11463,7 @@ function _confirmarEjecucionBajas() {
       equipo: r.equipo || '',
       modelo: r.modelo || '',
       serie: r.serie || '',
-      inv: r.codInventario || '',
+      codInv: r.codInv || '',
       motivo: 'BAJA EJECUTADA'
     });
   });
@@ -11430,7 +11762,7 @@ function saveBaja() {
     equipo: activo.equipo || activo.tipo || '',
     modelo: activo.modelo || '',
     serie: (activo.series && activo.series[0]) ? activo.series[0].serie || '' : '',
-    inv: activo.codInventario || '',
+    codInv: activo.codInv || '',
     motivo: 'BAJA'
   });
 
@@ -12030,19 +12362,65 @@ function resetAllData() {
 }
 
 /* ═══════════════════════════════════════════════════════
+   RECOVER DATA FROM INDEXEDDB → LOCALSTORAGE
+   ═══════════════════════════════════════════════════════ */
+function _recoverFromIndexedDB() {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) { resolve(); return; }
+    const req = indexedDB.open('ati_cmddb', 1);
+    req.onerror = () => resolve();
+    req.onupgradeneeded = (e) => {
+      // DB didn't exist, nothing to recover
+      e.target.transaction.abort();
+      resolve();
+    };
+    req.onsuccess = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('data')) { db.close(); resolve(); return; }
+      const tx = db.transaction('data', 'readonly');
+      const store = tx.objectStore('data');
+      const reqAll = store.getAll();
+      const reqKeys = store.getAllKeys();
+      let keys = [], vals = [];
+      reqKeys.onsuccess = () => { keys = reqKeys.result; };
+      reqAll.onsuccess = () => {
+        vals = reqAll.result;
+        let recovered = 0;
+        keys.forEach((k, i) => {
+          if (k && (k.startsWith('ati_') || k.startsWith('ati_cfg_'))) {
+            // Solo copiar si localStorage no tiene datos o tiene array vacio
+            const existing = localStorage.getItem(k);
+            if (!existing || existing === '[]' || existing === 'null') {
+              try {
+                const val = vals[i];
+                if (val && (Array.isArray(val) ? val.length > 0 : true)) {
+                  localStorage.setItem(k, JSON.stringify(val));
+                  recovered++;
+                }
+              } catch { /* ignore */ }
+            }
+          }
+        });
+        if (recovered > 0) console.log('Recovered ' + recovered + ' keys from IndexedDB to localStorage');
+        db.close();
+        resolve();
+      };
+      reqAll.onerror = () => { db.close(); resolve(); };
+    };
+  });
+}
+
+/* ═══════════════════════════════════════════════════════
    APP INITIALIZATION
    ═══════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', async function () {
-  // 1. Inicializar IndexedDB y cargar caché en memoria
-  try {
-    await DB.init();
-  } catch (e) {
-    console.error('Error inicializando IndexedDB:', e);
-    alert('Error al inicializar la base de datos. Intente recargar la página.');
-    return;
-  }
+  // 1. Recuperar datos de IndexedDB a localStorage (si existen)
+  try { await _recoverFromIndexedDB(); } catch (e) { console.warn('IndexedDB recovery skipped:', e); }
 
-  // 2. Inicializar datos por defecto / migraciones
+  // 2. Inicializar DB (localStorage - sincrono)
+  await DB.init();
+
+  // 3. Inicializar datos por defecto / migraciones
   initSampleData();
 
   // 3. Restaurar sesión y arrancar la app
