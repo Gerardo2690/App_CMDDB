@@ -132,7 +132,11 @@ function initSampleData() {
   if (!DB.getConfig('tipoPuesto', null))
     DB.setConfig('tipoPuesto', ['PRESENCIAL', 'REMOTO', 'HÍBRIDO']);
   if (!DB.getConfig('tipoAsignacion', null))
-    DB.setConfig('tipoAsignacion', ['INGRESO NUEVO', 'ASIGNACIÓN', 'REEMPLAZO', 'RENOVACIÓN', 'PRÉSTAMO', 'REPOSICIÓN DAÑO FÍSICO', 'REPOSICIÓN ROBO']);
+    DB.setConfig('tipoAsignacion', ['INGRESO NUEVO', 'REEMPLAZO', 'ASIGNACIÓN', 'PRÉSTAMO', 'RENOVACIÓN', 'REPOSICIÓN DAÑO FÍSICO', 'REPOSICIÓN ROBO']);
+  if (!DB.getConfig('mapeoEPAdmin', null))
+    DB.setConfig('mapeoEPAdmin', ['LAPTOP']);
+  if (!DB.getConfig('mapeoAdicErg', null))
+    DB.setConfig('mapeoAdicErg', ['MOCHILA', 'ALZA NOTEBOOK', 'KIT TECLADO-MOUSE INALAMBRICO', 'PAD MOUSE']);
   if (!DB.getConfig('tipoEquipos', null))
     DB.setConfig('tipoEquipos', {
       'LAPTOP':       ['LAPTOP', 'LAPTOP MINI', 'LAPTOP GAMER'],
@@ -192,6 +196,20 @@ function _migrateCodInv() {
     });
     if (bChanged) DB.set('bitacoraMovimientos', movs);
   }
+}
+
+/**
+ * Determina el mapeo funcional de un tipo de equipo.
+ * Retorna 'EP-ADMIN', 'ADIC-ERG' o 'ADICIONAL'
+ */
+function getMapeoFuncional(tipo) {
+  if (!tipo) return 'ADICIONAL';
+  const tipoUp = tipo.toUpperCase();
+  const epAdmin = DB.getConfig('mapeoEPAdmin', []).map(v => v.toUpperCase());
+  const adicErg = DB.getConfig('mapeoAdicErg', []).map(v => v.toUpperCase());
+  if (epAdmin.includes(tipoUp)) return 'EP-ADMIN';
+  if (adicErg.includes(tipoUp)) return 'ADIC-ERG';
+  return 'ADICIONAL';
 }
 
 function _migrateRepuestos() {
@@ -1704,6 +1722,7 @@ function deleteActivo(id) {
    ═══════════════════════════════════════════════════════ */
 let _cargaMasivaData = [];
 let _cargaMasivaPage = 1;
+let _cmShowOnlyErrors = false;
 const _CM_PAGE_SIZE = 15;
 
 const _CM_COLUMNS = [
@@ -1736,6 +1755,7 @@ let _cmEquiposStep = 1;
 function openCargaMasivaModal() {
   _cargaMasivaData = [];
   _cargaMasivaPage = 1;
+  _cmShowOnlyErrors = false;
   _cmEquiposStep = 1;
   openModal('Carga Masiva de Equipos', '<div id="cmContainer"></div>', `
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
@@ -1801,93 +1821,132 @@ function procesarExcel(file) {
         return;
       }
 
+      // Mostrar progreso para archivos grandes
+      const isLarge = rows.length > 500;
+      if (isLarge) {
+        const container = document.getElementById('cmPreviewWrap') || document.getElementById('cmContainer');
+        if (container) container.innerHTML = `<div style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Procesando ${rows.length.toLocaleString()} filas...</h3><p style="color:var(--text-secondary);margin-top:8px">Esto puede tomar unos segundos</p><div id="cmProgressBar" style="width:300px;height:6px;background:#e2e8f0;border-radius:3px;margin:16px auto"><div id="cmProgressFill" style="width:0%;height:100%;background:#2563eb;border-radius:3px;transition:width 0.3s"></div></div><div id="cmProgressText" style="font-size:12px;color:var(--text-light)">0%</div></div>`;
+      }
+
+      // Pre-calcular catálogos como Sets para O(1) lookup
       const dateFields = ['fechaIngreso', 'adendaFechaInicio', 'adendaFechaFin'];
-      // Valores válidos desde configuración (case-insensitive)
-      const _vTipos     = DB.getConfig('tipos', []).map(v => v.toUpperCase());
-      const _vEstadosEq = ALL_ESTADOS_EQUIPO;
-      const _vOrigenes  = DB.getConfig('origenes', []).map(v => v.toUpperCase());
-      const _vUbicaciones = DB.getConfig('ubicaciones', []).map(v => v.toUpperCase());
+      const _vTipos     = new Set(DB.getConfig('tipos', []).map(v => v.toUpperCase()));
+      const _vOrigenes  = new Set(DB.getConfig('origenes', []).map(v => v.toUpperCase()));
+      const _vUbicaciones = new Set(DB.getConfig('ubicaciones', []).map(v => v.toUpperCase()));
+      const _validForDisp = ESTADO_EQUIPO_MAP['DISPONIBLE'] || [];
+      const _validForDispSet = new Set(_validForDisp.map(v => v.toUpperCase()));
 
-      _cargaMasivaData = rows.map((row, i) => {
-        const mapped = {};
-        // Mapeo case-insensitive de columnas
-        const rowKeys = Object.keys(row);
-        _CM_COLUMNS.forEach(col => {
-          const matchKey = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
-          let val = row[matchKey];
-          if (val === undefined || val === null) val = '';
-          mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
-        });
-        // Normalizar fechas (seriales, dd/mm/yyyy, etc.)
-        dateFields.forEach(f => { if (mapped[f]) mapped[f] = normalizeDate(mapped[f]); });
-        // Convertir a mayúsculas
-        Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
-        // Validación por campo
-        const fieldErrors = {};
-        // Campos obligatorios
-        if (!mapped.tipo)   fieldErrors.tipo = 'Vacío';
-        if (!mapped.marca)  fieldErrors.marca = 'Vacío';
-        if (!mapped.modelo) fieldErrors.modelo = 'Vacío';
-        // Validar valores contra catálogos
-        if (mapped.tipo && _vTipos.length && !_vTipos.includes(mapped.tipo.toUpperCase()))
-          fieldErrors.tipo = 'No existe en catálogo';
-        if (mapped.estadoEquipo) {
-          const _validForDisp = ESTADO_EQUIPO_MAP['DISPONIBLE'] || [];
-          if (!_validForDisp.includes(mapped.estadoEquipo.toUpperCase()))
-            fieldErrors.estadoEquipo = 'Solo válido: ' + _validForDisp.join(', ');
-        }
-        if (mapped.origenEquipo && _vOrigenes.length && !_vOrigenes.includes(mapped.origenEquipo.toUpperCase()))
-          fieldErrors.origenEquipo = 'No existe en catálogo';
-        if (mapped.ubicacion && _vUbicaciones.length && !_vUbicaciones.includes(mapped.ubicacion.toUpperCase()))
-          fieldErrors.ubicacion = 'No existe en catálogo';
-        // Validar fechas
-        dateFields.forEach(f => {
-          if (mapped[f] && !/^\d{4}-\d{2}-\d{2}$/.test(mapped[f]))
-            fieldErrors[f] = 'Formato inválido';
-        });
-        // Validar costo
-        if (mapped.costo && isNaN(parseFloat(mapped.costo)))
-          fieldErrors.costo = 'No es número';
-
-        const hasErrors = Object.keys(fieldErrors).length > 0;
-        return { ...mapped, _row: i + 2, _fieldErrors: fieldErrors, _valid: !hasErrors };
-      });
-
-      // Validar series duplicadas (solo las que el usuario ingresó, no las vacías)
-      const _seriesEnArchivo = {};
-      const _activosDB = DB.get('activos');
+      // Pre-calcular series en BD como Set
       const _seriesEnBD = new Set();
-      _activosDB.forEach(a => (a.series || []).forEach(s => { if (s.serie) _seriesEnBD.add(s.serie.toUpperCase()); }));
+      DB.get('activos').forEach(a => (a.series || []).forEach(s => { if (s.serie) _seriesEnBD.add(s.serie.toUpperCase()); }));
 
-      _cargaMasivaData.forEach((r, i) => {
-        if (!r.serie) return; // Serie vacía se autogenerará, no validar
-        const su = r.serie.toUpperCase();
-        // Duplicada en BD
-        if (_seriesEnBD.has(su)) {
-          r._fieldErrors = r._fieldErrors || {};
-          r._fieldErrors.serie = 'Ya existe en BD';
-          r._valid = false;
-        }
-        // Duplicada dentro del mismo archivo
-        if (_seriesEnArchivo[su] !== undefined) {
-          r._fieldErrors = r._fieldErrors || {};
-          r._fieldErrors.serie = 'Duplicada en archivo (fila ' + _seriesEnArchivo[su] + ')';
-          r._valid = false;
-          // Marcar también la primera ocurrencia
-          const firstIdx = _cargaMasivaData.findIndex(x => x._row === _seriesEnArchivo[su]);
-          if (firstIdx >= 0 && _cargaMasivaData[firstIdx].serie) {
-            _cargaMasivaData[firstIdx]._fieldErrors = _cargaMasivaData[firstIdx]._fieldErrors || {};
-            _cargaMasivaData[firstIdx]._fieldErrors.serie = 'Duplicada en archivo (fila ' + r._row + ')';
-            _cargaMasivaData[firstIdx]._valid = false;
-          }
-        } else {
-          _seriesEnArchivo[su] = r._row;
-        }
+      // Pre-mapear columnas una sola vez
+      const firstRowKeys = Object.keys(rows[0]);
+      const colMap = {};
+      _CM_COLUMNS.forEach(col => {
+        colMap[col.field] = firstRowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
       });
 
-      _cargaMasivaPage = 1;
-      _cmEquiposStep = 3;
-      _renderCmEquiposStep();
+      // Procesar en lotes asíncronos para no bloquear UI
+      _cargaMasivaData = [];
+      const BATCH = 500;
+      let idx = 0;
+
+      function processBatch() {
+        const end = Math.min(idx + BATCH, rows.length);
+        for (let i = idx; i < end; i++) {
+          const row = rows[i];
+          const mapped = {};
+          _CM_COLUMNS.forEach(col => {
+            let val = row[colMap[col.field]];
+            if (val === undefined || val === null) val = '';
+            mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
+          });
+          dateFields.forEach(f => { if (mapped[f]) mapped[f] = normalizeDate(mapped[f]); });
+          Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
+
+          const fieldErrors = {};
+          if (!mapped.tipo)   fieldErrors.tipo = 'Vacío';
+          if (!mapped.marca)  fieldErrors.marca = 'Vacío';
+          if (!mapped.modelo) fieldErrors.modelo = 'Vacío';
+          if (mapped.tipo && _vTipos.size && !_vTipos.has(mapped.tipo.toUpperCase()))
+            fieldErrors.tipo = 'No existe en catálogo';
+          if (mapped.estadoEquipo && !_validForDispSet.has(mapped.estadoEquipo.toUpperCase()))
+            fieldErrors.estadoEquipo = 'Solo válido: ' + _validForDisp.join(', ');
+          if (mapped.origenEquipo && _vOrigenes.size && !_vOrigenes.has(mapped.origenEquipo.toUpperCase()))
+            fieldErrors.origenEquipo = 'No existe en catálogo';
+          if (mapped.ubicacion && _vUbicaciones.size && !_vUbicaciones.has(mapped.ubicacion.toUpperCase()))
+            fieldErrors.ubicacion = 'No existe en catálogo';
+          dateFields.forEach(f => {
+            if (mapped[f] && !/^\d{4}-\d{2}-\d{2}$/.test(mapped[f]))
+              fieldErrors[f] = 'Formato inválido';
+          });
+          if (mapped.costo && isNaN(parseFloat(mapped.costo)))
+            fieldErrors.costo = 'No es número';
+
+          const hasErrors = Object.keys(fieldErrors).length > 0;
+          _cargaMasivaData.push({ ...mapped, _row: i + 2, _fieldErrors: fieldErrors, _valid: !hasErrors });
+        }
+        idx = end;
+
+        // Actualizar barra de progreso
+        if (isLarge) {
+          const pct = Math.round((idx / rows.length) * 80);
+          const fill = document.getElementById('cmProgressFill');
+          const txt = document.getElementById('cmProgressText');
+          if (fill) fill.style.width = pct + '%';
+          if (txt) txt.textContent = `Validando filas... ${idx.toLocaleString()} / ${rows.length.toLocaleString()}`;
+        }
+
+        if (idx < rows.length) {
+          setTimeout(processBatch, 0);
+        } else {
+          // Validar series duplicadas con HashMap O(n)
+          if (isLarge) {
+            const fill = document.getElementById('cmProgressFill');
+            const txt = document.getElementById('cmProgressText');
+            if (fill) fill.style.width = '90%';
+            if (txt) txt.textContent = 'Verificando series duplicadas...';
+          }
+          setTimeout(() => {
+            const _seriesEnArchivo = {};
+            const _dupFirstIdx = {};
+            _cargaMasivaData.forEach((r, i) => {
+              if (!r.serie) return;
+              const su = r.serie.toUpperCase();
+              if (_seriesEnBD.has(su)) {
+                r._fieldErrors.serie = 'Ya existe en BD';
+                r._valid = false;
+              }
+              if (_seriesEnArchivo[su] !== undefined) {
+                r._fieldErrors.serie = 'Duplicada en archivo (fila ' + _seriesEnArchivo[su] + ')';
+                r._valid = false;
+                const fi = _dupFirstIdx[su];
+                if (fi !== undefined) {
+                  _cargaMasivaData[fi]._fieldErrors.serie = 'Duplicada en archivo (fila ' + r._row + ')';
+                  _cargaMasivaData[fi]._valid = false;
+                }
+              } else {
+                _seriesEnArchivo[su] = r._row;
+                _dupFirstIdx[su] = i;
+              }
+            });
+
+            _cargaMasivaPage = 1;
+            _cmEquiposStep = 3;
+            _renderCmEquiposStep();
+          }, 0);
+        }
+      }
+
+      // Iniciar procesamiento
+      if (isLarge) {
+        _cmEquiposStep = 3;
+        _renderCmEquiposStep();
+        setTimeout(processBatch, 50);
+      } else {
+        processBatch();
+      }
     } catch (err) {
       showToast('Error al leer el archivo: ' + err.message, 'error');
     }
@@ -1912,10 +1971,14 @@ function _renderCargaMasivaPreview() {
   });
   const nLotes = Object.keys(lotesTemp).length;
 
-  const tp = Math.max(1, Math.ceil(total / _CM_PAGE_SIZE));
+  // Filtrar datos según toggle
+  const filteredData = _cmShowOnlyErrors ? _cargaMasivaData.filter(r => !r._valid) : _cargaMasivaData;
+  const filteredTotal = filteredData.length;
+
+  const tp = Math.max(1, Math.ceil(filteredTotal / _CM_PAGE_SIZE));
   if (_cargaMasivaPage > tp) _cargaMasivaPage = tp;
   const start = (_cargaMasivaPage - 1) * _CM_PAGE_SIZE;
-  const pageData = _cargaMasivaData.slice(start, start + _CM_PAGE_SIZE);
+  const pageData = filteredData.slice(start, start + _CM_PAGE_SIZE);
 
   container.innerHTML = `
     <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">
@@ -1927,9 +1990,9 @@ function _renderCargaMasivaPreview() {
         <div style="font-size:22px;font-weight:700;color:#16a34a">${validos}</div>
         <div style="font-size:11px;color:#15803d">Series válidas</div>
       </div>
-      <div style="flex:1;min-width:100px;padding:10px 14px;background:${errores > 0 ? '#fef2f2' : '#f8fafc'};border-radius:8px;text-align:center">
+      <div style="flex:1;min-width:100px;padding:10px 14px;background:${errores > 0 ? '#fef2f2' : '#f8fafc'};border-radius:8px;text-align:center;cursor:${errores > 0 ? 'pointer' : 'default'}" ${errores > 0 ? 'onclick="_cmShowOnlyErrors=!_cmShowOnlyErrors;_cargaMasivaPage=1;_renderCargaMasivaPreview()"' : ''}>
         <div style="font-size:22px;font-weight:700;color:${errores > 0 ? '#dc2626' : '#94a3b8'}">${errores}</div>
-        <div style="font-size:11px;color:${errores > 0 ? '#b91c1c' : '#64748b'}">Con errores</div>
+        <div style="font-size:11px;color:${errores > 0 ? '#b91c1c' : '#64748b'}">Con errores ${_cmShowOnlyErrors ? '(filtrado)' : ''}</div>
       </div>
       <div style="flex:1;min-width:100px;padding:10px 14px;background:#f8fafc;border-radius:8px;text-align:center">
         <div style="font-size:22px;font-weight:700;color:#334155">${total}</div>
@@ -1938,13 +2001,18 @@ function _renderCargaMasivaPreview() {
     </div>
 
     <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#1e40af">ℹ️ Las filas con mismo Tipo + Marca + Modelo se fusionarán en <strong>${nLotes} modelo(s)</strong>. Celdas <span style="background:#dcfce7;padding:1px 6px;border-radius:3px">verdes</span> = correctas, <span style="background:#fecaca;padding:1px 6px;border-radius:3px">rojas</span> = con error.</div>
-    ${errores > 0 ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b">⚠️ <strong>${errores} fila(s) con error</strong> no se importarán. Revisa las celdas marcadas en rojo.</div>` : ''}
+    ${errores > 0 ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b;display:flex;align-items:center;justify-content:space-between">
+      <span>⚠️ <strong>${errores} fila(s) con error</strong> no se importarán.</span>
+      <button class="btn btn-sm" onclick="_cmShowOnlyErrors=!_cmShowOnlyErrors;_cargaMasivaPage=1;_renderCargaMasivaPreview()" style="font-size:11px;padding:3px 10px;background:${_cmShowOnlyErrors ? '#dc2626' : '#fff'};color:${_cmShowOnlyErrors ? '#fff' : '#dc2626'};border:1px solid #dc2626;border-radius:4px;cursor:pointer">${_cmShowOnlyErrors ? '📋 Ver todos' : '⚠ Ver solo errores'}</button>
+    </div>` : ''}
 
     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px">
       <table style="width:100%;font-size:12px">
         <thead>
           <tr>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">#</th>
+            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary);text-align:center">✓</th>
+            <th style="padding:8px 6px;font-size:11px;background:#fef2f2;color:#991b1b;min-width:220px">ERROR</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Tipo *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Marca *</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Modelo *</th>
@@ -1956,8 +2024,6 @@ function _renderCargaMasivaPreview() {
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Origen</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Almacén</th>
             <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">F.Ingreso</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary);text-align:center">✓</th>
-            <th style="padding:8px 6px;font-size:11px;background:var(--bg-secondary)">Error</th>
           </tr>
         </thead>
         <tbody>
@@ -1968,8 +2034,10 @@ function _renderCargaMasivaPreview() {
             const bad = 'background:#fecaca';
             const cellStyle = (field, val) => fe[field] ? bad : val ? ok : '';
             return `
-            <tr>
+            <tr style="${r._valid ? '' : 'background:#fef2f2'}">
               <td style="padding:6px;color:var(--text-light)">${r._row}</td>
+              <td style="padding:6px;text-align:center">${r._valid ? '<span style="color:#16a34a;font-weight:700">✓</span>' : '<span style="color:#dc2626;font-weight:700">✗</span>'}</td>
+              <td style="padding:6px;font-size:10px;color:#dc2626;font-weight:${errList ? '600' : 'normal'}">${errList ? esc(errList) : '<span style="color:#16a34a">—</span>'}</td>
               <td style="padding:6px;${cellStyle('tipo', r.tipo)}" ${fe.tipo ? 'title="'+esc(fe.tipo)+'"' : ''}>${esc(r.tipo || '—')}</td>
               <td style="padding:6px;${cellStyle('marca', r.marca)}" ${fe.marca ? 'title="'+esc(fe.marca)+'"' : ''}>${esc(r.marca || '—')}</td>
               <td style="padding:6px;${cellStyle('modelo', r.modelo)}" ${fe.modelo ? 'title="'+esc(fe.modelo)+'"' : ''}>${esc(r.modelo || '—')}</td>
@@ -1981,10 +2049,6 @@ function _renderCargaMasivaPreview() {
               <td style="padding:6px;${cellStyle('origenEquipo', r.origenEquipo)}" ${fe.origenEquipo ? 'title="'+esc(fe.origenEquipo)+'"' : ''}>${esc(r.origenEquipo || '—')}</td>
               <td style="padding:6px;font-size:11px;${cellStyle('ubicacion', r.ubicacion)}" ${fe.ubicacion ? 'title="'+esc(fe.ubicacion)+'"' : ''}>${esc(r.ubicacion || '—')}</td>
               <td style="padding:6px;font-size:11px;${cellStyle('fechaIngreso', r.fechaIngreso)}" ${fe.fechaIngreso ? 'title="'+esc(fe.fechaIngreso)+'"' : ''}>${r.fechaIngreso ? formatDate(r.fechaIngreso) : '—'}</td>
-              <td style="padding:6px;text-align:center">${r._valid
-                ? '<span style="color:#16a34a;font-weight:700">✓</span>'
-                : '<span style="color:#dc2626;font-weight:700">✗</span>'}</td>
-              <td style="padding:6px;font-size:11px;color:#dc2626;max-width:220px;word-break:break-word">${r._valid ? '' : esc(errList)}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -1993,7 +2057,7 @@ function _renderCargaMasivaPreview() {
 
     ${tp > 1 ? `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--text-light)">
-        <span>Mostrando ${start + 1}–${Math.min(start + _CM_PAGE_SIZE, total)} de ${total}</span>
+        <span>Mostrando ${start + 1}–${Math.min(start + _CM_PAGE_SIZE, filteredTotal)} de ${filteredTotal}${_cmShowOnlyErrors ? ' (solo errores)' : ''}</span>
         <div style="display:flex;gap:4px">
           ${_cargaMasivaPage > 1 ? `<button class="btn btn-sm" onclick="_cargaMasivaPage--;_renderCargaMasivaPreview()" style="font-size:11px;padding:3px 8px">‹ Ant</button>` : ''}
           <span style="padding:3px 8px;font-weight:600">${_cargaMasivaPage} / ${tp}</span>
@@ -2096,15 +2160,19 @@ async function ejecutarCargaMasiva() {
   const lotesKeys = Object.keys(lotes);
   let nuevos = 0, fusionados = 0;
 
+  // Pre-indexar activos existentes por tipo+marca+modelo para O(1) lookup
+  const _activoIdx = {};
+  activos.forEach((a, idx) => {
+    const k = [(a.tipo||'').toLowerCase(),(a.marca||'').toLowerCase(),(a.modelo||'').toLowerCase()].join('||');
+    _activoIdx[k] = idx;
+  });
+
   lotesKeys.forEach(key => {
     const { data: r, series } = lotes[key];
 
-    // Buscar si ya existe un activo con el mismo tipo+marca+modelo
-    const existente = activos.find(a =>
-      (a.tipo || '').toLowerCase() === (r.tipo || '').toLowerCase() &&
-      (a.marca || '').toLowerCase() === (r.marca || '').toLowerCase() &&
-      (a.modelo || '').toLowerCase() === (r.modelo || '').toLowerCase()
-    );
+    // Buscar si ya existe un activo con el mismo tipo+marca+modelo (O(1))
+    const _lookupKey = [(r.tipo||'').toLowerCase(),(r.marca||'').toLowerCase(),(r.modelo||'').toLowerCase()].join('||');
+    const existente = _activoIdx[_lookupKey] !== undefined ? activos[_activoIdx[_lookupKey]] : null;
 
     if (existente) {
       // Fusionar: agregar series nuevas al activo existente (evitar duplicados por número de serie)
@@ -6488,6 +6556,28 @@ async function saveAsignacion() {
   const colab = _asigTipoDestino === 'sitio' ? null : _asigSelectedColab;
   const sitio = _asigTipoDestino === 'sitio' ? _asigSelectedSitio : null;
 
+  // ── VALIDACIÓN EP-ADMIN: máximo 1 equipo principal por colaborador ──
+  if (colab && !isReemplazo) {
+    const epAdminSeleccionados = _asigSelectedActivos.filter(sel => {
+      const act = activos.find(a => a.id === sel.activoId);
+      return act && getMapeoFuncional(act.tipo || act.equipo) === 'EP-ADMIN';
+    });
+    if (epAdminSeleccionados.length > 0) {
+      const yaEPAdmin = asig.find(a => a.colaboradorId === colab.id && a.estado === 'Vigente' && !a.pendienteRetorno && (() => {
+        const act = activos.find(x => x.id === a.activoId);
+        return act && getMapeoFuncional(act.tipo || act.equipo) === 'EP-ADMIN';
+      })());
+      if (yaEPAdmin) {
+        showToast('El colaborador ya tiene un equipo principal (EP-ADMIN) asignado. Debe ejecutar un Reemplazo o Devolución primero.', 'error');
+        return;
+      }
+    }
+    if (epAdminSeleccionados.length > 1) {
+      showToast('Solo puede asignar 1 equipo principal (EP-ADMIN) por colaborador.', 'error');
+      return;
+    }
+  }
+
   // ── REEMPLAZO / RENOVACIÓN: marcar equipo viejo como pendiente de retorno ──
   if (isReemplazo && _asigReemOld) {
     const oldRec = asig.find(a => a.id === _asigReemOld.id);
@@ -6673,13 +6763,14 @@ async function saveAsignacion() {
 let _cmAsigData = [];
 let _cmAsigStep = 1;
 const _CM_ASIG_COLS = [
-  { excel: 'TICKET',              field: 'ticket',           required: true },
+  { excel: 'TICKET',              field: 'ticket' },
   { excel: 'FECHA_ASIGNACION',    field: 'fechaAsignacion' },
   { excel: 'MOTIVO',              field: 'motivo',           required: true },
-  { excel: 'CODIGO_ACTIVO',       field: 'codigoActivo',     required: true },
+  { excel: 'COD_INV',              field: 'codInv' },
   { excel: 'SERIE',               field: 'serie' },
+  { excel: 'USO_EQUIPO',          field: 'usoEquipo' },
   { excel: 'TIPO_DESTINO',        field: 'tipoDestino' },
-  { excel: 'DNI_COLABORADOR',     field: 'dniColaborador' },
+  { excel: 'CORREO_COLABORADOR',  field: 'correoColaborador' },
   { excel: 'SITIO_CODIGO',        field: 'sitioCodigo' },
   { excel: 'ACTA_ENTREGA',        field: 'actaEntrega' },
   { excel: 'FECHA_FIN_PRESTAMO',  field: 'fechaFinPrestamo' },
@@ -6689,6 +6780,8 @@ const _CM_ASIG_COLS = [
 function _openCargaMasivaAsigModal() {
   _cmAsigData = [];
   _cmAsigStep = 1;
+  _cmAsigShowOnlyErrors = false;
+  _cmAsigPage = 1;
   openModal('Carga Masiva de Asignaciones', '<div id="cmAsigContainer"></div>', `
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
@@ -6711,8 +6804,9 @@ function _renderCmAsigStep() {
         <div style="text-align:center;padding:30px 0">
           <div style="font-size:48px;margin-bottom:12px">&#128203;</div>
           <h3 style="margin-bottom:8px">Paso 1: Descargar Plantilla</h3>
-          <p style="color:var(--text-secondary);font-size:13px;margin-bottom:8px">Columnas: TICKET, FECHA_ASIGNACION, MOTIVO, CODIGO_ACTIVO, SERIE, TIPO_DESTINO, DNI_COLABORADOR, SITIO_CODIGO, ACTA_ENTREGA, FECHA_FIN_PRESTAMO, OBSERVACIONES</p>
-          <p style="color:var(--text-muted);font-size:12px;margin-bottom:20px">MOTIVO: INGRESO NUEVO, ASIGNACION, REEMPLAZO, RENOVACION, PRESTAMO, REPOSICION DANO FISICO, REPOSICION ROBO</p>
+          <p style="color:var(--text-secondary);font-size:13px;margin-bottom:8px">Columnas: TICKET, FECHA_ASIGNACION, MOTIVO, COD_INV, SERIE, USO_EQUIPO, TIPO_DESTINO, DNI_COLABORADOR, SITIO_CODIGO, ACTA_ENTREGA, FECHA_FIN_PRESTAMO, OBSERVACIONES</p>
+          <p style="color:var(--text-muted);font-size:12px;margin-bottom:4px">MOTIVO: INGRESO NUEVO, ASIGNACION, REEMPLAZO, RENOVACION, PRESTAMO, REPOSICION DANO FISICO, REPOSICION ROBO</p>
+          <p style="color:var(--text-muted);font-size:12px;margin-bottom:20px">USO_EQUIPO: EP-ADMIN (equipo principal), ADIC-ERG (accesorio ergonómico), ADICIONAL (otro)</p>
           <button class="btn btn-primary" onclick="_descargarPlantillaAsig();_cmAsigStep=2;_renderCmAsigStep()">&#128203; Descargar Plantilla</button>
           <button class="btn btn-secondary" onclick="_cmAsigStep=2;_renderCmAsigStep()" style="margin-left:8px">Ya tengo la plantilla &rarr;</button>
         </div>
@@ -6761,9 +6855,9 @@ function _renderCmAsigStep() {
 
 function _descargarPlantillaAsig() {
   const headers = _CM_ASIG_COLS.map(c => c.excel);
-  const ej1 = ['WO-08001', '2026-03-23', 'ASIGNACION', 'ATI-00001', 'SN1234567890', 'COLABORADOR', '45678912', '', 'ACT00015', '', 'Equipo principal'];
-  const ej2 = ['WO-08002', '2026-03-23', 'PRESTAMO', 'ATI-00002', '', 'COLABORADOR', '12345678', '', '', '2026-04-30', 'Prestamo temporal'];
-  const ej3 = ['WO-08003', '2026-03-23', 'ASIGNACION', 'ATI-00003', '', 'SITIO', '', 'TDA-00001', 'ACT00020', '', 'Para tienda'];
+  const ej1 = ['WO-08001', '2026-03-23', 'ASIGNACION', 'ENT96008388', '5CD8IU909', 'EP-ADMIN', 'COLABORADOR', 'juan.perez@empresa.com', '', 'ACT00015', '', 'Equipo principal'];
+  const ej2 = ['WO-08002', '2026-03-23', 'ASIGNACION', 'ENT96008390', '5CD8IU911', 'ADIC-ERG', 'COLABORADOR', 'maria.lopez@empresa.com', '', '', '', 'Monitor adicional'];
+  const ej3 = ['WO-08003', '2026-03-23', 'ASIGNACION', 'ENT96008391', '', 'ADICIONAL', 'SITIO', '', 'TDA-00001', 'ACT00020', '', 'Para tienda'];
   const ws = XLSX.utils.aoa_to_sheet([headers, ej1, ej2, ej3]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 4, 18) }));
   const wb = XLSX.utils.book_new();
@@ -6783,136 +6877,262 @@ function _procesarExcelAsig(file) {
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (rows.length === 0) { showToast('Archivo vacio', 'error'); return; }
 
+      const isLarge = rows.length > 200;
+
+      // Mostrar progreso
+      if (isLarge) {
+        const container = document.getElementById('cmAsigContainer');
+        if (container) container.innerHTML = `<div style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Procesando ${rows.length.toLocaleString()} filas...</h3><div id="cmAsigProgressBar" style="width:300px;height:6px;background:#e2e8f0;border-radius:3px;margin:16px auto"><div id="cmAsigProgressFill" style="width:0%;height:100%;background:#2563eb;border-radius:3px;transition:width 0.3s"></div></div><div id="cmAsigProgressText" style="font-size:12px;color:var(--text-light)">0%</div></div>`;
+      }
+
+      // Pre-indexar para O(1) lookups
       const activos = DB.get('activos');
       const colabs = DB.get('colaboradores');
       const sitios = DB.get('sitiosMoviles') || [];
       const asigExist = DB.get('asignaciones');
-      const motivosValidos = ['INGRESO NUEVO','ASIGNACION','REEMPLAZO','RENOVACION','PRESTAMO','REPOSICION DANO FISICO','REPOSICION ROBO'];
+      const motivosValidos = new Set(['INGRESO NUEVO','ASIGNACION','REEMPLAZO','RENOVACION','PRESTAMO','REPOSICION DANO FISICO','REPOSICION ROBO','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO','ASIGNACIÓN','RENOVACIÓN','PRÉSTAMO','UPGRADE']);
 
-      _cmAsigData = rows.map((row, i) => {
-        const mapped = {};
-        const rowKeys = Object.keys(row);
-        _CM_ASIG_COLS.forEach(col => {
-          const matchKey = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel) || col.excel;
-          let val = row[matchKey];
-          if (val === undefined || val === null) val = '';
-          mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
-        });
+      // Index: serie → activo
+      const _serieToActivo = {};
+      activos.forEach(a => (a.series || []).forEach(s => { if (s.serie) _serieToActivo[s.serie.toUpperCase()] = a; }));
 
-        if (mapped.fechaAsignacion) mapped.fechaAsignacion = normalizeDate(mapped.fechaAsignacion);
-        if (mapped.fechaFinPrestamo) mapped.fechaFinPrestamo = normalizeDate(mapped.fechaFinPrestamo);
+      // Index: correo → colaborador
+      const _correoToColab = {};
+      colabs.forEach(c => { if (c.email) _correoToColab[c.email.toUpperCase()] = c; });
 
-        const errors = [];
-        const ticket = (mapped.ticket || '').toUpperCase();
-        const motivo = (mapped.motivo || '').toUpperCase();
-        const codActivo = (mapped.codigoActivo || '').toUpperCase();
-        const serie = (mapped.serie || '').toUpperCase();
-        const tipoDest = (mapped.tipoDestino || 'COLABORADOR').toUpperCase();
-        const dni = (mapped.dniColaborador || '').trim();
-        const sitioCod = (mapped.sitioCodigo || '').toUpperCase();
-        const isPrestamo = motivo.includes('PRESTAMO');
+      // Index: codigo sitio → sitio
+      const _codToSitio = {};
+      sitios.forEach(s => { if (s.codigo) _codToSitio[s.codigo.toUpperCase()] = s; });
 
-        if (!ticket) errors.push('TICKET requerido');
-        if (!motivo || !motivosValidos.some(m => motivo.includes(m))) errors.push('MOTIVO invalido');
-        if (!codActivo) errors.push('CODIGO_ACTIVO requerido');
+      // Index: series vigentes asignadas
+      const _seriesVigentes = new Set();
+      asigExist.forEach(a => { if (a.estado === 'Vigente' && a.serieAsignada) _seriesVigentes.add(a.serieAsignada.toUpperCase()); });
 
-        // Validar activo
-        const activo = activos.find(a => (a.codigo || '').toUpperCase() === codActivo);
-        if (!activo) { errors.push('Activo no encontrado: ' + codActivo); }
-        else {
-          // Validar serie si tiene series
-          if (activo.series && activo.series.length > 0) {
-            if (!serie) { errors.push('SERIE requerida (activo tiene series)'); }
-            else {
-              const serieExists = activo.series.some(s => (s.serie || '').toUpperCase() === serie);
-              if (!serieExists) errors.push('Serie no existe en activo');
-              else {
-                const yaAsignada = asigExist.some(a => a.activoId === activo.id && (a.serieAsignada || '').toUpperCase() === serie && a.estado === 'Vigente');
-                if (yaAsignada) errors.push('Serie ya asignada (vigente)');
-              }
-            }
-          }
+      // Index: EP-ADMIN vigente por colaborador
+      const _epAdminPorColab = new Set();
+      asigExist.forEach(a => {
+        if (a.estado !== 'Vigente' || a.pendienteRetorno) return;
+        const act = activos.find(x => x.id === a.activoId);
+        if (act && getMapeoFuncional(act.tipo || act.equipo) === 'EP-ADMIN') {
+          if (a.colaboradorId) _epAdminPorColab.add(a.colaboradorId);
         }
-
-        // Validar destino
-        let colab = null, sitio = null;
-        if (tipoDest === 'SITIO') {
-          if (!sitioCod) errors.push('SITIO_CODIGO requerido');
-          else {
-            sitio = sitios.find(s => (s.codigo || '').toUpperCase() === sitioCod);
-            if (!sitio) errors.push('Sitio no encontrado: ' + sitioCod);
-          }
-        } else {
-          if (!dni) errors.push('DNI_COLABORADOR requerido');
-          else {
-            colab = colabs.find(c => (c.dni || '') === dni);
-            if (!colab) errors.push('Colaborador no encontrado: DNI ' + dni);
-            else if (colab.estado !== 'Activo') errors.push('Colaborador no activo');
-          }
-        }
-
-        if (isPrestamo && !mapped.fechaFinPrestamo) errors.push('FECHA_FIN_PRESTAMO requerida para prestamo');
-
-        return {
-          ...mapped,
-          ticket, motivo, codActivo, serie, tipoDest, dni, sitioCod,
-          _activo: activo || null,
-          _colab: colab || null,
-          _sitio: sitio || null,
-          _row: i + 2,
-          _errors: errors,
-          _valid: errors.length === 0
-        };
       });
 
-      _cmAsigStep = 3;
-      _renderCmAsigStep();
+      // Pre-mapear columnas
+      const firstRowKeys = Object.keys(rows[0]);
+      const colMap = {};
+      _CM_ASIG_COLS.forEach(col => {
+        colMap[col.field] = firstRowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel) || col.excel;
+      });
+
+      _cmAsigData = [];
+      const BATCH = 300;
+      let idx = 0;
+
+      function processBatch() {
+        const end = Math.min(idx + BATCH, rows.length);
+        for (let i = idx; i < end; i++) {
+          const row = rows[i];
+          const mapped = {};
+          _CM_ASIG_COLS.forEach(col => {
+            let val = row[colMap[col.field]];
+            if (val === undefined || val === null) val = '';
+            mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
+          });
+
+          if (mapped.fechaAsignacion) mapped.fechaAsignacion = normalizeDate(mapped.fechaAsignacion);
+          if (mapped.fechaFinPrestamo) mapped.fechaFinPrestamo = normalizeDate(mapped.fechaFinPrestamo);
+
+          const errors = [];
+          const ticket = (mapped.ticket || '').toUpperCase();
+          const motivo = (mapped.motivo || '').toUpperCase();
+          const codInv = (mapped.codInv || '').toUpperCase();
+          const serie = (mapped.serie || '').toUpperCase();
+          const tipoDest = (mapped.tipoDestino || 'COLABORADOR').toUpperCase();
+          const correoColab = (mapped.correoColaborador || '').trim().toUpperCase();
+          const sitioCod = (mapped.sitioCodigo || '').toUpperCase();
+          const isPrestamo = motivo.includes('PRESTAMO');
+
+          if (!motivo || !motivosValidos.has(motivo)) errors.push('MOTIVO invalido');
+          if (!serie) errors.push('SERIE requerida');
+
+          // Buscar activo por SERIE O(1)
+          let activo = serie ? _serieToActivo[serie] || null : null;
+          if (serie && !activo) errors.push('Serie no encontrada: ' + serie);
+          else if (serie && _seriesVigentes.has(serie)) errors.push('Serie ya asignada (vigente)');
+
+          // Validar destino O(1)
+          let colab = null, sitio = null;
+          if (tipoDest === 'SITIO') {
+            if (!sitioCod) errors.push('SITIO_CODIGO requerido');
+            else {
+              sitio = _codToSitio[sitioCod] || null;
+              if (!sitio) errors.push('Sitio no encontrado: ' + sitioCod);
+            }
+          } else {
+            if (!correoColab) errors.push('CORREO_COLABORADOR requerido');
+            else {
+              colab = _correoToColab[correoColab] || null;
+              if (!colab) errors.push('Colaborador no encontrado: ' + correoColab);
+              else if (colab.estado !== 'Activo') errors.push('Colaborador no activo');
+            }
+          }
+
+          if (isPrestamo && !mapped.fechaFinPrestamo) errors.push('FECHA_FIN_PRESTAMO requerida para prestamo');
+
+          const usoEquipo = (mapped.usoEquipo || '').toUpperCase();
+          if (usoEquipo && !['EP-ADMIN', 'ADIC-ERG', 'ADICIONAL'].includes(usoEquipo))
+            errors.push('USO_EQUIPO invalido (EP-ADMIN, ADIC-ERG o ADICIONAL)');
+          const _usoFinal = usoEquipo || (activo ? getMapeoFuncional(activo.tipo || activo.equipo) : 'ADICIONAL');
+
+          if (colab && !motivo.includes('REEMPLAZO') && !motivo.includes('RENOVACION')) {
+            if (_usoFinal === 'EP-ADMIN' && _epAdminPorColab.has(colab.id))
+              errors.push('Colaborador ya tiene EP-ADMIN asignado');
+          }
+
+          _cmAsigData.push({
+            ...mapped,
+            ticket, motivo, codInv, serie, tipoDest, correoColab, sitioCod,
+            _usoEquipo: _usoFinal,
+            _activo: activo || null,
+            _colab: colab || null,
+            _sitio: sitio || null,
+            _row: i + 2,
+            _errors: errors,
+            _valid: errors.length === 0
+          });
+        }
+        idx = end;
+
+        if (isLarge) {
+          const pct = Math.round((idx / rows.length) * 90);
+          const fill = document.getElementById('cmAsigProgressFill');
+          const txt = document.getElementById('cmAsigProgressText');
+          if (fill) fill.style.width = pct + '%';
+          if (txt) txt.textContent = `Validando... ${idx.toLocaleString()} / ${rows.length.toLocaleString()}`;
+        }
+
+        if (idx < rows.length) {
+          setTimeout(processBatch, 0);
+        } else {
+          setTimeout(() => {
+            // Validar duplicados EP-ADMIN intra-archivo
+            const _epPorColab = {};
+            _cmAsigData.forEach(r => {
+              if (!r._valid || !r._colab) return;
+              const mot = (r.motivo || '').toUpperCase();
+              if (mot.includes('REEMPLAZO') || mot.includes('RENOVACION')) return;
+              if (r._usoEquipo !== 'EP-ADMIN') return;
+              const cKey = r._colab.id;
+              if (_epPorColab[cKey]) {
+                r._errors.push('Duplicado EP-ADMIN para mismo colaborador (fila ' + _epPorColab[cKey] + ')');
+                r._valid = false;
+              } else {
+                _epPorColab[cKey] = r._row;
+              }
+            });
+
+            _cmAsigStep = 3;
+            _renderCmAsigStep();
+          }, 0);
+        }
+      }
+
+      if (isLarge) {
+        setTimeout(processBatch, 50);
+      } else {
+        processBatch();
+      }
     } catch (err) { showToast('Error: ' + err.message, 'error'); }
   };
   reader.readAsArrayBuffer(file);
 }
 
+let _cmAsigShowOnlyErrors = false;
+let _cmAsigPage = 1;
+const _CMASIG_PAGE_SIZE = 15;
+
 function _renderCmAsigPreview(w) {
   const total = _cmAsigData.length;
   const validos = _cmAsigData.filter(r => r._valid).length;
-  const invalidos = total - validos;
+  const errores = total - validos;
+
+  const filteredData = _cmAsigShowOnlyErrors ? _cmAsigData.filter(r => !r._valid) : _cmAsigData;
+  const filteredTotal = filteredData.length;
+  const tp = Math.max(1, Math.ceil(filteredTotal / _CMASIG_PAGE_SIZE));
+  if (_cmAsigPage > tp) _cmAsigPage = tp;
+  const start = (_cmAsigPage - 1) * _CMASIG_PAGE_SIZE;
+  const pageData = filteredData.slice(start, start + _CMASIG_PAGE_SIZE);
 
   w.innerHTML = `
-    <div style="margin-bottom:16px;display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
-      <span style="font-size:14px;font-weight:700">Total: ${total}</span>
-      <span style="font-size:14px;color:#059669;font-weight:700">&#10003; V&aacute;lidos: ${validos}</span>
-      ${invalidos > 0 ? '<span style="font-size:14px;color:#dc2626;font-weight:700">&#10007; Con errores: ' + invalidos + '</span>' : ''}
+    <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+      <div style="flex:1;min-width:100px;padding:10px 14px;background:#f0fdf4;border-radius:8px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:#16a34a">${validos}</div>
+        <div style="font-size:11px;color:#15803d">Válidos</div>
+      </div>
+      <div style="flex:1;min-width:100px;padding:10px 14px;background:${errores > 0 ? '#fef2f2' : '#f8fafc'};border-radius:8px;text-align:center;cursor:${errores > 0 ? 'pointer' : 'default'}" ${errores > 0 ? 'onclick="_cmAsigShowOnlyErrors=!_cmAsigShowOnlyErrors;_cmAsigPage=1;_renderCmAsigPreview(document.getElementById(\'cmAsigContainer\'))"' : ''}>
+        <div style="font-size:22px;font-weight:700;color:${errores > 0 ? '#dc2626' : '#94a3b8'}">${errores}</div>
+        <div style="font-size:11px;color:${errores > 0 ? '#b91c1c' : '#64748b'}">Con errores ${_cmAsigShowOnlyErrors ? '(filtrado)' : ''}</div>
+      </div>
+      <div style="flex:1;min-width:100px;padding:10px 14px;background:#f8fafc;border-radius:8px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:#334155">${total}</div>
+        <div style="font-size:11px;color:#64748b">Total filas</div>
+      </div>
     </div>
-    <div style="max-height:380px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+
+    ${errores > 0 ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:12px;color:#991b1b;display:flex;align-items:center;justify-content:space-between">
+      <span>⚠️ <strong>${errores} fila(s) con error</strong> no se importarán.</span>
+      <button class="btn btn-sm" onclick="_cmAsigShowOnlyErrors=!_cmAsigShowOnlyErrors;_cmAsigPage=1;_renderCmAsigPreview(document.getElementById('cmAsigContainer'))" style="font-size:11px;padding:3px 10px;background:${_cmAsigShowOnlyErrors ? '#dc2626' : '#fff'};color:${_cmAsigShowOnlyErrors ? '#fff' : '#dc2626'};border:1px solid #dc2626;border-radius:4px;cursor:pointer">${_cmAsigShowOnlyErrors ? '📋 Ver todos' : '⚠ Ver solo errores'}</button>
+    </div>` : ''}
+
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px">
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <thead><tr style="background:#f8fafc;position:sticky;top:0">
           <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">#</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">✓</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;background:#fef2f2;color:#991b1b;min-width:200px">ERROR</th>
           <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">TICKET</th>
           <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">MOTIVO</th>
-          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">ACTIVO</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">COD. INV</th>
           <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">SERIE</th>
+          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">USO EQUIPO</th>
           <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">DESTINO</th>
           <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">ACTA</th>
-          <th style="padding:8px 6px;text-align:left;font-size:10px;color:#64748b">ESTADO</th>
         </tr></thead>
         <tbody>
-          ${_cmAsigData.map(r => {
-            const destLabel = r.tipoDest === 'SITIO' ? (r._sitio ? esc(r._sitio.nombre || r.sitioCod) : esc(r.sitioCod)) : (r._colab ? esc(_fullName(r._colab)) : 'DNI: ' + esc(r.dni));
-            return '<tr style="border-bottom:1px solid #f1f5f9;' + (!r._valid ? 'background:#fef2f2' : 'background:#f0fdf4') + '">'
-              + '<td style="padding:6px">' + r._row + '</td>'
+          ${pageData.map(r => {
+            const destLabel = r.tipoDest === 'SITIO' ? (r._sitio ? esc(r._sitio.nombre || r.sitioCod) : esc(r.sitioCod)) : (r._colab ? esc(_fullName(r._colab)) : esc(r.correoColab));
+            const _usoEq = r._usoEquipo || '';
+            const _usoColor = _usoEq === 'EP-ADMIN' ? 'background:#dbeafe;color:#1d4ed8' : _usoEq === 'ADIC-ERG' ? 'background:#fef3c7;color:#92400e' : 'background:#f1f5f9;color:#64748b';
+            return '<tr style="border-bottom:1px solid #f1f5f9;' + (!r._valid ? 'background:#fef2f2' : '') + '">'
+              + '<td style="padding:6px;color:var(--text-light)">' + r._row + '</td>'
+              + '<td style="padding:6px;text-align:center">' + (r._valid ? '<span style="color:#16a34a;font-weight:700">✓</span>' : '<span style="color:#dc2626;font-weight:700">✗</span>') + '</td>'
+              + '<td style="padding:6px;font-size:10px;color:#dc2626;font-weight:' + (r._errors.length ? '600' : 'normal') + '">' + (r._errors.length > 0 ? r._errors.map(e => esc(e)).join(' | ') : '<span style="color:#16a34a">—</span>') + '</td>'
               + '<td style="padding:6px;font-weight:600">' + esc(r.ticket) + '</td>'
               + '<td style="padding:6px">' + esc(r.motivo) + '</td>'
-              + '<td style="padding:6px">' + esc(r.codActivo) + '</td>'
-              + '<td style="padding:6px;font-family:monospace">' + esc(r.serie || '<sin serie>') + '</td>'
+              + '<td style="padding:6px;font-family:monospace">' + esc(r.codInv || '—') + '</td>'
+              + '<td style="padding:6px;font-family:monospace">' + esc(r.serie || '—') + '</td>'
+              + '<td style="padding:6px"><span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;' + _usoColor + '">' + esc(_usoEq || '—') + '</span></td>'
               + '<td style="padding:6px">' + destLabel + '</td>'
               + '<td style="padding:6px">' + (r.actaEntrega ? '<span style="color:#16a34a;font-weight:600">' + esc(r.actaEntrega) + '</span>' : '<span style="color:#94a3b8">—</span>') + '</td>'
-              + '<td style="padding:6px">' + (r._valid ? '<span style="color:#059669;font-weight:700">&#10003; OK</span>' : '<span style="color:#dc2626;font-size:10px">' + r._errors.join(', ') + '</span>') + '</td>'
               + '</tr>';
           }).join('')}
         </tbody>
       </table>
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px">
+
+    ${tp > 1 ? `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--text-light)">
+        <span>Mostrando ${start + 1}–${Math.min(start + _CMASIG_PAGE_SIZE, filteredTotal)} de ${filteredTotal}${_cmAsigShowOnlyErrors ? ' (solo errores)' : ''}</span>
+        <div style="display:flex;gap:4px">
+          ${_cmAsigPage > 1 ? '<button class="btn btn-sm" onclick="_cmAsigPage--;_renderCmAsigPreview(document.getElementById(\'cmAsigContainer\'))" style="font-size:11px;padding:3px 8px">‹ Ant</button>' : ''}
+          <span style="padding:3px 8px;font-weight:600">${_cmAsigPage} / ${tp}</span>
+          ${_cmAsigPage < tp ? '<button class="btn btn-sm" onclick="_cmAsigPage++;_renderCmAsigPreview(document.getElementById(\'cmAsigContainer\'))" style="font-size:11px;padding:3px 8px">Sig ›</button>' : ''}
+        </div>
+      </div>
+    ` : ''}
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
       <button class="btn btn-secondary" onclick="_cmAsigStep=2;_cmAsigData=[];_renderCmAsigStep()">&larr; Subir otro archivo</button>
       ${validos > 0 ? '<button class="btn btn-primary" onclick="_cmAsigStep=4;_renderCmAsigStep()">Continuar con ' + validos + ' v&aacute;lidos &rarr;</button>' : '<span style="color:#dc2626;font-weight:600">No hay registros v&aacute;lidos</span>'}
     </div>
@@ -6971,7 +7191,8 @@ async function _ejecutarCargaMasivaAsig() {
       observaciones: r.observaciones || '',
       estado: 'Vigente',
       fechaFinPrestamo: isPrestamo ? (r.fechaFinPrestamo || '') : '',
-      actaEntrega: (r.actaEntrega || '').toUpperCase().trim() || ''
+      actaEntrega: (r.actaEntrega || '').toUpperCase().trim() || '',
+      usoEquipo: r._usoEquipo || ''
     }));
 
     // Update activo estado
@@ -9312,7 +9533,7 @@ let _invSearchTimer = null;
 // Filtros dinámicos del inventario CMDB
 const _INV_FILTER_OPTIONS = [
   { key: 'estadoCMDB',    label: 'Estado CMDB' },
-  { key: 'sede',           label: 'Sede / Almacén' },
+  { key: 'sede',           label: 'Almacén' },
   { key: 'tipo',           label: 'Tipo Equipo' },
   { key: 'marca',          label: 'Marca' },
   { key: 'estadoEquipo',   label: 'Estado Equipo' },
@@ -9353,7 +9574,7 @@ function _buildInventarioRows() {
         actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
         estadoCMDB: asig ? 'Asignado' : (a.estado || 'Disponible'),
         estadoEquipo: a.estadoEquipo || '',
-        usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
+        usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
         areaTrabajo: _esSitio ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
         correo: _esSitio ? '—' : (colab ? colab.email || '' : ''),
         colaborador: _esSitio ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
@@ -9384,7 +9605,7 @@ function _buildInventarioRows() {
           actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
           estadoCMDB: asig ? 'Asignado' : (s.estadoSerie || a.estado || 'Disponible'),
           estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
-          usoEquipo: asig ? (asig.pendienteRetorno ? 'PENDIENTE RETORNO' : 'EN USO') : '',
+          usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
           areaTrabajo: _esSitio2 ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
           correo: _esSitio2 ? '—' : (colab ? colab.email || '' : ''),
           colaborador: _esSitio2 ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
@@ -9829,7 +10050,7 @@ function _renderInvTable() {
         <table>
           <thead>
             <tr>
-              <th style="${thStyle}">Sede</th>
+              <th style="${thStyle}">Almacén</th>
               <th style="${thStyle}">Tipo Equipo</th>
               <th style="${thStyle}">Equipo</th>
               <th style="${thStyle}">Marca</th>
@@ -9871,7 +10092,7 @@ function _renderInvTable() {
                       <td style="${tdStyle}${r.actaEntrega === 'PENDIENTE' ? ';color:#dc2626;font-weight:600' : ''}">${esc(r.actaEntrega || '—')}</td>
                       <td style="${tdStyle}"><span class="badge ${estadoBadge}" style="font-size:9px">${esc(r.estadoCMDB || '—')}</span></td>
                       <td style="${tdStyle}">${esc(r.estadoEquipo || '—')}</td>
-                      <td style="${tdStyle}${r.usoEquipo === 'PENDIENTE RETORNO' ? ';color:#ea580c;font-weight:600' : ''}">${esc(r.usoEquipo || '—')}</td>
+                      <td style="${tdStyle}"><span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;${r.usoEquipo === 'EP-ADMIN' ? 'background:#dbeafe;color:#1d4ed8' : r.usoEquipo === 'ADIC-ERG' ? 'background:#fef3c7;color:#92400e' : 'background:#f1f5f9;color:#64748b'}">${esc(r.usoEquipo || '—')}</span></td>
                       <td style="${tdStyle}">${esc(r.areaTrabajo || '—')}</td>
                       <td style="${tdStyle};font-size:10px">${esc(r.correo || '—')}</td>
                       <td style="${tdStyle}">${esc(r.colaborador || '—')}</td>
@@ -9893,7 +10114,7 @@ function _renderInvTable() {
 
 function exportInventario() {
   const rows = _buildInventarioRows();
-  const headers = ['SEDE','TIPO_EQUIPO','EQUIPO','MARCA','MODELO','SERIE','COD_INV','FECHA_ASIGNACION','MOTIVO','ACTA_ENTREGA','ESTADO_CMDB','ESTADO_EQUIPO','USO_EQUIPO','AREA_TRABAJO','CORREO','COLABORADOR_POSICION','JEFE_RESPONSABLE','TICKET'];
+  const headers = ['ALMACEN','TIPO_EQUIPO','EQUIPO','MARCA','MODELO','SERIE','COD_INV','FECHA_ASIGNACION','MOTIVO','ACTA_ENTREGA','ESTADO_CMDB','ESTADO_EQUIPO','USO_EQUIPO','AREA_TRABAJO','CORREO','COLABORADOR_POSICION','JEFE_RESPONSABLE','TICKET'];
   const data = rows.map(r => [r.sede,r.tipo,r.equipo,r.marca,r.modelo,r.serie,r.codInv,formatDate(r.fechaAsignacion),r.motivo,r.actaEntrega,r.estadoCMDB,r.estadoEquipo,r.usoEquipo,r.areaTrabajo,r.correo,r.colaborador,r.jefe,r.ticket]);
   const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
@@ -12124,8 +12345,10 @@ const PARAM_TABS = [
   { key: 'sedesAdmin',    label: 'Sedes Administrativas' },
   // Tipo de Puesto oculto — ahora es campo de texto libre "Puesto"
   // { key: 'tipoPuesto',    label: 'Tipo de Puesto', perfil: 'Administrativo' },
-  { key: 'tipoAsignacion', label: 'Tipo Asignación' },
-  { key: 'tiposRepuesto', label: 'Repuestos' }
+  { key: 'tipoAsignacion', label: 'Motivos' },
+  { key: 'tiposRepuesto', label: 'Repuestos' },
+  { key: 'mapeoEPAdmin', label: 'EP-ADMIN (Equipo Principal)' },
+  { key: 'mapeoAdicErg', label: 'ADIC-ERG (Accesorios Ergonómicos)' }
 ];
 
 function renderParametros(el) {
