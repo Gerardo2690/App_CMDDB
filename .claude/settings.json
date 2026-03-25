@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"^[\\\\s]*//.*=\" /c/App_CMDDB/js/app.js)",
+      "Bash(grep -n \"=== ''*''.*filter\\\\|filter.*indexOf.*-1\" /c/App_CMDDB/js/app.js)",
+      "Read(//^function/s+/w+/s*/\\([^\\)]*/\\)/s*/{/{if\\(NR>1 && !hasReturn\\) print prevLine; hasReturn=0} /return/s*[;}]/**)",
+      "Bash(node test_funcional.js)"
+    ]
+  }
+}

@@ -3,6 +3,23 @@
    Soporta cientos de MB (20K+ activos, 3K+ colaboradores)
    API síncrona compatible: DB.get(), DB.set(), DB.getConfig(), DB.setConfig()
    ═══════════════════════════════════════════════════════ */
+// #19: Campos que NO se normalizan a UPPERCASE
+const _DB_SKIP_NORMALIZE = ['email','password','usuario','correoColab','correoSupervisor','correoResponsable','emailResponsable',
+  'fechaIngreso','fechaCompra','fechaAsignacion','fechaCese','fechaApertura','adendaFechaInicio','adendaFechaFin',
+  'fecha','fechaAprobacion','estado','estadoSerie','fechaRetorno','fechaFinPrestamo','fechaBajaEjecutada',
+  'fechaReemplazo','fechaValorizacion','observaciones','obsRetorno','id','series','created_at'];
+// Colecciones que se normalizan al guardar
+const _DB_NORMALIZE_KEYS = ['activos', 'repuestos'];
+function _normalizeItem(item) {
+  if (!item || typeof item !== 'object') return;
+  for (const k in item) {
+    if (typeof item[k] === 'string' && !_DB_SKIP_NORMALIZE.includes(k) && !k.startsWith('_') && !k.startsWith('fecha')) {
+      const upper = item[k].toUpperCase().trim();
+      if (upper !== item[k]) item[k] = upper;
+    }
+  }
+}
+
 const DB = (() => {
   // ── LocalStorage como almacenamiento principal (sincrono, confiable) ──
   return {
@@ -17,8 +34,16 @@ const DB = (() => {
       } catch { return []; }
     },
     set(key, data) {
+      // #19: Normalizar campos texto a UPPERCASE al guardar (excepto campos protegidos)
+      if (Array.isArray(data) && _DB_NORMALIZE_KEYS.includes(key)) {
+        data.forEach(item => _normalizeItem(item));
+      }
       try { localStorage.setItem('ati_' + key, JSON.stringify(data)); }
       catch (e) { console.error('DB set error:', key, e); }
+      // Invalidar caché de inventario cuando cambian datos relacionados
+      if (key === 'activos' || key === 'asignaciones' || key === 'colaboradores') {
+        if (typeof _invalidateInvCache === 'function') _invalidateInvCache();
+      }
     },
     getConfig(key, def) {
       try {
@@ -57,9 +82,12 @@ const ALL_ESTADOS_EQUIPO = Object.values(ESTADO_EQUIPO_MAP).flat();
 function initSampleData() {
   if (DB.get('activos').length === 0) DB.set('activos', []);
 
-  if (!DB.get('sitiosMoviles') || !Array.isArray(DB.get('sitiosMoviles'))) DB.set('sitiosMoviles', []);
-  if (!DB.get('repuestos') || !Array.isArray(DB.get('repuestos'))) DB.set('repuestos', []);
-  if (!DB.get('asignacionesRep') || !Array.isArray(DB.get('asignacionesRep'))) DB.set('asignacionesRep', []);
+  const _sm = DB.get('sitiosMoviles');
+  if (!_sm || !Array.isArray(_sm)) DB.set('sitiosMoviles', []);
+  const _rp = DB.get('repuestos');
+  if (!_rp || !Array.isArray(_rp)) DB.set('repuestos', []);
+  const _ar = DB.get('asignacionesRep');
+  if (!_ar || !Array.isArray(_ar)) DB.set('asignacionesRep', []);
 
   // Inicializar colecciones vacías si no existen
   if (DB.get('colaboradores').length === 0) DB.set('colaboradores', []);
@@ -100,7 +128,7 @@ function initSampleData() {
   if (!DB.getConfig('marcas', null))
     DB.setConfig('marcas', ['DELL', 'HP', 'LENOVO', 'APPLE', 'SAMSUNG', 'CISCO', 'ASUS', 'ACER', 'MICROSOFT']);
   if (!DB.getConfig('estados', null))
-    DB.setConfig('estados', ['Disponible', 'Asignado', 'Mantenimiento', 'Dado de Baja']);
+    DB.setConfig('estados', ['Disponible', 'Asignado', 'Mantenimiento', 'Baja']);
   if (!DB.getConfig('ubicaciones', null))
     DB.setConfig('ubicaciones', ['CO SAN BORJA', 'PLAZA REPUBLICA']);
   if (!DB.getConfig('areas', null))
@@ -301,6 +329,25 @@ function _migrateConfigToUpper() {
     }
   });
   if (gestorChanged) DB.set('gestores', gestores);
+
+  // Migrar 'Dado de Baja' → 'Baja' en activos y series existentes
+  const _migActivos = DB.get('activos');
+  let _migBajaChanged = false;
+  _migActivos.forEach(a => {
+    if (a.estado === 'Dado de Baja') { a.estado = 'Baja'; _migBajaChanged = true; }
+    if (a.series && Array.isArray(a.series)) {
+      a.series.forEach(s => {
+        if (s.estadoSerie === 'Dado de Baja') { s.estadoSerie = 'Baja'; _migBajaChanged = true; }
+      });
+    }
+  });
+  if (_migBajaChanged) DB.set('activos', _migActivos);
+
+  // Migrar config 'estados' si contiene 'Dado de Baja'
+  const _cfgEstados = DB.getConfig('estados', []);
+  if (_cfgEstados.includes('Dado de Baja')) {
+    DB.setConfig('estados', _cfgEstados.map(e => e === 'Dado de Baja' ? 'Baja' : e));
+  }
 }
 
 // initSampleData se llama después de DB.init() en DOMContentLoaded
@@ -817,7 +864,12 @@ function closeModal() {
    UTILITY FUNCTIONS
    ═══════════════════════════════════════════════════════ */
 function nextId(arr) {
-  return arr.length ? Math.max(...arr.map(a => a.id)) + 1 : 1;
+  if (!arr.length) return 1;
+  let max = 0;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].id > max) max = arr[i].id;
+  }
+  return max + 1;
 }
 
 function today() {
@@ -915,6 +967,110 @@ function upperFields(obj) {
     }
   }
   return result;
+}
+
+/* ═══════════════════════════════════════════════════════
+   FUNCIONES UTILITARIAS REUTILIZABLES
+   ═══════════════════════════════════════════════════════ */
+
+// #7/#8/#9: Resuelve datos frescos de una asignación (activo, colaborador, repuesto)
+// Usa datos actuales si el registro existe; si fue eliminado, usa el snapshot guardado
+function resolveAsignacion(a, activos, colaboradores) {
+  const activo = activos ? activos.find(x => x.id === a.activoId) : null;
+  const colab = colaboradores ? colaboradores.find(c => c.id === a.colaboradorId) : null;
+  return {
+    ...a,
+    activoCodigo: activo ? activo.codigo : (a.activoCodigo || ''),
+    activoTipo: activo ? activo.tipo : (a.activoTipo || ''),
+    activoMarca: activo ? activo.marca : (a.activoMarca || ''),
+    activoModelo: activo ? activo.modelo : (a.activoModelo || ''),
+    colaboradorNombre: colab ? _fullName(colab) : (a.colaboradorNombre || ''),
+    correoColab: colab ? (colab.email || '') : (a.correoColab || ''),
+    area: colab ? (colab.area || '') : (a.area || '')
+  };
+}
+
+// Resuelve datos frescos de una asignación de repuesto
+function resolveAsignacionRep(ar, repuestos) {
+  const rep = repuestos ? repuestos.find(r => r.id === ar.repuestoId) : null;
+  return {
+    ...ar,
+    repuestoCodigo: rep ? rep.codigo : (ar.repuestoCodigo || ''),
+    repuestoTipo: rep ? (rep.tipo || rep.equipo) : (ar.repuestoTipo || ''),
+    repuestoDesc: rep ? `${rep.marca || ''} ${rep.modelo || ''} ${rep.capacidad || ''}`.trim() : (ar.repuestoDesc || '')
+  };
+}
+
+// #16: Determina si un estado CMDB impide asignación
+function isEstadoNoAsignable(estado) {
+  const e = (estado || '').toUpperCase();
+  return ['BAJA', 'NO RECUPERABLE', 'MANTENIMIENTO'].includes(e);
+}
+
+// #17: Establece el responsable de un activo
+function setResponsable(activo, colab, sitio) {
+  activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
+}
+
+// #18: Obtiene asignaciones vigentes (fuente única de verdad)
+function getAsignacionesVigentes() {
+  return DB.get('asignaciones').filter(a => a.estado === 'Vigente');
+}
+
+// #20: Valida que todos los estados CMDB tengan mapeo en ESTADO_EQUIPO_MAP
+function validarMapeoEstados() {
+  const estados = DB.getConfig('estados', []);
+  const sinMapeo = estados.filter(e => !ESTADO_EQUIPO_MAP[(e || '').toUpperCase()]);
+  if (sinMapeo.length > 0) {
+    console.warn('Estados CMDB sin mapeo en ESTADO_EQUIPO_MAP:', sinMapeo);
+  }
+  return sinMapeo;
+}
+
+// #15: Crea un objeto de asignación estándar (fuente única)
+function createAsignacion(asigArray, { activo, serie, colab, sitio, fecha, tipoAsignacion, motivo, ticket, observaciones, fechaFinPrestamo, actaEntrega, usoEquipo, reemplazaAsigId }) {
+  return upperFields({
+    id: nextId(asigArray),
+    activoId: activo.id,
+    activoCodigo: activo.codigo,
+    activoTipo: activo.tipo,
+    activoMarca: activo.marca,
+    activoModelo: activo.modelo,
+    serieAsignada: serie || '',
+    colaboradorId: colab ? colab.id : null,
+    colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
+    correoColab: colab ? (colab.email || '') : '',
+    area: colab ? colab.area : (sitio ? (sitio.area || '') : ''),
+    tipoDestino: sitio ? 'sitio' : 'colaborador',
+    sitioId: sitio ? sitio.id : null,
+    sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
+    fechaAsignacion: fecha || today(),
+    tipoAsignacion: tipoAsignacion || motivo || '',
+    motivo: motivo || '',
+    ticket: (ticket || '').toUpperCase(),
+    observaciones: observaciones || '',
+    estado: 'Vigente',
+    fechaFinPrestamo: fechaFinPrestamo || '',
+    actaEntrega: (actaEntrega || '').toUpperCase().trim(),
+    usoEquipo: usoEquipo || '',
+    reemplazaAsigId: reemplazaAsigId || null
+  });
+}
+
+// #12: Timer genérico para búsquedas con debounce
+const _searchTimers = {};
+function debounceSearch(key, fn, delay) {
+  clearTimeout(_searchTimers[key]);
+  _searchTimers[key] = setTimeout(fn, delay || 120);
+}
+
+// #14: Estado de error-filter para cargas masivas (unificado)
+const _cmErrorFilters = { equipos: false, colaboradores: false, asignaciones: false };
+function toggleCmErrorFilter(module) {
+  _cmErrorFilters[module] = !_cmErrorFilters[module];
+}
+function getCmErrorFilter(module) {
+  return _cmErrorFilters[module] || false;
 }
 
 function optionsHTML(arr, selected) {
@@ -1094,7 +1250,7 @@ function renderDashboard1(el) {
     'Disponible': '#10b981',
     'Asignado': '#3b82f6',
     'Mantenimiento': '#f59e0b',
-    'Dado de Baja': '#ef4444'
+    'Baja': '#ef4444'
   };
 
   el.innerHTML = `
@@ -1349,12 +1505,10 @@ function renderIngreso(el) {
   _renderIngresoTable();
 }
 
-let _ingresoSearchTimer = null;
 function _onIngresoSearch(val) {
   activoSearch = val;
   resetPage('ingreso');
-  clearTimeout(_ingresoSearchTimer);
-  _ingresoSearchTimer = setTimeout(_renderIngresoTable, 120);
+  debounceSearch('ingreso', _renderIngresoTable);
 }
 
 function _renderIngresoTable() {
@@ -1681,6 +1835,19 @@ function saveActivo(id) {
     if (idx >= 0) {
       activos[idx] = { ...activos[idx], ...campos };
       addMovimiento('Edición', `Activo ${activos[idx].codigo} actualizado`);
+      // Sincronizar snapshots en asignaciones vigentes
+      const asig = DB.get('asignaciones');
+      let asigChanged = false;
+      asig.forEach(a => {
+        if (a.activoId === id && a.estado === 'Vigente') {
+          a.activoCodigo = activos[idx].codigo;
+          a.activoTipo = activos[idx].tipo;
+          a.activoMarca = activos[idx].marca;
+          a.activoModelo = activos[idx].modelo;
+          asigChanged = true;
+        }
+      });
+      if (asigChanged) DB.set('asignaciones', asig);
     }
   } else {
     const newId = nextId(activos);
@@ -1708,12 +1875,54 @@ function saveActivo(id) {
 }
 
 function deleteActivo(id) {
-  if (!confirm('¿Está seguro de eliminar este activo?')) return;
   const activos = DB.get('activos');
   const a = activos.find(x => x.id === id);
+  if (!a) return;
+
+  // Verificar datos relacionados
+  const asignaciones = DB.get('asignaciones');
+  const repuestos = DB.get('repuestos');
+  const asigRelacionadas = asignaciones.filter(x => x.activoId === id);
+  const repRelacionados = repuestos.filter(r => r.activoAsignadoId === id);
+  const vigentes = asigRelacionadas.filter(x => x.estado === 'Vigente');
+
+  let msgConfirm = `¿Está seguro de eliminar el activo ${a.codigo}?`;
+  if (vigentes.length > 0) {
+    msgConfirm += `\n\n⚠️ ATENCIÓN: Este activo tiene ${vigentes.length} asignación(es) VIGENTE(s).`;
+  }
+  if (asigRelacionadas.length > 0) {
+    msgConfirm += `\n📋 ${asigRelacionadas.length} registro(s) de asignación serán eliminados.`;
+  }
+  if (repRelacionados.length > 0) {
+    msgConfirm += `\n🔧 ${repRelacionados.length} repuesto(s) vinculados serán desvinculados.`;
+  }
+  msgConfirm += '\n\nEsta acción NO se puede deshacer.';
+
+  if (!confirm(msgConfirm)) return;
+  if (!confirm('⚠️ SEGUNDA CONFIRMACIÓN: ¿Realmente desea eliminar este activo y TODA su data asociada?')) return;
+
+  // Limpiar asignaciones relacionadas
+  DB.set('asignaciones', asignaciones.filter(x => x.activoId !== id));
+
+  // Limpiar asignaciones de repuestos vinculadas
+  const asigRep = DB.get('asignacionesRep');
+  DB.set('asignacionesRep', asigRep.filter(ar => ar.activoId !== id));
+
+  // Desvincular repuestos asignados a este activo
+  if (repRelacionados.length > 0) {
+    repRelacionados.forEach(r => { r.activoAsignadoId = null; r.estadoDisp = 'DISPONIBLE'; });
+    DB.set('repuestos', repuestos);
+  }
+
+  // Limpiar bitácora relacionada
+  const bitacora = DB.get('bitacoraMovimientos');
+  bitacora.forEach(b => { if (b.activoId === id) b.activoId = null; });
+  DB.set('bitacoraMovimientos', bitacora);
+
+  // Eliminar el activo
   DB.set('activos', activos.filter(x => x.id !== id));
-  if (a) addMovimiento('Eliminación', `Activo ${a.codigo} eliminado`);
-  showToast('Activo eliminado');
+  addMovimiento('Eliminación', `Activo ${a.codigo} eliminado (${asigRelacionadas.length} asig., ${repRelacionados.length} rep. limpiados)`);
+  showToast('Activo eliminado y datos relacionados limpiados');
   renderIngreso(document.getElementById('contentArea'));
 }
 
@@ -2156,7 +2365,7 @@ async function ejecutarCargaMasiva() {
   });
 
   const activos = DB.get('activos');
-  let lastId = activos.length > 0 ? Math.max(...activos.map(a => a.id)) : 0;
+  let lastId = nextId(activos) - 1;
   const lotesKeys = Object.keys(lotes);
   let nuevos = 0, fusionados = 0;
 
@@ -2667,13 +2876,9 @@ const _REP_ESTADOS_CMDB = {
 };
 
 /* ── State ── */
-let _repTab = 'stock'; // kept for compat
-let _repMode = 'individual'; // kept for compat
 let _repStockEstado = 'Todos';
 let _repStockSearch = '';
-let _repStockCat = 'Todos';
-let _repStockTipo = 'Todos';
-let _repStockAlmacen = 'Todos';
+// Filtros de repuestos consolidados en _repActiveFilters
 let _repStockPage = 1;
 const _REP_STOCK_PAGE_SIZE = 15;
 let _repIngCat = '';
@@ -3228,14 +3433,12 @@ function _renderRepStock() {
 }
 
 /* ── Search helpers ── */
-let _repStockSearchTimer = null;
 function _onRepStockSearch(val) {
   _repStockSearch = val;
   const cb = document.getElementById('repStockSearchClear');
   if (cb) cb.style.display = val ? 'flex' : 'none';
   _repStockPage = 1;
-  clearTimeout(_repStockSearchTimer);
-  _repStockSearchTimer = setTimeout(_renderRepStockTable, 120);
+  debounceSearch('repStock', _renderRepStockTable);
 }
 function _clearRepStockSearch() {
   _repStockSearch = '';
@@ -3616,12 +3819,27 @@ function _saveRepEdit(id) {
 }
 
 function _deleteRepuesto(id) {
-  if (!confirm('Eliminar este repuesto?')) return;
   const repuestos = DB.get('repuestos');
   const r = repuestos.find(x => x.id === id);
-  if (r && r.estadoDisp && r.estadoDisp !== 'DISPONIBLE') { showToast('Solo se pueden eliminar repuestos disponibles', 'error'); return; }
+  if (!r) return;
+  if (r.estadoDisp && r.estadoDisp !== 'DISPONIBLE') { showToast('Solo se pueden eliminar repuestos disponibles', 'error'); return; }
+
+  let msgConfirm = `¿Eliminar el repuesto ${r.codigo}?`;
+  if (r.activoAsignadoId) {
+    const activos = DB.get('activos');
+    const actVinculado = activos.find(a => a.id === r.activoAsignadoId);
+    msgConfirm += `\n\n⚠️ Este repuesto está vinculado al activo ${actVinculado ? actVinculado.codigo : r.activoAsignadoId}. Será desvinculado.`;
+  }
+  msgConfirm += '\n\nEsta acción NO se puede deshacer.';
+  if (!confirm(msgConfirm)) return;
+  if (!confirm('⚠️ SEGUNDA CONFIRMACIÓN: ¿Realmente desea eliminar este repuesto?')) return;
+
+  // Limpiar asignaciones de repuestos relacionadas
+  const asigRep = DB.get('asignacionesRep');
+  DB.set('asignacionesRep', asigRep.filter(ar => ar.repuestoId !== id));
+
   DB.set('repuestos', repuestos.filter(x => x.id !== id));
-  if (r) addMovimiento('ELIMINACION REPUESTO', 'Repuesto ' + r.codigo + ' eliminado');
+  addMovimiento('ELIMINACION REPUESTO', 'Repuesto ' + r.codigo + ' eliminado');
   showToast('Repuesto eliminado');
   _renderRepStock();
 }
@@ -3982,14 +4200,10 @@ function _renderArTable() {
 }
 
 /* ── Nueva Asignacion Modal ── */
-let _arModalRepId = null;
-let _arModalActivoId = null;
-let _arModalMotivo = '';
+// Variables de modal eliminadas — se lee directamente del DOM
 
 function _openNuevaAsigRepModal() {
-  _arModalRepId = null;
-  _arModalActivoId = null;
-  _arModalMotivo = '';
+  // Estado se lee directamente del DOM al guardar
 
   const repuestos = DB.get('repuestos').filter(r => (r.estadoDisp || 'DISPONIBLE') === 'DISPONIBLE');
   const activos = DB.get('activos').filter(a => a.estado === 'Asignado' || a.estado === 'Disponible');
@@ -4007,7 +4221,7 @@ function _openNuevaAsigRepModal() {
         </div>
         <div class="form-group">
           <label>Motivo <span class="required">*</span></label>
-          <select class="form-control" id="fArMotivo" onchange="_arModalMotivo=this.value">
+          <select class="form-control" id="fArMotivo">
             <option value="">Seleccionar...</option>
             <option value="AMPLIACION">Ampliaci&oacute;n</option>
             <option value="REEMPLAZO">Reemplazo</option>
@@ -4018,14 +4232,14 @@ function _openNuevaAsigRepModal() {
       <div class="form-grid-3" style="margin-top:16px">
         <div class="form-group">
           <label>Activo destino <span class="required">*</span></label>
-          <select class="form-control" id="fArActivo" onchange="_arModalActivoId=parseInt(this.value)||null">
+          <select class="form-control" id="fArActivo">
             <option value="">Seleccionar activo...</option>
             ${activos.map(a => '<option value="'+a.id+'">'+esc(a.codigo)+' - '+esc(a.marca)+' '+esc(a.modelo)+'</option>').join('')}
           </select>
         </div>
         <div class="form-group">
           <label>Repuesto a asignar <span class="required">*</span></label>
-          <select class="form-control" id="fArRepuesto" onchange="_arModalRepId=parseInt(this.value)||null">
+          <select class="form-control" id="fArRepuesto">
             <option value="">Seleccionar repuesto...</option>
             ${repuestos.map(r => '<option value="'+r.id+'">'+esc(r.codigo)+' - '+esc(r.tipo||r.equipo)+' '+esc(r.marca)+' '+esc(r.modelo)+(r.capacidad?' '+esc(r.capacidad):'')+'</option>').join('')}
           </select>
@@ -4045,8 +4259,8 @@ function _openNuevaAsigRepModal() {
 function _saveAsigRep() {
   const ticket = (document.getElementById('fArTicket')||{}).value.trim();
   const motivo = (document.getElementById('fArMotivo')||{}).value;
-  const activoId = _arModalActivoId;
-  const repId = _arModalRepId;
+  const activoId = parseInt((document.getElementById('fArActivo') || {}).value) || null;
+  const repId = parseInt((document.getElementById('fArRepuesto') || {}).value) || null;
   const fecha = (document.getElementById('fArFecha')||{}).value || today();
   const obs = (document.getElementById('fArObs')||{}).value.trim();
 
@@ -4195,8 +4409,7 @@ function _exportAsigRep() {
    COLABORADORES - PADRON
    ═══════════════════════════════════════════════════════ */
 let padronSearch = '';
-let padronFilterArea = 'Todos';
-let padronFilterEstado = 'Todos';
+// Filtros de padrón consolidados en _padronActiveFilters
 
 const _PADRON_FILTER_OPTIONS = [
   { key: 'estado',               label: 'Estado' },
@@ -4280,15 +4493,12 @@ function renderPadron(el) {
   _renderPadronTable();
 }
 
-let _padronSearchTimer = null;
-let padronFilterPerfil = 'Todos';
 function _onPadronSearch(val) {
   padronSearch = val;
   const clearBtn = document.getElementById('padronSearchClear');
   if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
   resetPage('padron');
-  clearTimeout(_padronSearchTimer);
-  _padronSearchTimer = setTimeout(_renderPadronTable, 120);
+  debounceSearch('padron', _renderPadronTable);
 }
 
 function _clearPadronSearch() {
@@ -4884,7 +5094,6 @@ async function ejecutarCargaMasivaColab() {
    COLABORADORES - ASIGNACION
    ═══════════════════════════════════════════════════════ */
 let asigSearch = '';
-let _asigSearchTimer = null;
 let _asigSelectedColab = null;
 let _asigSelectedActivos = [];
 let _asigTipoDestino = 'colaborador'; // 'colaborador' | 'sitio'
@@ -4942,8 +5151,7 @@ function renderAsignacion(el) {
 function _onAsigSearch(val) {
   asigSearch = val;
   resetPage('asignacion');
-  clearTimeout(_asigSearchTimer);
-  _asigSearchTimer = setTimeout(_renderAsigTable, 120);
+  debounceSearch('asig', _renderAsigTable);
 }
 
 function _groupAsignaciones(asigList) {
@@ -5148,8 +5356,7 @@ function _renderAsignacionModal(fresh) {
   // ── Stock disponible ──
   const stock = [];
   activos.forEach(a => {
-    const e = (a.estado||'').toUpperCase();
-    if (e === 'BAJA' || e === 'NO RECUPERABLE' || e === 'DADO DE BAJA' || e === 'MANTENIMIENTO') return;
+    if (isEstadoNoAsignable(a.estado)) return;
     // En reemplazo con equipo seleccionado, filtrar por mismo tipo
     if (isReemplazo && reemTipoFiltro && (a.tipo||'').toUpperCase().trim() !== reemTipoFiltro) return;
     (a.series||[]).forEach(s => {
@@ -5699,7 +5906,6 @@ function _asigTogglePageAll(checked) {
   _renderAsignacionModal();
 }
 
-let _buscarColabTimer = null;
 function _onSitioAsigChange(val) {
   const id = parseInt(val);
   if (!id) { _asigSelectedSitio = null; _renderAsignacionModal(); return; }
@@ -5708,10 +5914,8 @@ function _onSitioAsigChange(val) {
   _renderAsignacionModal();
 }
 
-let _buscarSitioTimer = null;
 function _buscarSitioAsig(val) {
-  clearTimeout(_buscarSitioTimer);
-  _buscarSitioTimer = setTimeout(() => {
+  debounceSearch('buscarSitio', () => {
     const box = document.getElementById('asigSitioResults');
     if (!box) return;
     if (!val || val.length < 2) { box.style.display = 'none'; return; }
@@ -5761,8 +5965,7 @@ function _selectSitioAsig(id) {
 }
 
 function _buscarColabAsig(val) {
-  clearTimeout(_buscarColabTimer);
-  _buscarColabTimer = setTimeout(() => {
+  debounceSearch('buscarColab', () => {
     const box = document.getElementById('asigUserResults');
     if (!box) return;
     if (!val || val.length < 2) { box.style.display = 'none'; return; }
@@ -5936,8 +6139,7 @@ function _renderReemplazoModal() {
     );
     const stock = [];
     activos.forEach(a => {
-      const estadoUp = (a.estado || '').toUpperCase();
-      if (estadoUp === 'BAJA' || estadoUp === 'NO RECUPERABLE' || estadoUp === 'DADO DE BAJA' || estadoUp === 'MANTENIMIENTO') return;
+      if (isEstadoNoAsignable(a.estado)) return;
       if (tipoFiltro && (a.tipo || '').toUpperCase().trim() !== tipoFiltro) return;
       (a.series || []).forEach(s => {
         const key = a.id + '||' + (s.serie || '').toUpperCase().trim();
@@ -6128,10 +6330,8 @@ function _renderReemplazoModal() {
   if (!c) { const el = document.getElementById('reemUserSearch'); if (el) el.focus(); }
 }
 
-let _reemBuscarTimer = null;
 function _reemBuscarColab(val) {
-  clearTimeout(_reemBuscarTimer);
-  _reemBuscarTimer = setTimeout(() => {
+  debounceSearch('reemBuscar', () => {
     const box = document.getElementById('reemUserResults');
     if (!box) return;
     if (!val || val.length < 2) { box.style.display = 'none'; return; }
@@ -6216,32 +6416,19 @@ function _ejecutarReemplazo() {
   // 2. Asignar equipo nuevo
   const newActivo = activos.find(a => a.id === _reemNewItem.activoId);
   if (newActivo) {
-    asig.push(upperFields({
-      id: nextId(asig),
-      activoId: newActivo.id,
-      activoCodigo: newActivo.codigo,
-      activoTipo: newActivo.tipo,
-      activoMarca: newActivo.marca,
-      activoModelo: newActivo.modelo,
-      serieAsignada: _reemNewItem.serie || '',
-      colaboradorId: colab.id,
-      colaboradorNombre: _fullName(colab),
-      correoColab: colab.email || '',
-      area: colab.area,
-      fechaAsignacion: fecha,
+    asig.push(createAsignacion(asig, {
+      activo: newActivo,
+      serie: _reemNewItem.serie || '',
+      colab: colab,
+      fecha: fecha,
       tipoAsignacion: 'Reemplazo',
       motivo: 'REEMPLAZO - ' + motivo,
-      ticket: ticket.toUpperCase(),
-      estado: 'Vigente',
+      ticket: ticket,
       observaciones: obs
     }));
 
-    // Actualizar estado del nuevo activo
-    const totalSeries = (newActivo.series || []).length;
-    const seriesAsig = asig.filter(a => a.activoId === newActivo.id && a.estado === 'Vigente').length;
-    if (totalSeries === 0 || seriesAsig >= totalSeries) {
-      newActivo.estado = 'Asignado';
-    }
+    // Actualizar estado del nuevo activo (1 activo = 1 serie)
+    newActivo.estado = 'Asignado';
     newActivo.responsable = _fullName(colab);
   }
 
@@ -6300,9 +6487,7 @@ function openStockModal() {
   );
   const stock = [];
   activos.forEach(a => {
-    // Skip activos en Baja, No Recuperable, Dado de Baja, Mantenimiento
-    const estadoUp = (a.estado || '').toUpperCase();
-    if (estadoUp === 'BAJA' || estadoUp === 'NO RECUPERABLE' || estadoUp === 'DADO DE BAJA' || estadoUp === 'MANTENIMIENTO') return;
+    if (isEstadoNoAsignable(a.estado)) return;
     const series = a.series || [];
     // Solo mostrar activos que tengan series con stock
     if (series.length === 0) return;
@@ -6594,42 +6779,27 @@ async function saveAsignacion() {
     const activo = activos.find(a => a.id === sel.activoId);
     if (!activo) return;
 
-    asig.push(upperFields({
-      id: nextId(asig),
-      activoId: activo.id,
-      activoCodigo: activo.codigo,
-      activoTipo: activo.tipo,
-      activoMarca: activo.marca,
-      activoModelo: activo.modelo,
-      serieAsignada: sel.serie || '',
-      colaboradorId: colab ? colab.id : null,
-      colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
-      correoColab: colab ? (colab.email || '') : '',
-      area: colab ? colab.area : (sitio ? sitio.area : ''),
-      tipoDestino: sitio ? 'sitio' : 'colaborador',
-      sitioId: sitio ? sitio.id : null,
-      sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
-      fechaAsignacion: fecha || today(),
+    asig.push(createAsignacion(asig, {
+      activo: activo,
+      serie: sel.serie || '',
+      colab: colab,
+      sitio: sitio,
+      fecha: fecha,
       tipoAsignacion: motivo,
       motivo: motivo,
-      ticket: ticket.toUpperCase(),
+      ticket: ticket,
       observaciones: obs,
-      estado: 'Vigente',
       fechaFinPrestamo: isPrestamo ? fechaFinPrestamo : ''
     }));
   });
 
-  // Actualizar estado de cada activo nuevo: solo 'Asignado' si TODAS sus series están asignadas
+  // Actualizar estado de cada activo nuevo (1 activo = 1 serie)
   const activoIds = [...new Set(_asigSelectedActivos.map(s => s.activoId))];
   activoIds.forEach(aid => {
     const activo = activos.find(a => a.id === aid);
     if (!activo) return;
-    const totalSeries = (activo.series || []).length;
-    const seriesAsignadas = asig.filter(a => a.activoId === aid && a.estado === 'Vigente').length;
-    if (totalSeries === 0 || seriesAsignadas >= totalSeries) {
-      activo.estado = 'Asignado';
-    }
-    activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
+    activo.estado = 'Asignado';
+    setResponsable(activo, colab, sitio);
   });
 
   // ── INGRESO NUEVO: Validar máximo 1 accesorio por tipo ──
@@ -6653,42 +6823,26 @@ async function saveAsignacion() {
       const activo = activos.find(a => a.id === sel.activoId);
       if (!activo) return;
 
-      asig.push(upperFields({
-        id: nextId(asig),
-        activoId: activo.id,
-        activoCodigo: activo.codigo,
-        activoTipo: activo.tipo,
-        activoMarca: activo.marca,
-        activoModelo: activo.modelo,
-        serieAsignada: sel.serie || '',
-        colaboradorId: colab ? colab.id : null,
-        colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
-        correoColab: colab ? (colab.email || '') : '',
-        area: colab ? colab.area : (sitio ? sitio.area : ''),
-        tipoDestino: sitio ? 'sitio' : 'colaborador',
-        sitioId: sitio ? sitio.id : null,
-        sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
-        fechaAsignacion: fecha || today(),
+      asig.push(createAsignacion(asig, {
+        activo: activo,
+        serie: sel.serie || '',
+        colab: colab,
+        sitio: sitio,
+        fecha: fecha,
         tipoAsignacion: motivo,
         motivo: motivo,
-        ticket: ticket.toUpperCase(),
-        observaciones: obs,
-        estado: 'Vigente',
-        fechaFinPrestamo: ''
+        ticket: ticket,
+        observaciones: obs
       }));
     });
 
-    // Actualizar estado de activos accesorios
+    // Actualizar estado de activos accesorios (1 activo = 1 serie)
     const accActivoIds = [...new Set(_asigSelectedAccesorios.map(s => s.activoId))];
     accActivoIds.forEach(aid => {
       const activo = activos.find(a => a.id === aid);
       if (!activo) return;
-      const totalSeries = (activo.series || []).length;
-      const seriesAsignadas = asig.filter(a => a.activoId === aid && a.estado === 'Vigente').length;
-      if (totalSeries === 0 || seriesAsignadas >= totalSeries) {
-        activo.estado = 'Asignado';
-      }
-      activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
+      activo.estado = 'Asignado';
+      setResponsable(activo, colab, sitio);
     });
   }
 
@@ -7145,101 +7299,128 @@ async function _ejecutarCargaMasivaAsig() {
 
   const activos = DB.get('activos');
   const asig = DB.get('asignaciones');
+  const bitacora = DB.get('bitacoraMovimientos') || []; // ← UNA sola lectura
   const now = new Date();
   const timeStr = 'T' + String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0');
 
-  validos.forEach(r => {
-    const activo = r._activo;
-    if (!activo) return;
-    const colab = r._colab;
-    const sitio = r._sitio;
-    const fecha = (r.fechaAsignacion || today()) + timeStr;
-    const motivoUp = (r.motivo || '').toUpperCase();
-    const isPrestamo = motivoUp.includes('PRESTAMO');
-    const isReemplazo = motivoUp.includes('REEMPLAZO') || motivoUp.includes('RENOVACION') || motivoUp.includes('REPOSICION');
+  // Pre-calcular el próximo ID una vez (evita O(n²) de nextId dentro del loop)
+  let _nextAsigId = nextId(asig);
+  let _nextBitId = nextId(bitacora);
 
-    // Mark old assignment as pending return if REEMPLAZO
-    if (isReemplazo && r.serie) {
-      const oldAsig = asig.find(a => a.activoId === activo.id && (a.serieAsignada || '').toUpperCase() === r.serie && a.estado === 'Vigente');
-      if (oldAsig) {
-        oldAsig.pendienteRetorno = true;
-        oldAsig.fechaReemplazo = fecha;
-        oldAsig.motivoReemplazo = r.motivo;
-        oldAsig.ticketReemplazo = r.ticket;
-      }
-    }
-
-    asig.push(upperFields({
-      id: nextId(asig),
-      activoId: activo.id,
-      activoCodigo: activo.codigo,
-      activoTipo: activo.tipo,
-      activoMarca: activo.marca,
-      activoModelo: activo.modelo,
-      serieAsignada: r.serie || '',
-      colaboradorId: colab ? colab.id : null,
-      colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
-      correoColab: colab ? (colab.email || '') : '',
-      area: colab ? colab.area : (sitio ? (sitio.area || '') : ''),
-      tipoDestino: sitio ? 'sitio' : 'colaborador',
-      sitioId: sitio ? sitio.id : null,
-      sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
-      fechaAsignacion: fecha,
-      tipoAsignacion: r.motivo,
-      motivo: r.motivo,
-      ticket: r.ticket,
-      observaciones: r.observaciones || '',
-      estado: 'Vigente',
-      fechaFinPrestamo: isPrestamo ? (r.fechaFinPrestamo || '') : '',
-      actaEntrega: (r.actaEntrega || '').toUpperCase().trim() || '',
-      usoEquipo: r._usoEquipo || ''
-    }));
-
-    // Update activo estado
-    const totalSeries = (activo.series || []).length;
-    const seriesAsig = asig.filter(a => a.activoId === activo.id && a.estado === 'Vigente').length;
-    if (totalSeries === 0 || seriesAsig >= totalSeries) {
-      activo.estado = 'Asignado';
-    }
-    activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
-
-    // Auto bitacora SALIDA
-    _autoBitacora({
-      movimiento: 'SALIDA',
-      almacen: activo.ubicacion || 'Almacen TI',
-      tipoEquipo: activo.tipo || '',
-      equipo: activo.equipo || activo.tipo || '',
-      modelo: activo.modelo || '',
-      serie: r.serie || '',
-      codInv: activo.codInv || '',
-      correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
-      ticket: r.ticket || '',
-      motivo: r.motivo || ''
-    });
-
-    // Si tiene acta de entrega, sincronizar con bitacora
-    if (r.actaEntrega) {
-      const actaUp = (r.actaEntrega || '').toUpperCase().trim();
-      const bitMovs = DB.get('bitacoraMovimientos') || [];
-      const bitMov = bitMovs.find(m => m.movimiento === 'SALIDA' && (m.serie || '').toUpperCase() === (r.serie || '').toUpperCase() && (m.ticket || '').toUpperCase() === r.ticket);
-      if (bitMov) {
-        bitMov.actaCorrelativo = actaUp;
-        bitMov.estadoAsignacion = 'ATENDIDO';
-        DB.set('bitacoraMovimientos', bitMovs);
-      }
+  // Índice de series vigentes para búsqueda rápida O(1) en reemplazos
+  const _vigenteBySerie = new Map();
+  asig.forEach(a => {
+    if (a.estado === 'Vigente') {
+      _vigenteBySerie.set(a.activoId + '||' + (a.serieAsignada || '').toUpperCase(), a);
     }
   });
 
-  DB.set('activos', activos);
-  DB.set('asignaciones', asig);
-  addMovimiento('Carga Masiva Asignaciones', validos.length + ' asignaciones importadas desde Excel');
-  await DB.flush();
+  const totalValidos = validos.length;
+  const BATCH_SIZE = 200;
+  let processed = 0;
 
-  _cmAsigData = [];
-  _cmAsigStep = 1;
-  closeModal();
-  showToast(validos.length + ' asignaciones importadas correctamente');
-  renderAsignacion(document.getElementById('contentArea'));
+  // Procesar en batches para no bloquear la UI
+  function processBatch(startIdx) {
+    const endIdx = Math.min(startIdx + BATCH_SIZE, totalValidos);
+
+    for (let i = startIdx; i < endIdx; i++) {
+      const r = validos[i];
+      const activo = r._activo;
+      if (!activo) continue;
+      const colab = r._colab;
+      const sitio = r._sitio;
+      const fecha = (r.fechaAsignacion || today()) + timeStr;
+      const motivoUp = (r.motivo || '').toUpperCase();
+      const isPrestamo = motivoUp.includes('PRESTAMO');
+      const isReemplazo = motivoUp.includes('REEMPLAZO') || motivoUp.includes('RENOVACION') || motivoUp.includes('REPOSICION');
+
+      // Mark old assignment as pending return if REEMPLAZO
+      if (isReemplazo && r.serie) {
+        const key = activo.id + '||' + (r.serie || '').toUpperCase();
+        const oldAsig = _vigenteBySerie.get(key);
+        if (oldAsig) {
+          oldAsig.pendienteRetorno = true;
+          oldAsig.fechaReemplazo = fecha;
+          oldAsig.motivoReemplazo = r.motivo;
+          oldAsig.ticketReemplazo = r.ticket;
+        }
+      }
+
+      // Crear asignación directamente (sin nextId que recorre todo el array)
+      const nuevaAsig = upperFields({
+        id: _nextAsigId++,
+        activoId: activo.id,
+        activoCodigo: activo.codigo,
+        activoTipo: activo.tipo,
+        activoMarca: activo.marca,
+        activoModelo: activo.modelo,
+        serieAsignada: r.serie || '',
+        colaboradorId: colab ? colab.id : null,
+        colaboradorNombre: colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : ''),
+        correoColab: colab ? (colab.email || '') : '',
+        area: colab ? colab.area : (sitio ? (sitio.area || '') : ''),
+        tipoDestino: sitio ? 'sitio' : 'colaborador',
+        sitioId: sitio ? sitio.id : null,
+        sitioNombre: sitio ? _buildSitioNombre(sitio) : '',
+        fechaAsignacion: fecha || today(),
+        tipoAsignacion: r.motivo,
+        motivo: r.motivo,
+        ticket: (r.ticket || '').toUpperCase(),
+        observaciones: r.observaciones || '',
+        estado: 'Vigente',
+        fechaFinPrestamo: isPrestamo ? (r.fechaFinPrestamo || '') : '',
+        actaEntrega: (r.actaEntrega || '').toUpperCase().trim(),
+        usoEquipo: r._usoEquipo || ''
+      });
+      asig.push(nuevaAsig);
+
+      // Update activo estado (1 activo = 1 serie)
+      activo.estado = 'Asignado';
+      setResponsable(activo, colab, sitio);
+
+      // Crear bitácora en memoria (sin DB.get/set en cada iteración)
+      let ticketVal = (r.ticket || '').toUpperCase();
+      bitacora.unshift({
+        id: _nextBitId++,
+        movimiento: 'SALIDA',
+        almacen: (activo.ubicacion || 'Almacen TI').toUpperCase(),
+        tipoEquipo: (activo.tipo || '').toUpperCase(),
+        equipo: (activo.equipo || activo.tipo || '').toUpperCase(),
+        modelo: (activo.modelo || '').toUpperCase(),
+        serie: (r.serie || '').toUpperCase(),
+        codInv: (activo.codInv || '').toUpperCase(),
+        correo: colab ? (colab.email || '') : (sitio ? _buildSitioNombre(sitio) : ''),
+        motivo: (r.motivo || '').toUpperCase(),
+        gestor: currentUser ? (currentUser.usuario || currentUser.nombre) : 'Sistema',
+        ticket: ticketVal,
+        estadoAsignacion: r.actaEntrega ? 'ATENDIDO' : 'PENDIENTE',
+        actaCorrelativo: r.actaEntrega ? (r.actaEntrega || '').toUpperCase().trim() : '',
+        fechaRegistro: today()
+      });
+    }
+
+    processed = endIdx;
+
+    if (processed < totalValidos) {
+      // Ceder el hilo al browser para no bloquear UI
+      setTimeout(() => processBatch(processed), 0);
+    } else {
+      // Todo procesado — UN solo write al final
+      DB.set('activos', activos);
+      DB.set('asignaciones', asig);
+      DB.set('bitacoraMovimientos', bitacora);
+      addMovimiento('Carga Masiva Asignaciones', totalValidos + ' asignaciones importadas desde Excel');
+
+      _cmAsigData = [];
+      _cmAsigStep = 1;
+      closeModal();
+      showToast(totalValidos + ' asignaciones importadas correctamente');
+      renderAsignacion(document.getElementById('contentArea'));
+    }
+  }
+
+  // Iniciar procesamiento por batches
+  processBatch(0);
 }
 
 function previewActaEntrega(asigId) {
@@ -7705,14 +7886,23 @@ function deleteAsignacionGrupo(ticket, colabId, fecha) {
 
   // ── 1. Revertir estado de Activos ──
   const activos = DB.get('activos');
+  const colabs = DB.get('colaboradores');
+  const sitios = DB.get('sitiosMoviles');
   const asigFinal = asignaciones.filter(a => !ids.includes(a.id));
   grupo.forEach(a => {
     const activo = activos.find(x => x.id === a.activoId);
     if (activo && a.estado === 'Vigente') {
-      const otrasVigentes = asigFinal.filter(o => o.activoId === a.activoId && o.estado === 'Vigente').length;
-      if (otrasVigentes === 0) {
+      const otrasVigentes = asigFinal.filter(o => o.activoId === a.activoId && o.estado === 'Vigente');
+      if (otrasVigentes.length === 0) {
         activo.estado = 'Disponible';
         activo.responsable = '';
+      } else {
+        // El activo sigue asignado a otro colaborador/sitio
+        activo.estado = 'Asignado';
+        const otraAsig = otrasVigentes[0];
+        const otroColab = otraAsig.colaboradorId ? colabs.find(c => c.id === otraAsig.colaboradorId) : null;
+        const otroSitio = otraAsig.sitioId ? sitios.find(s => s.id === otraAsig.sitioId) : null;
+        setResponsable(activo, otroColab, otroSitio);
       }
     }
   });
@@ -7831,15 +8021,15 @@ function _ejecutarDevSingle(asigId) {
         case 'MANTENIMIENTO':
           activo.estado = 'Mantenimiento'; activo.estadoEquipo = subDestino || 'REPARACIÓN'; activo.responsable = ''; break;
         case 'BAJA':
-          activo.estado = 'Dado de Baja'; activo.motivoBaja = subDestino || ''; activo.responsable = ''; break;
+          activo.estado = 'Baja'; activo.motivoBaja = subDestino || ''; activo.responsable = ''; break;
         case 'NO RECUPERABLE':
-          activo.estado = 'Dado de Baja'; activo.motivoBaja = 'CESE-NO RECUPERABLE'; activo.responsable = ''; break;
+          activo.estado = 'Baja'; activo.motivoBaja = 'CESE-NO RECUPERABLE'; activo.responsable = ''; break;
       }
     }
-    // Marcar serie específica como Dado de Baja si es NO RECUPERABLE
+    // Marcar serie específica como Baja si es NO RECUPERABLE
     if (destino === 'NO RECUPERABLE' && a.serieAsignada && activo.series && activo.series.length > 0) {
       const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (a.serieAsignada || '').toUpperCase().trim());
-      if (serieObj) serieObj.estadoSerie = 'Dado de Baja';
+      if (serieObj) serieObj.estadoSerie = 'Baja';
     }
   }
 
@@ -7904,7 +8094,6 @@ function _ejecutarDevSingle(asigId) {
    COLABORADORES - SITIOS MÓVILES
    ═══════════════════════════════════════════════════════ */
 let _sitioSearch = '';
-let _sitioSearchTimer = null;
 let _sitioActiveFilters = {};
 let _sitioFilterMenuOpen = false;
 
@@ -7984,8 +8173,7 @@ function _onSitioSearch(val) {
   const cb = document.getElementById('sitioSearchClear');
   if (cb) cb.style.display = val ? 'flex' : 'none';
   resetPage('sitios');
-  clearTimeout(_sitioSearchTimer);
-  _sitioSearchTimer = setTimeout(_renderSitioTable, 120);
+  debounceSearch('sitio', _renderSitioTable);
 }
 
 function _clearSitioSearch() {
@@ -8502,12 +8690,10 @@ function renderCeses(el) {
   _renderCesTable();
 }
 
-let _cesSearchTimer = null;
 function _onCesSearch(val) {
   cesSearch = val;
   resetPage('ceses');
-  clearTimeout(_cesSearchTimer);
-  _cesSearchTimer = setTimeout(_renderCesTable, 120);
+  debounceSearch('ces', _renderCesTable);
 }
 
 function _renderCesTable() {
@@ -8800,7 +8986,7 @@ function _ejecutarDevolucion(colabId) {
     if (item.serie && activo.series && activo.series.length > 0) {
       const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (item.serie || '').toUpperCase().trim());
       if (serieObj && destino === 'NO RECUPERABLE') {
-        serieObj.estadoSerie = 'Dado de Baja';
+        serieObj.estadoSerie = 'Baja';
       }
     }
 
@@ -8825,7 +9011,7 @@ function _ejecutarDevolucion(colabId) {
         break;
       case 'BAJA':
         if (otrasVigentes === 0) {
-          activo.estado = 'Dado de Baja';
+          activo.estado = 'Baja';
           activo.motivoBaja = subDestino || '';
           activo.responsable = '';
         }
@@ -8833,7 +9019,7 @@ function _ejecutarDevolucion(colabId) {
         break;
       case 'NO RECUPERABLE':
         if (otrasVigentes === 0) {
-          activo.estado = 'Dado de Baja';
+          activo.estado = 'Baja';
           activo.motivoBaja = 'CESE-NO RECUPERABLE';
           activo.responsable = '';
         }
@@ -9008,7 +9194,22 @@ function saveColab(id) {
 
   if (id) {
     const idx = colabs.findIndex(c => c.id === id);
-    if (idx >= 0) colabs[idx] = { ...colabs[idx], ...upperFields(_data) };
+    if (idx >= 0) {
+      colabs[idx] = { ...colabs[idx], ...upperFields(_data) };
+      // Sincronizar snapshots en asignaciones vigentes
+      const asig = DB.get('asignaciones');
+      let asigChanged = false;
+      const updated = colabs[idx];
+      asig.forEach(a => {
+        if (a.colaboradorId === id && a.estado === 'Vigente') {
+          a.colaboradorNombre = _fullName(updated);
+          a.correoColab = updated.email || '';
+          a.area = updated.area || '';
+          asigChanged = true;
+        }
+      });
+      if (asigChanged) DB.set('asignaciones', asig);
+    }
   } else {
     colabs.push(upperFields({
       id: nextId(colabs), ..._data,
@@ -9529,7 +9730,6 @@ function openTiendaDetalle(id) {
    ═══════════════════════════════════════════════════════ */
 let invSearch = '';
 let _invFilterCMDB = 'Todos';
-let _invSearchTimer = null;
 // Filtros dinámicos del inventario CMDB
 const _INV_FILTER_OPTIONS = [
   { key: 'estadoCMDB',    label: 'Estado CMDB' },
@@ -9543,78 +9743,81 @@ const _INV_FILTER_OPTIONS = [
 let _invActiveFilters = { estadoCMDB: 'Todos' }; // estadoCMDB activo por defecto
 let _invFilterMenuOpen = false;
 
+// Caché de inventario para evitar recálculos costosos
+let _invRowsCache = null;
+let _invRowsCacheVersion = 0;
+
+function _invalidateInvCache() { _invRowsCache = null; }
+
 function _buildInventarioRows() {
+  // Retornar caché si es válido
+  if (_invRowsCache) return _invRowsCache;
+
   const activos = DB.get('activos');
   const asignaciones = DB.get('asignaciones');
   const colaboradores = DB.get('colaboradores');
+
+  // Índices para O(1) lookups en lugar de .find() repetidos
+  const _asigByKey = new Map();     // 'activoId||SERIE' → asignación vigente
+  const _asigByActivo = new Map();  // activoId → asignación vigente (sin serie)
+  asignaciones.forEach(a => {
+    if (a.estado !== 'Vigente') return;
+    const serie = (a.serieAsignada || '').toUpperCase().trim();
+    if (serie) {
+      _asigByKey.set(a.activoId + '||' + serie, a);
+    } else {
+      _asigByActivo.set(a.activoId, a);
+    }
+  });
+
+  const _colabById = new Map();
+  colaboradores.forEach(c => _colabById.set(c.id, c));
+
   const rows = [];
 
+  // Helper para construir una fila (evita duplicar código)
+  function _pushRow(a, s, asig) {
+    const colab = asig && asig.colaboradorId ? _colabById.get(asig.colaboradorId) : null;
+    const _esSitio = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
+    rows.push({
+      activoId: a.id,
+      sede: a.ubicacion || '',
+      tipo: a.tipo || '',
+      equipo: a.equipo || a.tipo || '',
+      marca: a.marca || '',
+      modelo: a.modelo || '',
+      serie: s ? (s.serie || '') : '',
+      codInv: s ? (s.codInv || '') : '',
+      fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
+      motivo: asig ? asig.motivo || '' : '',
+      actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
+      estadoCMDB: asig ? 'Asignado' : (s ? (s.estadoSerie || a.estado || 'Disponible') : (a.estado || 'Disponible')),
+      estadoEquipo: s ? (s.estadoEquipoSerie || a.estadoEquipo || '') : (a.estadoEquipo || ''),
+      usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
+      areaTrabajo: _esSitio ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
+      correo: _esSitio ? '—' : (colab ? colab.email || '' : ''),
+      colaborador: _esSitio ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
+      jefe: asig ? asig.jefe || '' : '',
+      ticket: asig ? asig.ticket || '' : ''
+    });
+  }
+
   activos.forEach(a => {
-    // Excluir activos dados de baja definitiva
-    const _eUp = (a.estado || '').toUpperCase();
-    if (_eUp === 'DADO DE BAJA') return;
+    if ((a.estado || '').toUpperCase() === 'BAJA') return;
 
     const series = a.series || [];
     if (series.length === 0) {
-      // Activo sin series — una fila
-      const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (!x.serieAsignada || x.serieAsignada === ''));
-      const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
-      const _esSitio = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
-      rows.push({
-        activoId: a.id,
-        sede: a.ubicacion || '',
-        tipo: a.tipo || '',
-        equipo: a.equipo || a.tipo || '',
-        marca: a.marca || '',
-        modelo: a.modelo || '',
-        serie: '',
-        codInv: '',
-        fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
-        motivo: asig ? asig.motivo || '' : '',
-        actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
-        estadoCMDB: asig ? 'Asignado' : (a.estado || 'Disponible'),
-        estadoEquipo: a.estadoEquipo || '',
-        usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
-        areaTrabajo: _esSitio ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
-        correo: _esSitio ? '—' : (colab ? colab.email || '' : ''),
-        colaborador: _esSitio ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
-        jefe: asig ? asig.jefe || '' : '',
-        ticket: asig ? asig.ticket || '' : ''
-      });
+      _pushRow(a, null, _asigByActivo.get(a.id) || null);
     } else {
       series.forEach(s => {
-        // Excluir series dadas de baja ejecutada
-        const _serieEstado = (s.estadoSerie || '').toUpperCase();
-        if (_serieEstado === 'DADO DE BAJA') return;
-        // Buscar asignación vigente para ESTA serie específica (case-insensitive)
-        const serieUp = (s.serie || '').toUpperCase().trim();
-        const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (x.serieAsignada || '').toUpperCase().trim() === serieUp);
-        const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
-        const _esSitio2 = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
-        rows.push({
-          activoId: a.id,
-          sede: a.ubicacion || '',
-          tipo: a.tipo || '',
-          equipo: a.equipo || a.tipo || '',
-          marca: a.marca || '',
-          modelo: a.modelo || '',
-          serie: s.serie || '',
-          codInv: s.codInv || '',
-          fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
-          motivo: asig ? asig.motivo || '' : '',
-          actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
-          estadoCMDB: asig ? 'Asignado' : (s.estadoSerie || a.estado || 'Disponible'),
-          estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
-          usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
-          areaTrabajo: _esSitio2 ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
-          correo: _esSitio2 ? '—' : (colab ? colab.email || '' : ''),
-          colaborador: _esSitio2 ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
-          jefe: asig ? asig.jefe || '' : '',
-          ticket: asig ? asig.ticket || '' : ''
-        });
+        if ((s.estadoSerie || '').toUpperCase() === 'BAJA') return;
+        const key = a.id + '||' + (s.serie || '').toUpperCase().trim();
+        _pushRow(a, s, _asigByKey.get(key) || null);
       });
     }
   });
+
+  _invRowsCache = rows;
   return rows;
 }
 
@@ -9728,7 +9931,7 @@ function verDetalleSerie(activoId, serie) {
   // ── TAB: Almacén (si disponible) ──
   const _almEstado = (serieObj.estadoSerie || activo.estado || 'Disponible');
   const _almEsMant = _almEstado.toUpperCase().includes('MANTENIMIENTO');
-  const _almEsBaja = _almEstado.toUpperCase() === 'BAJA' || _almEstado.toUpperCase() === 'DADO DE BAJA';
+  const _almEsBaja = _almEstado.toUpperCase() === 'BAJA';
   const tabAlmacen = !esAsignado ? `
     <div style="display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,${_almEsMant ? '#fefce8,#fef9c3' : _almEsBaja ? '#fef2f2,#fee2e2' : '#f0fdf4,#dcfce7'});border-radius:12px;margin-bottom:14px">
       <div style="width:50px;height:50px;border-radius:50%;background:linear-gradient(135deg,${_almEsMant ? '#f59e0b,#d97706' : _almEsBaja ? '#ef4444,#dc2626' : '#10b981,#059669'});display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;flex-shrink:0">${_almEsMant ? '🔧' : _almEsBaja ? '⛔' : '🏢'}</div>
@@ -9806,7 +10009,7 @@ function verDetalleSerie(activoId, serie) {
           ${(() => {
             const _estadoSerie = serieObj.estadoSerie || activo.estado || 'Disponible';
             const _esMantenimiento = (_estadoSerie || '').toUpperCase().includes('MANTENIMIENTO');
-            const _esBaja = (_estadoSerie || '').toUpperCase() === 'BAJA' || (_estadoSerie || '').toUpperCase() === 'DADO DE BAJA';
+            const _esBaja = (_estadoSerie || '').toUpperCase() === 'BAJA';
             const _badgeStyle = esAsignado ? 'background:#dbeafe;color:#1e40af;border:1px solid #93c5fd'
               : _esMantenimiento ? 'background:#fef3c7;color:#92400e;border:1px solid #fde68a'
               : _esBaja ? 'background:#fef2f2;color:#991b1b;border:1px solid #fecaca'
@@ -10000,8 +10203,7 @@ function _onInvSearch(val) {
   const clearBtn = document.getElementById('invSearchClear');
   if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
   resetPage('inventario');
-  clearTimeout(_invSearchTimer);
-  _invSearchTimer = setTimeout(_renderInvTable, 120);
+  debounceSearch('inv', _renderInvTable);
 }
 
 function _clearInvSearch() {
@@ -10130,8 +10332,6 @@ function exportInventario() {
 let _bitSearch = '';
 let _bitFilterMov = 'Todos';
 let _bitFilterEstado = 'Todos';
-let _bitSearchTimer = null;
-
 // Almacén de archivos adjuntos (base64) - persistido en localStorage
 // ── IndexedDB para archivos de bitácora (sin límite de localStorage) ──
 const _bitArchivos = {
@@ -10299,8 +10499,7 @@ function renderMovimientos(el) {
 function _onBitSearch(val) {
   _bitSearch = val;
   resetPage('bitacora');
-  clearTimeout(_bitSearchTimer);
-  _bitSearchTimer = setTimeout(_renderBitTable, 120);
+  debounceSearch('bit', _renderBitTable);
 }
 
 function _setBitFilterMov(val) {
@@ -11098,25 +11297,9 @@ function _ejecutarRetorno() {
       }
     }
 
-    // Solo cambiar estado global del activo si TODAS las series están en baja o no vigentes
-    if (activo.series && activo.series.length > 1) {
-      const seriesVigentes = asignaciones.filter(a => a.activoId === activo.id && a.estado === 'Vigente' && a.id !== rec.id);
-      const todasSeriesBaja = activo.series.every(s => (s.estadoSerie || '').toUpperCase() === 'BAJA');
-      if (todasSeriesBaja) {
-        activo.estado = 'Baja';
-        activo.estadoEquipo = _retornoEstadoEq;
-      } else if (seriesVigentes.length === 0) {
-        // No hay series vigentes, pero no todas en baja → mixto, mantener como estaba o Disponible
-        const seriesBaja = activo.series.filter(s => (s.estadoSerie || '').toUpperCase() === 'BAJA').length;
-        if (seriesBaja > 0 && seriesBaja < activo.series.length) {
-          activo.estado = 'Disponible'; // Parcialmente en baja, el activo sigue disponible para las otras series
-        }
-      }
-    } else {
-      // Activo con 1 sola serie o sin series → cambiar estado global
-      activo.estado = _retornoCmdb;
-      activo.estadoEquipo = _retornoEstadoEq;
-    }
+    // Cambiar estado global del activo (1 activo = 1 serie)
+    activo.estado = _retornoCmdb;
+    activo.estadoEquipo = _retornoEstadoEq;
 
     activo.obsRetorno = obs.trim();
     if (!_esRoboRet) activo.ubicacion = almacen;
@@ -11166,16 +11349,23 @@ function _ejecutarRetorno() {
    ═══════════════════════════════════════════════════════ */
 let _bajasSeleccionadas = new Set();
 let _bajasSearch = '';
-let _bajasSearchTimer = null;
-
 function _buildBajasRows() {
   const activos = DB.get('activos');
   const asignaciones = DB.get('asignaciones');
   const historial = DB.get('historialBajas') || [];
   const rows = [];
+
+  // Índice: última asignación por activoId (O(n) una vez, no O(n²))
+  const _ultimaAsigByActivo = new Map();
+  asignaciones.forEach(a => {
+    const prev = _ultimaAsigByActivo.get(a.activoId);
+    if (!prev || (a.fechaAsignacion || '') > (prev.fechaAsignacion || '')) {
+      _ultimaAsigByActivo.set(a.activoId, a);
+    }
+  });
+
   activos.forEach(a => {
-    // Buscar última asignación para obtener responsable
-    const ultimaAsig = asignaciones.filter(x => x.activoId === a.id).sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0];
+    const ultimaAsig = _ultimaAsigByActivo.get(a.id) || null;
 
     // Calcular antigüedad
     let antiguedad = '—';
@@ -11194,8 +11384,8 @@ function _buildBajasRows() {
     _seriesList.forEach(s => {
       // Determinar si esta serie específica está en baja
       const serieEstado = (s.estadoSerie || '').toUpperCase();
-      const esBajaSerie = serieEstado === 'BAJA' || serieEstado === 'DADO DE BAJA';
-      const esBajaGlobal = eUp === 'BAJA' || eUp === 'DADO DE BAJA';
+      const esBajaSerie = serieEstado === 'BAJA';
+      const esBajaGlobal = eUp === 'BAJA';
 
       // Solo incluir si: la serie individual está en baja, O el activo global está en baja (activos con 1 sola serie o sin series)
       if (!esBajaSerie && !esBajaGlobal) return;
@@ -11336,8 +11526,7 @@ function _onBajasSearch(val) {
   const clearBtn = document.getElementById('bajasSearchClear');
   if (clearBtn) clearBtn.style.display = val ? 'flex' : 'none';
   resetPage('bajasP');
-  clearTimeout(_bajasSearchTimer);
-  _bajasSearchTimer = setTimeout(_renderBajasTable, 120);
+  debounceSearch('bajas', _renderBajasTable);
 }
 
 function _renderBajasTable() {
@@ -11629,22 +11818,16 @@ function _confirmarEjecucionBajas() {
   selRows.forEach(r => {
     const activo = activos.find(a => a.id === r.activoId);
     if (activo) {
-      // Marcar serie específica como dada de baja
+      // Marcar serie y activo como dado de baja (1 activo = 1 serie)
       const _serieKey = (r.serie || '').toUpperCase().trim();
-      if (_serieKey && activo.series && activo.series.length > 1) {
+      if (_serieKey && activo.series && activo.series.length > 0) {
         const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === _serieKey);
         if (serieObj) {
-          serieObj.estadoSerie = 'Dado de Baja';
+          serieObj.estadoSerie = 'Baja';
           serieObj.fechaBajaEjecutada = fechaSalida;
         }
-        // Solo marcar activo global si TODAS las series están dadas de baja
-        const todasDadas = activo.series.every(s => (s.estadoSerie || '').toUpperCase() === 'DADO DE BAJA');
-        if (todasDadas) {
-          activo.estado = 'Dado de Baja';
-        }
-      } else {
-        activo.estado = 'Dado de Baja';
       }
+      activo.estado = 'Baja';
       activo.fechaBajaEjecutada = fechaSalida;
       activo.guiaSalida = numGuia;
       activo.guiaSalidaArchivo = window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '';
@@ -11911,7 +12094,7 @@ function _confirmarValorizacion() {
 function openBajaModal() {
   const activos = DB.get('activos').filter(a => {
     const e = (a.estado||'').toUpperCase();
-    return e !== 'DADO DE BAJA' && e !== 'BAJA';
+    return e !== 'BAJA';
   });
   const motivos = ['DESTRUCCIÓN', 'VENTA', 'DONACIÓN', 'OBSOLETO', 'DAÑADO IRREPARABLE', 'PÉRDIDA', 'ROBO', 'FIN DE VIDA ÚTIL', 'OTRO'];
 
@@ -12645,8 +12828,9 @@ document.addEventListener('DOMContentLoaded', async function () {
 
   // 3. Inicializar datos por defecto / migraciones
   initSampleData();
+  validarMapeoEstados();
 
-  // 3. Restaurar sesión y arrancar la app
+  // 4. Restaurar sesión y arrancar la app
   const hasSession = checkSession();
   if (hasSession) {
     restoreSidebarState();
