@@ -1,0 +1,7 @@
+# Archivos temporales de Office (se crean al abrir un Excel/Word)
+~$*
+*.tmp
+
+# Copias de seguridad locales
+*.bak
+*_backup_*.sql

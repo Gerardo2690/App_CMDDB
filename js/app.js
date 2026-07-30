@@ -1,39 +1,351 @@
 /* ═══════════════════════════════════════════════════════
-   DATA LAYER - IndexedDB con caché en memoria
-   Soporta cientos de MB (20K+ activos, 3K+ colaboradores)
+   DATA LAYER - Dual: MySQL API + localStorage fallback
+   Soporta 20K+ activos, 3K+ colaboradores
    API síncrona compatible: DB.get(), DB.set(), DB.getConfig(), DB.setConfig()
    ═══════════════════════════════════════════════════════ */
 const DB = (() => {
-  // ── LocalStorage como almacenamiento principal (sincrono, confiable) ──
+  const API_BASE = 'api/sync.php';
+  let _cache = {};      // cache en memoria (datos principales)
+  let _configCache = {}; // cache de catalogos
+  let _useAPI = false;   // true si la API esta disponible
+  let _ready = false;
+  let _saveQueue = {};   // cola de guardado debounced
+  const SAVE_DELAY = 800; // ms antes de enviar a API
+  let _saveTimers = {};
+
+  // Keys que NUNCA se deben sincronizar via sync masivo (peligro de borrado total
+  // o tablas muy grandes). Sus mutaciones deben usar addOne/updateOne/bulkInsert.
+  const _NO_AUTO_SYNC = new Set(['gestores', 'bitacoraMovimientos']);
+
+  // ── Enviar datos a la API (fire-and-forget) ──
+  function _apiSave(key, data) {
+    if (!_useAPI) return;
+    if (_NO_AUTO_SYNC.has(key)) return; // no auto-sync para tablas grandes/criticas
+    clearTimeout(_saveTimers[key]);
+    _saveTimers[key] = setTimeout(() => {
+      fetch(API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, data, action: 'sync' })
+      }).catch(err => console.warn('API sync error (' + key + '):', err));
+    }, SAVE_DELAY);
+  }
+
+  function _apiSaveConfig(data) {
+    if (!_useAPI) return;
+    // Config se persiste INMEDIATAMENTE (sin debounce) para evitar perder cambios
+    // si el usuario refresca antes de los 800ms del debounce anterior.
+    fetch(API_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: '_config', data, action: 'sync' })
+    }).then(async r => {
+      if (!r.ok) {
+        const body = await r.text().catch(() => '');
+        console.error('[DB.setConfig] HTTP ' + r.status + ': ' + body);
+      }
+    }).catch(err => console.error('[DB.setConfig] Network error:', err));
+  }
+
+  // ── LocalStorage helpers (fallback) ──
+  function _lsGet(key) {
+    try {
+      const v = JSON.parse(localStorage.getItem('ati_' + key));
+      return Array.isArray(v) ? v : (v ? v : []);
+    } catch { return []; }
+  }
+  function _lsSet(key, data) {
+    try { localStorage.setItem('ati_' + key, JSON.stringify(data)); }
+    catch (e) { /* localStorage lleno — no importa si tenemos API */ }
+  }
+  function _lsCfgGet(key, def) {
+    try {
+      const v = JSON.parse(localStorage.getItem('ati_cfg_' + key));
+      return v !== undefined && v !== null ? v : def;
+    } catch { return def; }
+  }
+  function _lsCfgSet(key, val) {
+    try { localStorage.setItem('ati_cfg_' + key, JSON.stringify(val)); }
+    catch (e) { /* ignorar */ }
+  }
+
   return {
-    init() { return Promise.resolve(); },
-    isReady() { return true; },
-    flush() { return Promise.resolve(); },
+    // ── Init: intentar cargar desde API, fallback a localStorage ──
+    async init() {
+      try {
+        const resp = await fetch(API_BASE, { signal: AbortSignal.timeout(120000) });
+        if (resp.ok) {
+          const data = await resp.json();
+          _useAPI = true;
+          // Poblar cache desde API
+          const keys = ['activos','colaboradores','asignaciones','repuestos','sitiosMoviles',
+            'tiendas','movimientos','bitacoraMovimientos','bajasPendientes','historialBajas',
+            'mantenimientos','gestores'];
+          keys.forEach(k => {
+            _cache[k] = data[k] || [];
+          });
+          _configCache = data._config || {};
+          // Guardar tipoEquipos en config
+          if (data._tipoEquipos) _configCache._tipoEquipos = data._tipoEquipos;
+          console.log('%c[DB] Conectado a MySQL API', 'color:#059669;font-weight:bold');
+          _ready = true;
+          return true;
+        }
+      } catch (e) {
+        console.log('%c[DB] API no disponible, usando localStorage', 'color:#d97706;font-weight:bold', e.message || '');
+      }
+      _useAPI = false;
+      _ready = true;
+      return false;
+    },
+
+    isReady() { return _ready; },
+    isMySQL() { return _useAPI; },
+
+    // LoadKey: cargar una tabla bajo demanda desde el backend (lazy-load).
+    // opts.limit / opts.offset: paginacion del backend (para tablas pesadas).
+    // opts.append=true: concatena al cache existente en vez de reemplazar.
+    // opts.force=true: fuerza recarga aunque el cache tenga datos.
+    // Retorna: array de records si no hay limit, o { data, total } si hay limit.
+    async loadKey(key, opts) {
+      opts = opts || {};
+      if (!_useAPI) return _cache[key] || [];
+      if (!opts.force && !opts.limit && _cache[key] && _cache[key].length > 0) return _cache[key];
+      try {
+        let url = API_BASE + '?key=' + encodeURIComponent(key);
+        if (opts.limit) url += '&limit=' + opts.limit;
+        if (opts.offset) url += '&offset=' + opts.offset;
+        if (opts.withCount) url += '&withCount=1';
+        const resp = await fetch(url, { signal: AbortSignal.timeout(180000) });
+        if (!resp.ok) {
+          console.error('[DB.loadKey] HTTP ' + resp.status + ' "' + key + '"');
+          return _cache[key] || [];
+        }
+        const json = await resp.json();
+        const records = Array.isArray(json) ? json : (json.data || []);
+        if (opts.append) {
+          _cache[key] = (_cache[key] || []).concat(records);
+        } else {
+          _cache[key] = records;
+        }
+        return opts.limit ? { data: records, total: json.total || records.length } : _cache[key];
+      } catch (err) {
+        console.error('[DB.loadKey] Error "' + key + '":', err);
+        return _cache[key] || [];
+      }
+    },
+
+    // UpdateOne: actualizar UN registro existente en la BD. El record DEBE tener id.
+    // Fire-and-forget — actualiza el cache localmente; la BD se sincroniza en background.
+    updateOne(key, record) {
+      if (!record || !record.id) {
+        console.error('[DB.updateOne] record sin id', key, record);
+        return;
+      }
+      if (key === 'activos' || key === 'asignaciones' || key === 'colaboradores') _invRowsCache = null;
+      // Actualizar en cache local (reemplazar por id)
+      if (!_cache[key]) _cache[key] = [];
+      const arr = _cache[key];
+      const idx = arr.findIndex(r => r.id === record.id);
+      if (idx >= 0) arr[idx] = record;
+      if (_useAPI) {
+        fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, record, action: 'update' })
+        }).then(async r => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            console.error('[DB.updateOne] HTTP ' + r.status + ' "' + key + '":', body);
+          }
+        }).catch(err => console.error('[DB.updateOne] Network error "' + key + '":', err));
+      } else {
+        // Fallback localStorage
+        const lsArr = _lsGet(key);
+        const lsIdx = lsArr.findIndex(r => r.id === record.id);
+        if (lsIdx >= 0) lsArr[lsIdx] = record;
+        _lsSet(key, lsArr);
+      }
+    },
+
+    // AddOne: insertar UN solo record. Usa bulkInsert internamente (fire-and-forget).
+    // El record se agrega al cache local de inmediato; la persistencia ocurre en background.
+    addOne(key, record) {
+      if (key === 'activos' || key === 'asignaciones' || key === 'colaboradores') _invRowsCache = null;
+      // Agregar al cache local inmediatamente con id temporal
+      if (!_cache[key]) _cache[key] = [];
+      // Calcular maxId sin spread (evita stack overflow con arrays grandes 200K+)
+      let maxId = 0;
+      const arr = _cache[key];
+      for (let i = 0; i < arr.length; i++) {
+        const v = arr[i].id || 0;
+        if (v > maxId) maxId = v;
+      }
+      record.id = record.id || (maxId + 1);
+      arr.unshift(record);
+      // Persistir en background sin bloquear (sin id — backend lo genera)
+      if (_useAPI) {
+        const recordSinId = {...record};
+        delete recordSinId.id;
+        fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, data: [recordSinId], action: 'bulkInsert' })
+        }).then(async r => {
+          if (r.ok) {
+            const json = await r.json().catch(() => ({}));
+            if (json.ids && json.ids[0]) record.id = json.ids[0];
+          } else {
+            const body = await r.text().catch(() => '');
+            console.error('[DB.addOne] HTTP ' + r.status + ' "' + key + '":', body);
+          }
+        }).catch(err => console.error('[DB.addOne] Network error "' + key + '":', err));
+      } else {
+        // Fallback localStorage
+        const lsArr = _lsGet(key);
+        lsArr.unshift(record);
+        _lsSet(key, lsArr);
+      }
+    },
+
+    // BulkInsert: envia un array de records nuevos para INSERT directo en MySQL.
+    // No usa sync (no borra, no compara IDs). Devuelve { ok, ids, error }.
+    // Por defecto agrega los records al cache local con los IDs reales generados por MySQL.
+    // opts.skipCache=true: NO toca el cache (util si el caller ya manejo el cache).
+    async bulkInsert(key, records, opts) {
+      if (key === 'activos' || key === 'asignaciones' || key === 'colaboradores') _invRowsCache = null;
+      opts = opts || {};
+      if (!_useAPI) {
+        if (!opts.skipCache) {
+          const existing = _lsGet(key);
+          _lsSet(key, existing.concat(records));
+        }
+        return { ok: true, ids: records.map(r => r.id), local: true };
+      }
+      try {
+        const resp = await fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, data: records, action: 'bulkInsert' })
+        });
+        if (!resp.ok) {
+          const body = await resp.text();
+          console.error('[DB.bulkInsert] HTTP ' + resp.status + ' "' + key + '":', body);
+          return { ok: false, error: 'HTTP ' + resp.status + ': ' + body };
+        }
+        const json = await resp.json();
+        const ids = json.ids || [];
+        records.forEach((r, i) => { if (ids[i]) r.id = ids[i]; });
+        if (!opts.skipCache) {
+          _cache[key] = (_cache[key] || []).concat(records);
+        }
+        return { ok: true, ids, count: json.count };
+      } catch (err) {
+        console.error('[DB.bulkInsert] Network error "' + key + '":', err);
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // DeleteOne: eliminar UN registro por id, persistiendo en la BD (action:'delete').
+    // Fire-and-forget: quita del cache local y ordena el borrado en el backend.
+    deleteOne(key, id) {
+      if (key === 'activos' || key === 'asignaciones' || key === 'colaboradores') _invRowsCache = null;
+      if (!_cache[key]) _cache[key] = [];
+      _cache[key] = _cache[key].filter(r => r.id !== id);
+      if (_useAPI) {
+        fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key, record: { id }, action: 'delete' })
+        }).then(async r => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            console.error('[DB.deleteOne] HTTP ' + r.status + ' "' + key + '":', body);
+          }
+        }).catch(err => console.error('[DB.deleteOne] Network error "' + key + '":', err));
+      } else {
+        _lsSet(key, _lsGet(key).filter(r => r.id !== id));
+      }
+    },
+
+    flush(specificKey) {
+      // Si se pasa una key, solo sincroniza esa (mucho mas eficiente).
+      // Sin parametro: sincroniza todas (legacy, evitar para tablas pesadas).
+      // Excluye siempre 'gestores' (no esta en TABLE_MAP del backend).
+      if (!_useAPI) return Promise.resolve();
+
+      let keys;
+      if (specificKey) {
+        keys = [specificKey];
+      } else {
+        keys = Object.keys(_cache).filter(k => k !== 'gestores' && k !== 'bitacoraMovimientos');
+      }
+      // Cancelar SOLO los timers de las keys que se van a sincronizar ahora; dejar que
+      // los guardados debounced pendientes de OTRAS keys se disparen normalmente
+      // (antes se cancelaban todos y esos cambios se perdian silenciosamente).
+      keys.forEach(k => clearTimeout(_saveTimers[k]));
+
+      const promises = keys.map(k =>
+        fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: k, data: _cache[k], action: 'sync' })
+        }).then(async r => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            console.error('[DB.flush] Error en sync "' + k + '" — HTTP ' + r.status + ': ' + body);
+          }
+          return r;
+        }).catch(err => console.error('[DB.flush] Network error "' + k + '":', err))
+      );
+      return Promise.all(promises);
+    },
 
     get(key) {
-      try {
-        const v = JSON.parse(localStorage.getItem('ati_' + key));
-        return Array.isArray(v) ? v : (v ? v : []);
-      } catch { return []; }
+      if (_useAPI) {
+        return _cache[key] || [];
+      }
+      return _lsGet(key);
     },
+
     set(key, data) {
-      try { localStorage.setItem('ati_' + key, JSON.stringify(data)); }
-      catch (e) { console.error('DB set error:', key, e); }
+      if (key === 'activos' || key === 'asignaciones' || key === 'colaboradores') _invRowsCache = null;
+      if (_useAPI) {
+        _cache[key] = data;
+        _apiSave(key, data);
+      } else {
+        _lsSet(key, data);
+      }
     },
+
     getConfig(key, def) {
-      try {
-        const v = JSON.parse(localStorage.getItem('ati_cfg_' + key));
-        return v !== undefined && v !== null ? v : def;
-      } catch { return def; }
+      if (_useAPI) {
+        const val = _configCache[key];
+        return val !== undefined && val !== null ? val : def;
+      }
+      return _lsCfgGet(key, def);
     },
+
     setConfig(key, val) {
-      try { localStorage.setItem('ati_cfg_' + key, JSON.stringify(val)); }
-      catch (e) { console.error('DB setConfig error:', key, e); }
+      if (_useAPI) {
+        _configCache[key] = val;
+        _apiSaveConfig(_configCache);
+      } else {
+        _lsCfgSet(key, val);
+      }
     },
+
     remove(key) {
+      if (_useAPI) {
+        delete _cache[key];
+      }
       localStorage.removeItem('ati_' + key);
     },
+
     removeConfig(key) {
+      if (_useAPI) {
+        delete _configCache[key];
+      }
       localStorage.removeItem('ati_cfg_' + key);
     }
   };
@@ -50,6 +362,59 @@ const ESTADO_EQUIPO_MAP = {
 };
 // Lista plana de todos los sub-estados válidos
 const ALL_ESTADOS_EQUIPO = Object.values(ESTADO_EQUIPO_MAP).flat();
+
+// ═══════════════════════════════════════════════════════
+// DESCUENTOS ESTIMADOS por colaborador
+// Suma del costo de los activos asignados cuyo tipo aplica descuento.
+// Los tipos que aplican se configuran en Parametros → Descuentos.
+// ═══════════════════════════════════════════════════════
+function _calcularDescuentoColab(colabId) {
+  const asigs = DB.get('asignaciones').filter(a => a.colaboradorId === colabId && a.estado === 'Vigente');
+  const activos = DB.get('activos');
+  const tiposDescuento = (DB.getConfig('tiposDescuento', []) || []).map(t => (t || '').toUpperCase().trim());
+  if (tiposDescuento.length === 0) return { total: 0, detalle: [], aplicaConfig: false };
+  let total = 0;
+  const detalle = [];
+  asigs.forEach(a => {
+    const act = activos.find(x => x.id === a.activoId);
+    if (!act) return;
+    const tipoUp = (act.tipo || '').toUpperCase().trim();
+    if (tiposDescuento.includes(tipoUp)) {
+      const costo = parseFloat(act.costo) || 0;
+      total += costo;
+      detalle.push({ codigo: act.codigo, tipo: act.tipo, marca: act.marca, modelo: act.modelo, costo });
+    }
+  });
+  return { total, detalle, aplicaConfig: true };
+}
+
+function _formatoSoles(valor) {
+  const n = parseFloat(valor) || 0;
+  return 'S/ ' + n.toLocaleString('es-PE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Validar coherencia: dado un estadoCMDB y estadoEquipo, ¿son compatibles?
+function _esEstadoCoherente(cmdb, equipo) {
+  if (!cmdb || !equipo) return false;
+  const cmdbUp = String(cmdb).toUpperCase();
+  const equipoUp = String(equipo).toUpperCase();
+  const valid = ESTADO_EQUIPO_MAP[cmdbUp] || [];
+  return valid.includes(equipoUp);
+}
+
+// Setea estado de una serie escribiendo en AMBOS campos (estadoCMDB y estadoSerie)
+// para mantener compatibilidad backend/frontend.
+function _setSerieEstadoFull(serieObj, cmdb, equipo) {
+  if (!serieObj) return;
+  if (cmdb !== undefined && cmdb !== null) {
+    serieObj.estadoCMDB = cmdb;
+    serieObj.estadoSerie = cmdb;
+  }
+  if (equipo !== undefined && equipo !== null) {
+    serieObj.estadoEquipoSerie = equipo;
+    serieObj.estadoEquipo = equipo;
+  }
+}
 
 /* ═══════════════════════════════════════════════════════
    INITIALIZE SAMPLE DATA
@@ -69,15 +434,20 @@ function initSampleData() {
   if (DB.get('bajasPendientes').length === 0) DB.set('bajasPendientes', []);
   if (DB.get('historialBajas').length === 0) DB.set('historialBajas', []);
 
-  // Verificar que los gestores tengan credenciales válidas; si no, reinicializar
+  // Verificar que exista al menos un admin. Importante: si YA hay gestores reales,
+  // NO reemplazar el array (se perderían cuentas creadas por el cliente); solo agregar
+  // un admin si falta. El seed completo se aplica únicamente en instalación nueva (vacío).
   const _gestoresActuales = DB.get('gestores');
   const _adminOk = _gestoresActuales.some(g => (g.usuario || '').toLowerCase() === 'admin');
-  if (_gestoresActuales.length === 0 || !_adminOk) {
+  if (_gestoresActuales.length === 0) {
     DB.set('gestores', [
       { id: 1, nombre: 'Gerardo R.', email: 'gerardo@empresa.com', rol: 'Administrador', perfil: 'Administrativo', usuario: 'admin', password: '', estado: 'Activo' },
       { id: 2, nombre: 'Admin TI', email: 'admin.ti@empresa.com', rol: 'Gestor', perfil: 'Administrativo', usuario: 'gestor', password: 'gestor123', estado: 'Activo' },
       { id: 3, nombre: 'Carlos Tiendas', email: 'carlos.tiendas@empresa.com', rol: 'Gestor', perfil: 'Tiendas', usuario: 'tiendas', password: 'tiendas123', estado: 'Activo' }
     ]);
+  } else if (!_adminOk) {
+    _gestoresActuales.push({ id: nextId(_gestoresActuales), nombre: 'Administrador', email: '', rol: 'Administrador', perfil: 'Administrativo', usuario: 'admin', password: '', estado: 'Activo' });
+    DB.set('gestores', _gestoresActuales);
   }
 
   if (DB.get('tiendas').length === 0) {
@@ -578,7 +948,7 @@ function showToast(msg, type = 'success') {
   const icons = { success: '✅', error: '❌', info: 'ℹ️' };
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.innerHTML = `<span>${icons[type] || ''}</span><span>${msg}</span>`;
+  toast.innerHTML = `<span>${icons[type] || ''}</span><span>${esc(msg)}</span>`;
   container.appendChild(toast);
   setTimeout(() => {
     toast.style.opacity = '0';
@@ -758,13 +1128,13 @@ function _notifAction(action) {
 
   switch (action) {
     case 'colab-sin-activos':
-      navigateTo('colaboradores', 'listaColaboradores');
+      navigateTo('colaboradores', 'padron');
       break;
     case 'ceses-pendientes':
-      navigateTo('asignacion', 'pendientesRetorno');
+      navigateTo('colaboradores', 'ceses');
       break;
     case 'pend-retorno':
-      navigateTo('asignacion', 'pendientesRetorno');
+      navigateTo('bitacora', 'pendientesRetorno');
       break;
     case 'actas-pendientes':
       navigateTo('bitacora', 'movimientos');
@@ -789,6 +1159,63 @@ function openModal(title, bodyHTML, footerHTML, extraClass = '') {
   document.getElementById('modalFooter').innerHTML = footerHTML;
   document.getElementById('modal').className = 'modal' + (extraClass ? ' ' + extraClass : '');
   document.getElementById('modalOverlay').classList.add('show');
+}
+
+// ── Overlay de procesamiento (spinner + barra de porcentaje 0-100%) ──
+// El porcentaje se estima por tiempo: alcanza 95% asintoticamente,
+// y salta a 100% cuando termina el proceso real.
+let _procOverlayTimers = { tick: null };
+function showProcessingOverlay(message, estimatedSeconds) {
+  hideProcessingOverlay();
+  const estTotal = Math.max(5, estimatedSeconds || 30); // segundos esperados (default 30s)
+  const ov = document.createElement('div');
+  ov.id = 'processingOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:99999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)';
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:16px;padding:32px 40px;box-shadow:0 25px 50px rgba(0,0,0,.4);text-align:center;min-width:360px;max-width:460px">
+      <div style="width:56px;height:56px;border:5px solid #e2e8f0;border-top-color:#2563eb;border-radius:50%;margin:0 auto 18px;animation:procSpin 1s linear infinite"></div>
+      <h3 style="margin:0 0 6px;font-size:16px;color:#0f172a">${esc(message || 'Procesando...')}</h3>
+      <p style="margin:0 0 18px;font-size:12px;color:#64748b">Por favor espere — no cierre esta ventana</p>
+      <div style="width:320px;height:10px;background:#e2e8f0;border-radius:5px;margin:0 auto;overflow:hidden">
+        <div id="procOverlayBar" style="width:0%;height:100%;background:linear-gradient(90deg,#2563eb,#7c3aed);border-radius:5px;transition:width .3s ease-out"></div>
+      </div>
+      <div id="procOverlayPct" style="margin-top:10px;font-size:22px;font-weight:800;color:#2563eb;font-variant-numeric:tabular-nums">0%</div>
+      <div id="procOverlaySlow" style="display:none;margin-top:6px;font-size:11px;color:#dc2626;font-weight:600">Esto está tardando más de lo esperado...</div>
+    </div>
+    <style>@keyframes procSpin{to{transform:rotate(360deg)}}</style>
+  `;
+  document.body.appendChild(ov);
+
+  const tStart = Date.now();
+  _procOverlayTimers.tick = setInterval(() => {
+    const elapsed = (Date.now() - tStart) / 1000;
+    let pct;
+    if (elapsed < estTotal) {
+      // Crecimiento lineal 0% → 90% durante el tiempo estimado
+      pct = (elapsed / estTotal) * 90;
+    } else if (elapsed < estTotal * 2) {
+      // 90% → 97% en los siguientes "estTotal" segundos
+      pct = 90 + ((elapsed - estTotal) / estTotal) * 7;
+    } else {
+      // 97% → 99% asintotico
+      const extra = elapsed - (estTotal * 2);
+      pct = 97 + Math.min(2, extra / 30);
+    }
+    const bar = document.getElementById('procOverlayBar');
+    const txt = document.getElementById('procOverlayPct');
+    if (bar) bar.style.width = pct.toFixed(0) + '%';
+    if (txt) txt.textContent = pct.toFixed(0) + '%';
+    // Aviso si tarda más del doble de lo estimado
+    if (elapsed > estTotal * 2) {
+      const slow = document.getElementById('procOverlaySlow');
+      if (slow) slow.style.display = 'block';
+    }
+  }, 200);
+}
+function hideProcessingOverlay() {
+  if (_procOverlayTimers.tick) { clearInterval(_procOverlayTimers.tick); _procOverlayTimers.tick = null; }
+  const ov = document.getElementById('processingOverlay');
+  if (ov) ov.remove();
 }
 
 function closeModal() {
@@ -817,7 +1244,13 @@ function closeModal() {
    UTILITY FUNCTIONS
    ═══════════════════════════════════════════════════════ */
 function nextId(arr) {
-  return arr.length ? Math.max(...arr.map(a => a.id)) + 1 : 1;
+  // Sin spread (evita stack overflow con arrays grandes) y tolerante a ids no numéricos.
+  let maxId = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = Number(arr[i] && arr[i].id) || 0;
+    if (v > maxId) maxId = v;
+  }
+  return maxId + 1;
 }
 
 function today() {
@@ -835,8 +1268,9 @@ function normalizeDate(val) {
   }
   const s = String(val).trim();
   if (!s) return '';
-  // Si es número (serial de Excel: días desde 1/1/1900)
-  if (/^\d{4,6}$/.test(s)) {
+  // Si es número (serial de Excel: días desde 1/1/1900). Se exige el rango de un serial
+  // plausible (>=20000 ≈ 1954, <=60000 ≈ 2064) para NO confundir un año suelto (p.ej. "2024").
+  if (/^\d{4,6}$/.test(s) && +s >= 20000 && +s <= 60000) {
     const d = new Date(Math.round((parseInt(s) - 25569) * 86400 * 1000));
     if (!isNaN(d)) {
       const dd = String(d.getDate()).padStart(2, '0');
@@ -858,16 +1292,17 @@ function normalizeDate(val) {
 function formatDate(d) {
   if (!d) return '—';
   const s = String(d);
-  // Serial de Excel (número de 4-6 dígitos)
-  if (/^\d{4,6}$/.test(s)) {
+  // Serial de Excel (rango plausible: no confundir un año suelto como "2024" con un serial)
+  if (/^\d{4,6}$/.test(s) && +s >= 20000 && +s <= 60000) {
     const dt = new Date(Math.round((parseInt(s) - 25569) * 86400 * 1000));
     if (!isNaN(dt)) {
       return String(dt.getDate()).padStart(2, '0') + '/' + String(dt.getMonth() + 1).padStart(2, '0') + '/' + dt.getFullYear();
     }
   }
-  // Soportar formato interno yyyy-mm-dd (con o sin hora T...)
+  // Soportar formato interno yyyy-mm-dd (con o sin hora "T..." o " ...")
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
-    const parts = s.split('T')[0].split('-');
+    const datePart = s.split('T')[0].split(' ')[0];
+    const parts = datePart.split('-');
     return `${parts[2]}/${parts[1]}/${parts[0]}`;
   }
   // Si ya está en dd/mm/yyyy retornarlo tal cual
@@ -891,7 +1326,16 @@ function formatDateTime(d) {
 }
 
 function esc(s) {
-  return String(s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+// Escape para valores interpolados dentro de handlers inline con comillas simples,
+// p.ej. onclick="fn('${escJs(x)}')". Evita que un apóstrofe rompa/inyecte el string JS
+// (esc() por sí solo no protege el contexto de string JS dentro del atributo).
+function escJs(s) {
+  return String(s || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // Helper: nombre completo del colaborador (nombre + apellido)
@@ -922,26 +1366,32 @@ function optionsHTML(arr, selected) {
 }
 
 function addMovimiento(tipo, detalle) {
-  const movs = DB.get('movimientos');
-  movs.unshift({
-    id: nextId(movs),
+  DB.addOne('movimientos', {
     tipo,
     detalle,
     fecha: today(),
     hora: new Date().toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' }),
     usuario: currentUser ? currentUser.nombre : 'Sistema'
   });
-  DB.set('movimientos', movs);
 }
 
 /* ═══════════════════════════════════════════════════════
    PAGINATION
    ═══════════════════════════════════════════════════════ */
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 10; // valor por defecto
+const PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100];
 const pageState = {};
+const pageSizeState = {}; // tamaño de página por key
+
+function getPageSize(key) { return pageSizeState[key] || PAGE_SIZE; }
+async function setPageSize(key, size) {
+  pageSizeState[key] = parseInt(size, 10) || PAGE_SIZE;
+  pageState[key] = 1; // reset a página 1 al cambiar el tamaño
+  await goPage(key, 1);
+}
 
 function resetPage(key) { pageState[key] = 1; }
-function goPage(key, p) {
+async function goPage(key, p) {
   pageState[key] = p;
   if (key === 'ingreso' && document.getElementById('ingresoTableWrap')) {
     _renderIngresoTable();
@@ -954,6 +1404,8 @@ function goPage(key, p) {
   } else if (key === 'asignacion' && document.getElementById('asigTableWrap')) {
     _renderAsigTable();
   } else if (key === 'bitacora' && document.getElementById('bitTableWrap')) {
+    // Bitacora: paginacion server-side — recargar pagina desde BD
+    await _bitFetchPage();
     _renderBitTable();
   } else {
     renderPage();
@@ -961,15 +1413,26 @@ function goPage(key, p) {
 }
 
 function pagSlice(data, key) {
-  const p = pageState[key] || 1;
-  return data.slice((p - 1) * PAGE_SIZE, p * PAGE_SIZE);
+  const ps = getPageSize(key);
+  const tp = Math.max(1, Math.ceil(data.length / ps));
+  let p = pageState[key] || 1;
+  // Clamp: si el dataset se redujo (borrado/filtro) y la página quedó fuera de rango,
+  // reajustar para no mostrar una tabla vacía con footer incoherente.
+  if (p > tp) p = tp;
+  if (p < 1) p = 1;
+  pageState[key] = p;
+  return data.slice((p - 1) * ps, p * ps);
 }
 
 function pagFooter(key, total) {
-  const p = pageState[key] || 1;
-  const tp = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const s = total === 0 ? 0 : (p - 1) * PAGE_SIZE + 1;
-  const e = Math.min(p * PAGE_SIZE, total);
+  const ps = getPageSize(key);
+  const tp = Math.max(1, Math.ceil(total / ps));
+  let p = pageState[key] || 1;
+  if (p > tp) p = tp;
+  if (p < 1) p = 1;
+  pageState[key] = p;
+  const s = total === 0 ? 0 : (p - 1) * ps + 1;
+  const e = Math.min(p * ps, total);
 
   const nums = [];
   if (tp <= 7) {
@@ -992,7 +1455,15 @@ function pagFooter(key, total) {
       <button ${p === tp ? 'disabled' : ''} onclick="goPage('${key}',${p + 1})">›</button>
     </div>` : '';
 
-  return `<span>Mostrando ${s}–${e} de ${total} · Pág. ${p}/${tp}</span>${pagHTML}`;
+  const sizeSelect = `
+    <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin-right:12px">
+      Mostrar
+      <select onchange="setPageSize('${key}', this.value)" style="padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:12px;cursor:pointer;background:#fff">
+        ${PAGE_SIZE_OPTIONS.map(n => `<option value="${n}" ${n === ps ? 'selected' : ''}>${n}</option>`).join('')}
+      </select>
+    </span>`;
+
+  return `${sizeSelect}<span>Mostrando ${s}–${e} de ${total} · Pág. ${p}/${tp}</span>${pagHTML}`;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1671,7 +2142,6 @@ function saveActivo(id) {
     estadoEquipo:     document.getElementById('fEstadoEquipo').value,
     costo:            parseFloat(document.getElementById('fCosto').value) || 0,
     observaciones:    document.getElementById('fObs').value.trim(),
-    estado:           'Disponible',
   });
 
   const activos = DB.get('activos');
@@ -1679,13 +2149,15 @@ function saveActivo(id) {
   if (id) {
     const idx = activos.findIndex(a => a.id === id);
     if (idx >= 0) {
+      // No pisar el estado CMDB al editar (un activo Asignado/Mantenimiento/Baja
+      // debe conservar su estado; 'estado' no viene en `campos`).
       activos[idx] = { ...activos[idx], ...campos };
       addMovimiento('Edición', `Activo ${activos[idx].codigo} actualizado`);
     }
   } else {
     const newId = nextId(activos);
     const codigo = 'ATI-' + String(newId).padStart(5, '0');
-    activos.push({ id: newId, codigo, series: [], ...campos });
+    activos.push({ id: newId, codigo, series: [], estado: 'Disponible', ...campos });
     addMovimiento('Ingreso', `Nuevo activo ${codigo} registrado (${tipo} ${marca})`);
 
     // Auto-registrar en bitácora: INGRESO de nuevo activo
@@ -1708,6 +2180,12 @@ function saveActivo(id) {
 }
 
 function deleteActivo(id) {
+  // No permitir borrar un activo con asignaciones vigentes: dejaría asignaciones huérfanas.
+  const _vig = DB.get('asignaciones').filter(x => x.activoId === id && x.estado === 'Vigente').length;
+  if (_vig > 0) {
+    showToast(`No se puede eliminar: el activo tiene ${_vig} asignación(es) vigente(s). Gestione la devolución primero.`, 'error');
+    return;
+  }
   if (!confirm('¿Está seguro de eliminar este activo?')) return;
   const activos = DB.get('activos');
   const a = activos.find(x => x.id === id);
@@ -1822,7 +2300,7 @@ function procesarExcel(file) {
       }
 
       // Mostrar progreso para archivos grandes
-      const isLarge = rows.length > 500;
+      const isLarge = rows.length > 0;
       if (isLarge) {
         const container = document.getElementById('cmPreviewWrap') || document.getElementById('cmContainer');
         if (container) container.innerHTML = `<div style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Procesando ${rows.length.toLocaleString()} filas...</h3><p style="color:var(--text-secondary);margin-top:8px">Esto puede tomar unos segundos</p><div id="cmProgressBar" style="width:300px;height:6px;background:#e2e8f0;border-radius:3px;margin:16px auto"><div id="cmProgressFill" style="width:0%;height:100%;background:#2563eb;border-radius:3px;transition:width 0.3s"></div></div><div id="cmProgressText" style="font-size:12px;color:var(--text-light)">0%</div></div>`;
@@ -2247,7 +2725,7 @@ async function ejecutarCargaMasiva() {
   });
 
   _cargaMasivaData = [];
-  await DB.flush();
+  await DB.flush('activos');
   closeModal();
   showToast(resumen.join(', ') + ' — ' + totalSeries + ' series importadas');
   renderIngreso(document.getElementById('contentArea'));
@@ -2632,6 +3110,9 @@ function addSerie(activoId) {
   DB.set('activos', activos);
   _seriesPage = Math.ceil(activos[idx].series.length / SERIES_PAGE_SIZE);
   document.getElementById('seriesList').innerHTML = _renderSeriesList(activos[idx].series, activoId);
+  // Mantener sincronizado el contador "Series registradas (N)" (igual que generarSeriesAuto).
+  const _cnt = document.getElementById('seriesList');
+  if (_cnt && _cnt.previousElementSibling) _cnt.previousElementSibling.textContent = 'Series registradas (' + activos[idx].series.length + ')';
 
   // Solo limpiar serie y cod inventario — RAM y almacenamiento se mantienen
   serieInput.value = '';
@@ -3035,43 +3516,78 @@ function _procesarExcelRepuestos(file) {
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (rows.length === 0) { showToast('Archivo vacio', 'error'); return; }
 
+      const isLarge = rows.length > 0;
+      if (isLarge) {
+        const container = document.getElementById('repCmContainer');
+        if (container) container.innerHTML = `<div style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Procesando ${rows.length.toLocaleString()} filas...</h3><div id="cmRepProgressBar" style="width:300px;height:6px;background:#e2e8f0;border-radius:3px;margin:16px auto"><div id="cmRepProgressFill" style="width:0%;height:100%;background:#2563eb;border-radius:3px;transition:width 0.3s"></div></div><div id="cmRepProgressText" style="font-size:12px;color:var(--text-light)">0%</div></div>`;
+      }
+
       const existentes = DB.get('repuestos');
       const seriesExist = new Set(existentes.map(r => (r.serie || '').toUpperCase()));
       const seenInFile = {};
 
-      _cargaMasivaRepData = rows.map((row, i) => {
-        const mapped = {};
-        const rowKeys = Object.keys(row);
-        _REP_CM_COLUMNS.forEach(col => {
-          const matchKey = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
-          let val = row[matchKey];
-          if (val === undefined || val === null) val = '';
-          mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
-        });
-        if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
-        Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k) && k !== 'observaciones') mapped[k] = mapped[k].toUpperCase(); });
-
-        const errors = [];
-        const cat = (mapped.categoria || '').toUpperCase();
-        if (!cat || (cat !== 'COMPONENTE' && cat !== 'PARTE')) errors.push('CATEGORIA invalida');
-        if (!mapped.tipo) errors.push('TIPO requerido');
-        if (!mapped.marca) errors.push('MARCA requerida');
-        if (!mapped.modelo) errors.push('MODELO requerido');
-        if (cat === 'COMPONENTE' && !mapped.serie) errors.push('SERIE requerida (componente)');
-        if (cat === 'COMPONENTE' && !mapped.capacidad) errors.push('CAPACIDAD requerida (componente)');
-
-        if (mapped.serie) {
-          const su = mapped.serie.toUpperCase();
-          if (seriesExist.has(su)) errors.push('SERIE DUPLICADA (ya existe)');
-          else if (seenInFile[su] !== undefined) errors.push('SERIE DUPLICADA en archivo');
-          else seenInFile[su] = i;
-        }
-
-        return { ...mapped, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
+      // Pre-mapear columnas
+      const firstRowKeys = Object.keys(rows[0]);
+      const colMap = {};
+      _REP_CM_COLUMNS.forEach(col => {
+        colMap[col.field] = firstRowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
       });
 
-      _repCmStep = 3;
-      _renderRepCargaMasiva();
+      _cargaMasivaRepData = [];
+      const BATCH = 500;
+      let idx = 0;
+
+      function processBatch() {
+        const end = Math.min(idx + BATCH, rows.length);
+        for (let i = idx; i < end; i++) {
+          const row = rows[i];
+          const mapped = {};
+          _REP_CM_COLUMNS.forEach(col => {
+            let val = row[colMap[col.field]];
+            if (val === undefined || val === null) val = '';
+            mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
+          });
+          if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
+          Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k) && k !== 'observaciones') mapped[k] = mapped[k].toUpperCase(); });
+
+          const errors = [];
+          const cat = (mapped.categoria || '').toUpperCase();
+          if (!cat || (cat !== 'COMPONENTE' && cat !== 'PARTE')) errors.push('CATEGORIA invalida');
+          if (!mapped.tipo) errors.push('TIPO requerido');
+          if (!mapped.marca) errors.push('MARCA requerida');
+          if (!mapped.modelo) errors.push('MODELO requerido');
+          if (cat === 'COMPONENTE' && !mapped.serie) errors.push('SERIE requerida (componente)');
+          if (cat === 'COMPONENTE' && !mapped.capacidad) errors.push('CAPACIDAD requerida (componente)');
+
+          if (mapped.serie) {
+            const su = mapped.serie.toUpperCase();
+            if (seriesExist.has(su)) errors.push('SERIE DUPLICADA (ya existe)');
+            else if (seenInFile[su] !== undefined) errors.push('SERIE DUPLICADA en archivo');
+            else seenInFile[su] = i;
+          }
+
+          _cargaMasivaRepData.push({ ...mapped, _row: i + 2, _errors: errors, _valid: errors.length === 0 });
+        }
+        idx = end;
+
+        if (isLarge) {
+          const pct = Math.round((idx / rows.length) * 100);
+          const fill = document.getElementById('cmRepProgressFill');
+          const txt = document.getElementById('cmRepProgressText');
+          if (fill) fill.style.width = pct + '%';
+          if (txt) txt.textContent = `Validando... ${idx.toLocaleString()} / ${rows.length.toLocaleString()}`;
+        }
+
+        if (idx < rows.length) {
+          setTimeout(processBatch, 0);
+        } else {
+          _repCmStep = 3;
+          _renderRepCargaMasiva();
+        }
+      }
+
+      if (isLarge) setTimeout(processBatch, 50);
+      else processBatch();
     } catch (err) { showToast('Error: ' + err.message, 'error'); }
   };
   reader.readAsArrayBuffer(file);
@@ -3124,14 +3640,11 @@ async function _ejecutarCargaMasivaRep() {
   const validos = _cargaMasivaRepData.filter(r => r._valid);
   if (validos.length === 0) return;
 
-  const repuestos = DB.get('repuestos');
-  validos.forEach(r => {
-    const newId = nextId(repuestos);
-    const codigo = 'REP-' + String(newId).padStart(5, '0');
+  // Construir registros nuevos (sin id — MySQL lo genera)
+  const nuevosRegistros = validos.map(r => {
     let serie = r.serie;
     if (!serie) serie = _generarSerieRepuesto(r.tipo || r.equipo || 'REP');
-    repuestos.push(upperFields({
-      id: newId, codigo,
+    return upperFields({
       categoria: r.categoria || 'PARTE',
       tipo: r.tipo,
       equipo: r.tipo,
@@ -3150,13 +3663,18 @@ async function _ejecutarCargaMasivaRep() {
       nDocumento: r.nDocumento || '',
       fechaIngreso: r.fechaIngreso || today(),
       observaciones: r.observaciones || ''
-    }));
+    });
   });
-  DB.set('repuestos', repuestos);
+
+  const result = await DB.bulkInsert('repuestos', nuevosRegistros);
+  if (!result.ok) {
+    showToast('Error al guardar: ' + (result.error || 'desconocido'), 'error');
+    return;
+  }
+
   _cargaMasivaRepData = [];
   _repCmStep = 1;
   addMovimiento('CARGA MASIVA REPUESTOS', validos.length + ' repuestos importados desde Excel');
-  await DB.flush();
   closeModal();
   showToast(validos.length + ' repuestos importados correctamente');
   renderRepuestos(document.getElementById('contentArea'));
@@ -3598,6 +4116,13 @@ function _saveRepEdit(id) {
   if (!tipo || !marca || !modelo) { showToast('Completa Tipo, Marca y Modelo', 'error'); return; }
   if (isComp && !serie) { showToast('Serie obligatoria para componentes', 'error'); return; }
   if (isComp && !capacidad) { showToast('Capacidad obligatoria para componentes', 'error'); return; }
+  // Evitar colisión de serie con otro repuesto existente (el alta ya lo valida).
+  if (serie) {
+    const serieUp = serie.toUpperCase();
+    if (repuestos.some(x => x.id !== id && (x.serie || '').toUpperCase() === serieUp)) {
+      showToast('Ya existe otro repuesto con esa serie', 'error'); return;
+    }
+  }
 
   Object.assign(repuestos[idx], upperFields({
     tipo, equipo: tipo, capacidad, marca, modelo, serie,
@@ -3628,6 +4153,9 @@ function _deleteRepuesto(id) {
 
 /* ── Confirmar Retorno Modal ── */
 let _retornoState = { estadoGrupo: '', subEstado: '' };
+// Enlace: cuando el retorno de stock se dispara desde una asignación de repuesto (REPLIEGUE),
+// guarda el id de esa asignación para cerrarla al confirmar el retorno del repuesto.
+let _pendingAsigRepId = null;
 
 function _openConfirmarRetorno(id) {
   _retornoState = { estadoGrupo: '', subEstado: '' };
@@ -3778,6 +4306,19 @@ function _confirmarRetorno(id) {
   repuestos[idx].almacen = almacen.toUpperCase();
   repuestos[idx].observaciones = (document.getElementById('fRetornoObs') || {}).value.trim();
   DB.set('repuestos', repuestos);
+
+  // Si el retorno proviene de una asignación de repuesto (REPLIEGUE), cerrarla también
+  // (evita que quede colgada en 'PEND. RETORNO' indefinidamente).
+  if (_pendingAsigRepId != null) {
+    const asigs = DB.get('asignacionesRep');
+    const aIdx = asigs.findIndex(x => x.id === _pendingAsigRepId);
+    if (aIdx >= 0 && asigs[aIdx].repuestoId === id) {
+      asigs[aIdx].estado = 'RETORNADA';
+      asigs[aIdx].fechaRetorno = today();
+      DB.set('asignacionesRep', asigs);
+    }
+    _pendingAsigRepId = null;
+  }
 
   const detalle = 'Retorno ' + r.codigo + ' (' + (r.tipo || r.equipo) + ' ' + (r.capacidad || '') + ' ' + r.marca + ') | Ticket: ' + ticket + ' | Almacen: ' + almacen + ' | Estado: ' + g + ' - ' + sub;
   addMovimiento('RETORNO REPUESTO', detalle);
@@ -4058,6 +4599,11 @@ function _saveAsigRep() {
   const repuestos = DB.get('repuestos');
   const rep = repuestos.find(r => r.id === repId);
   if (!rep) { showToast('Repuesto no encontrado', 'error'); return; }
+  // Revalidar disponibilidad al guardar (el modal pudo quedar abierto mientras cambiaba
+  // el estado en otra pestaña/acción) — evita doble-asignar un repuesto ya asignado.
+  if ((rep.estadoDisp || 'DISPONIBLE') !== 'DISPONIBLE') {
+    showToast('El repuesto ya no está disponible (estado: ' + (rep.estadoDisp || '') + ')', 'error'); return;
+  }
 
   const activos = DB.get('activos');
   const activo = activos.find(a => a.id === activoId);
@@ -4067,8 +4613,9 @@ function _saveAsigRep() {
   const newId = nextId(asigs);
 
   const repDesc = [rep.marca, rep.modelo, rep.capacidad].filter(Boolean).join(' ');
-  let estado = 'VIGENTE';
-  if (motivo === 'REPLIEGUE') estado = 'VIGENTE';
+  // REPLIEGUE deja la asignación pendiente de retorno (activa el flujo de confirmación);
+  // los demás motivos quedan VIGENTE.
+  const estado = (motivo === 'REPLIEGUE') ? 'PEND. RETORNO' : 'VIGENTE';
 
   asigs.push({
     id: newId,
@@ -4142,13 +4689,14 @@ function _confirmarRetornoAsigRep(id) {
   const a = asigs.find(x => x.id === id);
   if (!a || a.estado !== 'PEND. RETORNO') return;
 
-  // Open the repuesto's confirmar retorno modal
+  // Abrir el modal de retorno del repuesto; al confirmarlo, _confirmarRetorno cerrará
+  // también esta asignación (enlace vía _pendingAsigRepId).
   const rep = DB.get('repuestos').find(r => r.id === a.repuestoId);
   if (rep) {
+    _pendingAsigRepId = id;
     _openConfirmarRetorno(rep.id);
-    // After confirming retorno on the repuesto, also update asig status
-    const origConfirm = window._confirmarRetorno;
-    // We'll update asig status via a post-action
+  } else {
+    showToast('El repuesto asociado ya no existe', 'error');
   }
 }
 
@@ -4163,13 +4711,18 @@ function _revertirAsigRep(id) {
   asigs[idx].estado = 'REVERTIDA';
   DB.set('asignacionesRep', asigs);
 
-  // Return repuesto to disponible
+  // Devolver el repuesto a DISPONIBLE SOLO si sigue ligado a esta asignación
+  // (ASIGNADO/PENDIENTE_RETORNO). Si ya pasó a BAJA/MANTENIMIENTO por otra vía, NO se
+  // "resucita" a DISPONIBLE (evita descuadrar el inventario).
   const repuestos = DB.get('repuestos');
   const rIdx = repuestos.findIndex(r => r.id === a.repuestoId);
   if (rIdx >= 0) {
-    repuestos[rIdx].estadoDisp = 'DISPONIBLE';
-    repuestos[rIdx].activoAsignadoId = null;
-    DB.set('repuestos', repuestos);
+    const est = repuestos[rIdx].estadoDisp || 'DISPONIBLE';
+    if (est === 'ASIGNADO' || est === 'PENDIENTE_RETORNO') {
+      repuestos[rIdx].estadoDisp = 'DISPONIBLE';
+      repuestos[rIdx].activoAsignadoId = null;
+      DB.set('repuestos', repuestos);
+    }
   }
 
   addMovimiento('REVERSION REPUESTO', a.repuestoCodigo + ' revertido de ' + a.activoCodigo + ' | Ticket original: ' + a.ticket);
@@ -4577,8 +5130,23 @@ function verColaborador(id) {
       </div>
     </div>
   `, `
+    ${(() => {
+      const desc = _calcularDescuentoColab(id);
+      if (!desc.aplicaConfig) {
+        return `<span style="color:var(--text-muted);font-size:11px;margin-right:auto" title="Configure los tipos de descuento en Parámetros → Descuentos">ℹ️ Sin tipos de descuento configurados</span>`;
+      }
+      const _items = desc.detalle.length;
+      // Lista de tipos unicos (capitalizados) de los activos aplicables
+      const _tiposUnicos = [...new Set(desc.detalle.map(d => (d.tipo || '').trim()).filter(Boolean))];
+      const _tiposTxt = _tiposUnicos.map(t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase()).join(', ');
+      return `<div style="margin-right:auto;display:flex;flex-direction:column;gap:2px">
+        <span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Descuento Estimado</span>
+        <span style="font-size:16px;font-weight:800;color:${desc.total > 0 ? '#dc2626' : '#64748b'};font-family:'Outfit',sans-serif">${_formatoSoles(desc.total)}</span>
+        <span style="font-size:10px;color:var(--text-muted)">${_items} activo(s) aplicable(s)${_tiposTxt ? ': <strong style="color:var(--text)">' + esc(_tiposTxt) + '</strong>' : ''}</span>
+      </div>`;
+    })()}
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
-  `);
+  `, 'modal-lg');
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -4667,15 +5235,20 @@ function procesarExcelColab(file) {
         return;
       }
 
-      const perfilesValidos = ['EMPLEADO', 'PRACTICANTE', 'EXTERNO', 'INTERMEDIARIO'];
-      // DNIs existentes en BD
-      const _existingDNIs = new Set(DB.get('colaboradores').map(c => (c.dni || '').toUpperCase().trim()).filter(Boolean));
-      // DNIs de sitios móviles
-      const _sitiosDNIs = new Set(DB.get('sitiosMoviles').map(s => (s.dni || '').toUpperCase().trim()).filter(Boolean));
-      // DNIs en el propio Excel (para detectar duplicados internos)
-      const _excelDNIs = {};
+      const isLarge = rows.length > 0;
+      if (isLarge) {
+        const container = document.getElementById('cmpContainer');
+        if (container) container.innerHTML = `<div style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Procesando ${rows.length.toLocaleString()} filas...</h3><div id="cmpProgressBar" style="width:300px;height:6px;background:#e2e8f0;border-radius:3px;margin:16px auto"><div id="cmpProgressFill" style="width:0%;height:100%;background:#2563eb;border-radius:3px;transition:width 0.3s"></div></div><div id="cmpProgressText" style="font-size:12px;color:var(--text-light)">0%</div></div>`;
+      }
 
-      // Primera pasada: contar DNIs en el excel
+      const perfilesValidos = ['EMPLEADO', 'PRACTICANTE', 'EXTERNO', 'INTERMEDIARIO'];
+      const _existingDNIs = new Set(DB.get('colaboradores').map(c => (c.dni || '').toUpperCase().trim()).filter(Boolean));
+      const _sitiosDNIs = new Set(DB.get('sitiosMoviles').map(s => (s.dni || '').toUpperCase().trim()).filter(Boolean));
+      const _existingEmails = new Set(DB.get('colaboradores').map(c => (c.email || '').toUpperCase().trim()).filter(Boolean));
+      const _excelDNIs = {};
+      const _excelEmails = {};
+
+      // Primera pasada: contar DNIs y emails en el excel
       rows.forEach((row, i) => {
         const rowKeys = Object.keys(row);
         const dniCol = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === 'DNI') || 'DNI';
@@ -4684,57 +5257,103 @@ function procesarExcelColab(file) {
           if (!_excelDNIs[dniVal]) _excelDNIs[dniVal] = [];
           _excelDNIs[dniVal].push(i);
         }
+        const emailCol = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === 'EMAIL') || 'EMAIL';
+        const emailVal = String(row[emailCol] || '').trim().toUpperCase();
+        if (emailVal) {
+          if (!_excelEmails[emailVal]) _excelEmails[emailVal] = [];
+          _excelEmails[emailVal].push(i);
+        }
       });
 
-      _cargaMasivaColabData = rows.map((row, i) => {
-        const mapped = {};
-        const rowKeys = Object.keys(row);
-        _CMP_COLUMNS.forEach(col => {
-          const matchKey = rowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
-          let val = row[matchKey];
-          if (val === undefined || val === null) val = '';
-          mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
-        });
-        // Normalizar fechas
-        if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
-        // Convertir a mayúsculas
-        Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
-        // Compatibilidad: mapear campos viejos a nuevos
-        if (!mapped.modalidadContratacion && mapped.perfil) mapped.modalidadContratacion = mapped.perfil;
-        if (!mapped.apellido && mapped.nombre && mapped.nombre.includes(' ')) {
-          const parts = mapped.nombre.split(' ');
-          mapped.nombre = parts[0];
-          mapped.apellido = parts.slice(1).join(' ');
-        }
-        if (!mapped.ubicacionFisica && mapped.ubicacion) mapped.ubicacionFisica = mapped.ubicacion;
-        if (!mapped.puesto && mapped.tipoPuesto) mapped.puesto = mapped.tipoPuesto;
-        // Sync old/new fields
-        mapped.perfil = mapped.modalidadContratacion || mapped.perfil || '';
-        mapped.ubicacion = mapped.ubicacionFisica || mapped.ubicacion || '';
-        mapped.tipoPuesto = mapped.puesto || mapped.tipoPuesto || '';
-
-        // Validación detallada por campo
-        const fieldErrors = {};
-        if (!mapped.nombre) fieldErrors.nombre = 'Vacío';
-        if (!mapped.apellido) fieldErrors.apellido = 'Vacío';
-        if (!mapped.dni) fieldErrors.dni = 'Vacío';
-        else {
-          const dniUp = mapped.dni.toUpperCase().trim();
-          if (_existingDNIs.has(dniUp)) fieldErrors.dni = 'Ya existe en BD';
-          else if (_sitiosDNIs.has(dniUp)) fieldErrors.dni = 'Duplicado en Sitios Móviles';
-          else if (_excelDNIs[dniUp] && _excelDNIs[dniUp].length > 1) fieldErrors.dni = 'Duplicado en Excel';
-        }
-        if (!mapped.modalidadContratacion) fieldErrors.modalidadContratacion = 'Vacío';
-        else if (!perfilesValidos.includes(mapped.modalidadContratacion)) fieldErrors.modalidadContratacion = 'Valor inválido (use: ' + perfilesValidos.join(', ') + ')';
-        if (mapped.fechaIngreso && !/^\d{4}-\d{2}-\d{2}$/.test(mapped.fechaIngreso)) fieldErrors.fechaIngreso = 'Formato fecha inválido';
-
-        const errors = Object.keys(fieldErrors).map(k => k + ': ' + fieldErrors[k]);
-        return { ...mapped, _row: i + 2, _errors: errors, _fieldErrors: fieldErrors, _valid: errors.length === 0 };
+      // Pre-mapear columnas
+      const firstRowKeys = Object.keys(rows[0]);
+      const colMap = {};
+      _CMP_COLUMNS.forEach(col => {
+        colMap[col.field] = firstRowKeys.find(k => k.toUpperCase().replace(/\s+/g, '_') === col.excel.toUpperCase()) || col.excel;
       });
 
-      _cargaMasivaColabPage = 1;
-      _cmColabStep = 3;
-      _renderCmColabStep();
+      _cargaMasivaColabData = [];
+      const BATCH = 500;
+      let idx = 0;
+
+      function processBatch() {
+        const end = Math.min(idx + BATCH, rows.length);
+        for (let i = idx; i < end; i++) {
+          const row = rows[i];
+          const mapped = {};
+          _CMP_COLUMNS.forEach(col => {
+            let val = row[colMap[col.field]];
+            if (val === undefined || val === null) val = '';
+            mapped[col.field] = (val instanceof Date) ? normalizeDate(val) : String(val).trim();
+          });
+          if (mapped.fechaIngreso) mapped.fechaIngreso = normalizeDate(mapped.fechaIngreso);
+          Object.keys(mapped).forEach(k => { if (typeof mapped[k] === 'string' && !_SKIP_UPPER.includes(k)) mapped[k] = mapped[k].toUpperCase(); });
+          // Compatibilidad: mapear campos viejos a nuevos
+          if (!mapped.modalidadContratacion && mapped.perfil) mapped.modalidadContratacion = mapped.perfil;
+          if (!mapped.apellido && mapped.nombre && mapped.nombre.includes(' ')) {
+            const parts = mapped.nombre.split(' ');
+            mapped.nombre = parts[0];
+            mapped.apellido = parts.slice(1).join(' ');
+          }
+          if (!mapped.ubicacionFisica && mapped.ubicacion) mapped.ubicacionFisica = mapped.ubicacion;
+          if (!mapped.puesto && mapped.tipoPuesto) mapped.puesto = mapped.tipoPuesto;
+          mapped.perfil = mapped.modalidadContratacion || mapped.perfil || '';
+          mapped.ubicacion = mapped.ubicacionFisica || mapped.ubicacion || '';
+          mapped.tipoPuesto = mapped.puesto || mapped.tipoPuesto || '';
+
+          const fieldErrors = {};
+          if (!mapped.nombre) fieldErrors.nombre = 'Vacío';
+          if (!mapped.apellido) fieldErrors.apellido = 'Vacío';
+          if (!mapped.dni) fieldErrors.dni = 'Vacío';
+          else {
+            const dniUp = mapped.dni.toUpperCase().trim();
+            if (_existingDNIs.has(dniUp)) fieldErrors.dni = 'Ya existe en BD';
+            else if (_sitiosDNIs.has(dniUp)) fieldErrors.dni = 'Duplicado en Sitios Móviles';
+            else if (_excelDNIs[dniUp] && _excelDNIs[dniUp].length > 1) fieldErrors.dni = 'Duplicado en Excel';
+          }
+          if (!mapped.modalidadContratacion) fieldErrors.modalidadContratacion = 'Vacío';
+          else if (!perfilesValidos.includes(mapped.modalidadContratacion)) fieldErrors.modalidadContratacion = 'Valor inválido (use: ' + perfilesValidos.join(', ') + ')';
+          if (mapped.fechaIngreso && !/^\d{4}-\d{2}-\d{2}$/.test(mapped.fechaIngreso)) fieldErrors.fechaIngreso = 'Formato fecha inválido';
+          // Dedup por email (contra BD y dentro del archivo)
+          if (mapped.email) {
+            const emUp = mapped.email.toUpperCase().trim();
+            if (_existingEmails.has(emUp)) fieldErrors.email = 'Ya existe en BD';
+            else if (_excelEmails[emUp] && _excelEmails[emUp].length > 1) fieldErrors.email = 'Duplicado en Excel';
+          }
+          // Normalizar/validar estado: la app compara estrictamente c.estado === 'Activo'.
+          if (mapped.estado) {
+            const estUp = mapped.estado.toUpperCase().trim();
+            if (estUp === 'ACTIVO') mapped.estado = 'Activo';
+            else if (estUp === 'CESADO' || estUp === 'INACTIVO') mapped.estado = 'Cesado';
+            else fieldErrors.estado = 'Valor inválido (use: Activo, Cesado)';
+          } else {
+            mapped.estado = 'Activo';
+          }
+
+          const errors = Object.keys(fieldErrors).map(k => k + ': ' + fieldErrors[k]);
+          _cargaMasivaColabData.push({ ...mapped, _row: i + 2, _errors: errors, _fieldErrors: fieldErrors, _valid: errors.length === 0 });
+        }
+        idx = end;
+
+        if (isLarge) {
+          const pct = Math.round((idx / rows.length) * 100);
+          const fill = document.getElementById('cmpProgressFill');
+          const txt = document.getElementById('cmpProgressText');
+          if (fill) fill.style.width = pct + '%';
+          if (txt) txt.textContent = `Validando... ${idx.toLocaleString()} / ${rows.length.toLocaleString()}`;
+        }
+
+        if (idx < rows.length) {
+          setTimeout(processBatch, 0);
+        } else {
+          _cargaMasivaColabPage = 1;
+          _cmColabStep = 3;
+          _renderCmColabStep();
+        }
+      }
+
+      if (isLarge) setTimeout(processBatch, 50);
+      else processBatch();
     } catch (err) {
       showToast('Error al leer el archivo: ' + err.message, 'error');
     }
@@ -4874,7 +5493,7 @@ async function ejecutarCargaMasivaColab() {
 
   DB.set('colaboradores', colabs);
   addMovimiento('Carga Masiva Colaboradores', `Se importaron ${validos.length} colaboradores desde Excel`);
-  await DB.flush();
+  await DB.flush('colaboradores');
   closeModal();
   showToast(`${validos.length} colaboradores importados correctamente`);
   renderPadron(document.getElementById('contentArea'));
@@ -5014,9 +5633,9 @@ function _renderAsigTable() {
                     <td style="font-size:11px;font-family:monospace">${esc(g.ticket || '—')}</td>
                     <td>
                       <div class="action-btns">
-                        <button class="btn-icon" title="Ver detalle" onclick="verDetalleAsignacion('${esc(g.ticket)}',${g.colaboradorId},'${esc(g.fechaAsignacion)}')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">👁️</button>
+                        <button class="btn-icon" title="Ver detalle" onclick="verDetalleAsignacion('${escJs(g.ticket)}',${g.colaboradorId},'${escJs(g.fechaAsignacion)}')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">👁️</button>
                         <button class="btn-icon" title="Acta de Entrega" onclick="previewActaEntrega(${g.items[0].id})" style="background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0">📄</button>
-                        <button class="btn-icon" title="Eliminar" onclick="deleteAsignacionGrupo('${esc(g.ticket)}',${g.colaboradorId},'${esc(g.fechaAsignacion)}')" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca">🗑️</button>
+                        <button class="btn-icon" title="Eliminar" onclick="deleteAsignacionGrupo('${escJs(g.ticket)}',${g.colaboradorId},'${escJs(g.fechaAsignacion)}')" style="background:#fef2f2;color:#ef4444;border:1px solid #fecaca">🗑️</button>
                       </div>
                     </td>
                   </tr>
@@ -6181,7 +6800,7 @@ function _reemRefreshStock() {
   _renderReemplazoModal();
 }
 
-function _ejecutarReemplazo() {
+async function _ejecutarReemplazo() {
   const ticket = (document.getElementById('reemTicket') || {}).value.trim();
   const fechaInput = (document.getElementById('reemFecha') || {}).value;
   const motivo = (document.getElementById('reemMotivo') || {}).value;
@@ -6198,10 +6817,14 @@ function _ejecutarReemplazo() {
   const asig = DB.get('asignaciones');
   const colab = _reemColab;
 
+  const _activosMods = [];
+  const _asigMods = [];
+
   // 1. Devolver equipo viejo
   const oldRec = asig.find(x => x.id === _reemOldAsig.id);
   if (oldRec) {
     oldRec.estado = 'Devuelto';
+    _asigMods.push(oldRec);
     const oldActivo = activos.find(x => x.id === oldRec.activoId);
     if (oldActivo) {
       const otrasVigentes = asig.filter(o => o.activoId === oldRec.activoId && o.estado === 'Vigente' && o.id !== oldRec.id).length;
@@ -6209,47 +6832,67 @@ function _ejecutarReemplazo() {
         oldActivo.estado = 'Disponible';
         oldActivo.estadoEquipo = 'USADO';
         oldActivo.responsable = '';
+        _activosMods.push(oldActivo);
       }
     }
   }
 
-  // 2. Asignar equipo nuevo
+  // 2. Asignar equipo nuevo (sin id — la BD lo genera)
   const newActivo = activos.find(a => a.id === _reemNewItem.activoId);
-  if (newActivo) {
-    asig.push(upperFields({
-      id: nextId(asig),
-      activoId: newActivo.id,
-      activoCodigo: newActivo.codigo,
-      activoTipo: newActivo.tipo,
-      activoMarca: newActivo.marca,
-      activoModelo: newActivo.modelo,
-      serieAsignada: _reemNewItem.serie || '',
-      colaboradorId: colab.id,
-      colaboradorNombre: _fullName(colab),
-      correoColab: colab.email || '',
-      area: colab.area,
-      fechaAsignacion: fecha,
-      tipoAsignacion: 'Reemplazo',
-      motivo: 'REEMPLAZO - ' + motivo,
-      ticket: ticket.toUpperCase(),
-      estado: 'Vigente',
-      observaciones: obs
-    }));
+  const nuevaAsigRec = newActivo ? upperFields({
+    id: nextId(asig),
+    activoId: newActivo.id,
+    activoCodigo: newActivo.codigo,
+    activoTipo: newActivo.tipo,
+    activoMarca: newActivo.marca,
+    activoModelo: newActivo.modelo,
+    serieAsignada: _reemNewItem.serie || '',
+    colaboradorId: colab.id,
+    colaboradorNombre: _fullName(colab),
+    correoColab: colab.email || '',
+    area: colab.area,
+    fechaAsignacion: fecha,
+    tipoAsignacion: 'Reemplazo',
+    motivo: 'REEMPLAZO - ' + motivo,
+    ticket: ticket.toUpperCase(),
+    estado: 'Vigente',
+    observaciones: obs
+  }) : null;
 
-    // Actualizar estado del nuevo activo
+  if (nuevaAsigRec && newActivo) {
+    asig.push(nuevaAsigRec); // cache local
     const totalSeries = (newActivo.series || []).length;
     const seriesAsig = asig.filter(a => a.activoId === newActivo.id && a.estado === 'Vigente').length;
     if (totalSeries === 0 || seriesAsig >= totalSeries) {
       newActivo.estado = 'Asignado';
     }
     newActivo.responsable = _fullName(colab);
+    _activosMods.push(newActivo);
   }
 
-  DB.set('activos', activos);
-  DB.set('asignaciones', asig);
+  showProcessingOverlay('Procesando reemplazo...');
+  let _persistError = null;
+  try {
+    // 1. Insertar nueva asignación
+    if (nuevaAsigRec) {
+      const _toInsert = {...nuevaAsigRec};
+      delete _toInsert.id;
+      const result = await DB.bulkInsert('asignaciones', [_toInsert], { skipCache: true });
+      if (!result.ok) _persistError = 'No se pudo guardar la nueva asignación: ' + (result.error || '');
+      else if (result.ids && result.ids[0]) nuevaAsigRec.id = result.ids[0];
+    }
+    // 2. Marcar asignación vieja como devuelta
+    _asigMods.forEach(r => DB.updateOne('asignaciones', r));
+    // 3. Actualizar activos modificados (estado, responsable)
+    _activosMods.forEach(a => DB.updateOne('activos', a));
+  } catch (err) {
+    console.error('[_ejecutarReemplazo] Error:', err);
+    _persistError = err.message;
+  }
+
   addMovimiento('Reemplazo', `${_reemOldAsig.serieAsignada || '—'} → ${_reemNewItem.serie || '—'} para ${_fullName(colab)} [${ticket}] — ${motivo}`);
 
-  // Auto-registrar en bitácora: INGRESO del equipo viejo devuelto
+  // Bitácora: INGRESO del equipo viejo
   const _oldAct = activos.find(a => a.id === (_reemOldAsig ? _reemOldAsig.activoId : 0));
   if (_oldAct) {
     _autoBitacora({
@@ -6265,7 +6908,7 @@ function _ejecutarReemplazo() {
       motivo: motivo || 'REEMPLAZO'
     });
   }
-  // SALIDA del equipo nuevo asignado
+  // Bitácora: SALIDA del equipo nuevo
   const _newAct = activos.find(a => a.id === (_reemNewItem ? _reemNewItem.activoId : 0));
   if (_newAct) {
     _autoBitacora({
@@ -6282,6 +6925,11 @@ function _ejecutarReemplazo() {
     });
   }
 
+  hideProcessingOverlay();
+  if (_persistError) {
+    showToast('⚠ NO SE GUARDÓ: ' + _persistError, 'error');
+    return;
+  }
   closeModal();
   showToast('Reemplazo realizado correctamente');
   _reemColab = null; _reemOldAsig = null; _reemNewItem = null;
@@ -6578,6 +7226,25 @@ async function saveAsignacion() {
     }
   }
 
+  // ── Revalidar disponibilidad al guardar ──
+  // Rechaza cualquier equipo/serie que ya esté asignado y vigente (el modal pudo quedar
+  // abierto o haber concurrencia): evita asignar la misma serie a dos destinos.
+  const _vigenteSet = new Set(
+    asig.filter(a => a.estado === 'Vigente')
+        .map(a => a.activoId + '||' + (a.serieAsignada || '').toUpperCase().trim())
+  );
+  const _selParaCheck = _asigSelectedActivos.concat(isIngresoNuevo ? _asigSelectedAccesorios : []);
+  const _dupSel = _selParaCheck.find(sel => _vigenteSet.has(sel.activoId + '||' + (sel.serie || '').toUpperCase().trim()));
+  if (_dupSel) {
+    showToast('El equipo/serie seleccionado ya está asignado y vigente. Actualice la lista de stock.', 'error');
+    return;
+  }
+
+  // Arrays para batch operations al final (persistencia eficiente)
+  const _nuevasAsigBatch = [];   // sin id — MySQL los asignara
+  const _asigUpdated = [];        // asignaciones existentes modificadas
+  const _activosUpdated = [];     // activos existentes modificados
+
   // ── REEMPLAZO / RENOVACIÓN: marcar equipo viejo como pendiente de retorno ──
   if (isReemplazo && _asigReemOld) {
     const oldRec = asig.find(a => a.id === _asigReemOld.id);
@@ -6586,6 +7253,7 @@ async function saveAsignacion() {
       oldRec.fechaReemplazo = fecha;
       oldRec.motivoReemplazo = isReposicionRobo ? 'REPOSICIÓN ROBO' : isReposicionDano ? 'REPOSICIÓN DAÑO FÍSICO' : isRenovacion ? 'RENOVACIÓN' : 'REEMPLAZO';
       oldRec.ticketReemplazo = ticket.toUpperCase();
+      _asigUpdated.push(oldRec);
     }
   }
 
@@ -6594,7 +7262,7 @@ async function saveAsignacion() {
     const activo = activos.find(a => a.id === sel.activoId);
     if (!activo) return;
 
-    asig.push(upperFields({
+    const nuevaAsig = upperFields({
       id: nextId(asig),
       activoId: activo.id,
       activoCodigo: activo.codigo,
@@ -6616,7 +7284,9 @@ async function saveAsignacion() {
       observaciones: obs,
       estado: 'Vigente',
       fechaFinPrestamo: isPrestamo ? fechaFinPrestamo : ''
-    }));
+    });
+    asig.push(nuevaAsig);          // agregar al cache local (id temporal)
+    _nuevasAsigBatch.push(nuevaAsig); // para batch insert al final (BD asigna id real)
   });
 
   // Actualizar estado de cada activo nuevo: solo 'Asignado' si TODAS sus series están asignadas
@@ -6630,6 +7300,7 @@ async function saveAsignacion() {
       activo.estado = 'Asignado';
     }
     activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
+    _activosUpdated.push(activo);
   });
 
   // ── INGRESO NUEVO: Validar máximo 1 accesorio por tipo ──
@@ -6653,7 +7324,7 @@ async function saveAsignacion() {
       const activo = activos.find(a => a.id === sel.activoId);
       if (!activo) return;
 
-      asig.push(upperFields({
+      const nuevaAccAsig = upperFields({
         id: nextId(asig),
         activoId: activo.id,
         activoCodigo: activo.codigo,
@@ -6675,7 +7346,9 @@ async function saveAsignacion() {
         observaciones: obs,
         estado: 'Vigente',
         fechaFinPrestamo: ''
-      }));
+      });
+      asig.push(nuevaAccAsig);
+      _nuevasAsigBatch.push(nuevaAccAsig);
     });
 
     // Actualizar estado de activos accesorios
@@ -6689,11 +7362,9 @@ async function saveAsignacion() {
         activo.estado = 'Asignado';
       }
       activo.responsable = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
+      _activosUpdated.push(activo);
     });
   }
-
-  DB.set('activos', activos);
-  DB.set('asignaciones', asig);
 
   const _totalEquipos = _asigSelectedActivos.length + (isIngresoNuevo ? _asigSelectedAccesorios.length : 0);
   const _destNombre = colab ? _fullName(colab) : (sitio ? _buildSitioNombre(sitio) : '');
@@ -6745,7 +7416,44 @@ async function saveAsignacion() {
     });
   }
 
-  await DB.flush();
+  const _procMsg = isReposicionRobo ? 'Registrando reposición por robo...' : isReposicionDano ? 'Procesando reposición por daño físico...' : isReemplazo ? (isRenovacion ? 'Procesando renovación...' : 'Procesando reemplazo...') : isPrestamo ? 'Registrando préstamo...' : isIngresoNuevo ? 'Asignando kit inicial...' : 'Asignando activos...';
+  showProcessingOverlay(_procMsg);
+  let _persistError = null;
+  let _insertedIds = [];
+  try {
+    // 1. Insertar nuevas asignaciones en BD (1 sola request batch)
+    if (_nuevasAsigBatch.length > 0) {
+      const _toInsert = _nuevasAsigBatch.map(r => { const c = {...r}; delete c.id; return c; });
+      console.log('[saveAsignacion] bulkInsert', _toInsert.length, 'nuevas asignaciones');
+      const result = await DB.bulkInsert('asignaciones', _toInsert, { skipCache: true });
+      console.log('[saveAsignacion] bulkInsert resultado:', result);
+      if (!result.ok) {
+        _persistError = 'bulkInsert: ' + (result.error || 'fallo desconocido');
+      } else {
+        _insertedIds = result.ids || [];
+        // Sincronizar IDs reales en el cache local (los temporales se reemplazan)
+        _nuevasAsigBatch.forEach((r, i) => {
+          if (_insertedIds[i]) {
+            const idx = asig.findIndex(x => x === r);
+            if (idx >= 0) asig[idx].id = _insertedIds[i];
+          }
+        });
+      }
+    }
+    // 2. Actualizar asignaciones modificadas (ej: reemplazo marca el viejo)
+    _asigUpdated.forEach(r => DB.updateOne('asignaciones', r));
+    // 3. Actualizar activos modificados (estado, responsable)
+    _activosUpdated.forEach(a => DB.updateOne('activos', a));
+  } catch (err) {
+    console.error('[saveAsignacion] Error al persistir:', err);
+    _persistError = err.message;
+  }
+  hideProcessingOverlay();
+  if (_persistError) {
+    // No cerrar el modal — mostrar error para que el usuario pueda reintentar
+    showToast('⚠ NO SE GUARDÓ EN BD: ' + _persistError, 'error');
+    return;
+  }
   closeModal();
   showToast(isIngresoNuevo ? `Kit inicial (${_totalEquipos} activo(s)) asignado correctamente` : isReposicionRobo ? 'Reposición por robo registrada correctamente' : isReposicionDano ? 'Reposición por daño físico realizada correctamente' : isReemplazo ? (isRenovacion ? 'Renovación realizada correctamente' : 'Reemplazo realizado correctamente') : isPrestamo ? 'Préstamo registrado correctamente' : `${_asigSelectedActivos.length} activo(s) asignados correctamente`);
   _asigSelectedColab = null;
@@ -6794,8 +7502,8 @@ function _renderCmAsigStep() {
 
   if (_cmAsigStep === 1) {
     w.innerHTML = `
-      <div style="display:grid;grid-template-columns:220px 1fr;gap:24px;min-height:300px">
-        <div style="display:flex;flex-direction:column;gap:0">
+      <div class="rep-cm-layout">
+        <div class="rep-cm-steps">
           <div class="rep-cm-step active"><span class="rep-cm-step-num">1</span><span class="rep-cm-step-label">Descargar plantilla</span></div>
           <div class="rep-cm-step"><span class="rep-cm-step-num">2</span><span class="rep-cm-step-label">Subir archivo</span></div>
           <div class="rep-cm-step"><span class="rep-cm-step-num">3</span><span class="rep-cm-step-label">Revisar preview</span></div>
@@ -6814,8 +7522,8 @@ function _renderCmAsigStep() {
     `;
   } else if (_cmAsigStep === 2) {
     w.innerHTML = `
-      <div style="display:grid;grid-template-columns:220px 1fr;gap:24px;min-height:300px">
-        <div style="display:flex;flex-direction:column;gap:0">
+      <div class="rep-cm-layout">
+        <div class="rep-cm-steps">
           <div class="rep-cm-step done"><span class="rep-cm-step-num">&#10003;</span><span class="rep-cm-step-label">Descargar plantilla</span></div>
           <div class="rep-cm-step active"><span class="rep-cm-step-num">2</span><span class="rep-cm-step-label">Subir archivo</span></div>
           <div class="rep-cm-step"><span class="rep-cm-step-num">3</span><span class="rep-cm-step-label">Revisar preview</span></div>
@@ -6877,7 +7585,7 @@ function _procesarExcelAsig(file) {
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (rows.length === 0) { showToast('Archivo vacio', 'error'); return; }
 
-      const isLarge = rows.length > 200;
+      const isLarge = rows.length > 0;
 
       // Mostrar progreso
       if (isLarge) {
@@ -6926,6 +7634,7 @@ function _procesarExcelAsig(file) {
       });
 
       _cmAsigData = [];
+      const _seriesEnArchivoAsig = new Set(); // detectar series repetidas dentro del archivo
       const BATCH = 300;
       let idx = 0;
 
@@ -6960,6 +7669,11 @@ function _procesarExcelAsig(file) {
           let activo = serie ? _serieToActivo[serie] || null : null;
           if (serie && !activo) errors.push('Serie no encontrada: ' + serie);
           else if (serie && _seriesVigentes.has(serie)) errors.push('Serie ya asignada (vigente)');
+          // Detectar la misma serie repetida dentro del propio archivo (evita doble asignación).
+          if (serie) {
+            if (_seriesEnArchivoAsig.has(serie)) errors.push('Serie duplicada en el archivo');
+            else _seriesEnArchivoAsig.add(serie);
+          }
 
           // Validar destino O(1)
           let colab = null, sitio = null;
@@ -7233,7 +7947,8 @@ async function _ejecutarCargaMasivaAsig() {
   DB.set('activos', activos);
   DB.set('asignaciones', asig);
   addMovimiento('Carga Masiva Asignaciones', validos.length + ' asignaciones importadas desde Excel');
-  await DB.flush();
+  await DB.flush('activos');
+  await DB.flush('asignaciones');
 
   _cmAsigData = [];
   _cmAsigStep = 1;
@@ -7337,99 +8052,190 @@ function previewActaEntrega(asigId) {
 
 // Genera el HTML completo para imprimir/descargar como PDF
 function _buildActaPrintHTML(record, colab, grupo, activos, activoPrincipal, equipRows, devSection, isReposicion, fechaEntrega) {
-  // devSection para impresion (con estilos de borde negro)
-  let devPrint = '';
+  // Construir filas de equipos a devolver (recojo) — 7 filas, llenando con espacios
+  let devRows = '';
+  let _devueltos = [];
   if (isReposicion) {
     const _allAsig = DB.get('asignaciones');
-    const _devueltos = _allAsig.filter(a =>
+    _devueltos = _allAsig.filter(a =>
       a.colaboradorId === record.colaboradorId &&
       (a.ticketReemplazo === record.ticket || a.ticketCese === record.ticket) &&
       (a.pendienteRetorno || (a.estado === 'Devuelto' && (a.motivoCese === 'REEMPLAZO' || a.motivoCese === 'RENOVACIÓN' || a.motivoCese === 'REPOSICIÓN DAÑO FÍSICO' || a.motivoCese === 'REPOSICIÓN ROBO')))
     );
-    if (_devueltos.length > 0) {
-      let devRows = '';
-      for (let i = 0; i < 4; i++) {
-        const d = _devueltos[i];
-        if (d) {
-          const dInv = d.serieAsignada ? (activos.find(a => a.id === d.activoId)?.series?.find(s => s.serie === d.serieAsignada)?.codInv || '') : '';
-          devRows += '<tr><td style="text-align:center">' + (i+1) + '</td><td>' + esc(d.activoTipo || '') + '</td><td>' + esc(d.activoMarca || '') + '</td><td>' + esc(d.activoModelo || '') + '</td><td>' + esc(d.serieAsignada || 'N/A') + '</td><td>' + esc(dInv || 'N/A') + '</td></tr>';
-        } else {
-          devRows += '<tr><td style="text-align:center">' + (i+1) + '</td><td></td><td></td><td></td><td></td><td></td></tr>';
-        }
-      }
-      devPrint = '<div class="section-title" style="border-top:none">DATOS DEL EQUIPO A DEVOLVER (EQUIPO ANTERIOR)</div>' +
-        '<table class="equip"><thead><tr><th>ITEM</th><th>EQUIPO</th><th>MARCA</th><th>MODELO</th><th>SERIE</th><th>INVENTARIO</th></tr></thead><tbody>' + devRows + '</tbody></table>';
+  }
+  for (let i = 0; i < 7; i++) {
+    const d = _devueltos[i];
+    if (d) {
+      const _actD = activos.find(a => a.id === d.activoId) || {};
+      const dInv = d.serieAsignada ? ((_actD.series || []).find(s => s.serie === d.serieAsignada)?.codInv || '') : '';
+      devRows += `<tr><td class="ti">${i+1}</td><td>${esc(d.activoTipo || _actD.tipo || '')}</td><td>${esc(d.activoMarca || _actD.marca || '')}</td><td>${esc(d.activoModelo || _actD.modelo || '')}</td><td>${esc(d.serieAsignada || '')}</td><td>${esc(dInv || '')}</td></tr>`;
+    } else {
+      devRows += `<tr><td class="ti">${i+1}</td><td></td><td></td><td></td><td></td><td></td></tr>`;
     }
   }
+
+  // Rebuilt equipRows con 7 filas (igual al formato del PDF)
+  let equipRows7 = '';
+  for (let i = 0; i < 7; i++) {
+    const g = grupo[i];
+    if (g) {
+      const _actG = activos.find(a => a.id === g.activoId) || {};
+      const _ci = g.serieAsignada ? ((_actG.series || []).find(s => s.serie === g.serieAsignada)?.codInv || '') : '';
+      const _tipo = g.activoTipo || _actG.tipo || '';
+      const _equipo = _actG.equipo || _tipo;
+      equipRows7 += `<tr><td class="ti">${i+1}</td><td>${esc(_equipo)}</td><td>${esc(g.activoMarca || _actG.marca || '')}</td><td>${esc(g.activoModelo || _actG.modelo || '')}</td><td>${esc(g.serieAsignada || '')}</td><td>${esc(_ci || '')}</td></tr>`;
+    } else {
+      equipRows7 += `<tr><td class="ti">${i+1}</td><td></td><td></td><td></td><td></td><td></td></tr>`;
+    }
+  }
+
+  const categoria = (record.tipoAsignacion || record.motivo || 'ASIGNACION').toUpperCase().replace('REEMPLAZO', 'REEMPLAZO');
+  const jefe = record.jefe || colab.correoSupervisor || '';
 
   return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Acta - ${esc(record.ticket)}</title>
 <style>
-  @media print { body { margin: 0; } @page { size: A4; margin: 15mm; } }
+  @media print { body { margin: 0; } @page { size: A4; margin: 10mm; } }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #000; padding: 20px; background: #fff; }
-  .acta { max-width: 780px; margin: 0 auto; }
-  .header-row { display: flex; align-items: center; border: 1.5px solid #000; }
-  .header-logo { width: 140px; padding: 8px 12px; display: flex; align-items: center; }
-  .header-logo svg { width: 100px; }
-  .header-title { flex: 1; text-align: center; font-size: 15px; font-weight: bold; padding: 10px; letter-spacing: 1px; }
-  .header-code { width: 140px; text-align: center; font-weight: bold; font-size: 12px; padding: 8px; border-left: 1.5px solid #000; }
-  table.form-tbl { width: 100%; border-collapse: collapse; }
-  table.form-tbl td { border: 1px solid #000; padding: 4px 8px; font-size: 11px; }
-  table.form-tbl .lbl { background: #f0f0f0; font-weight: bold; width: 130px; font-size: 10px; }
-  table.equip { width: 100%; border-collapse: collapse; margin-top: -1px; }
-  table.equip th { background: #f0f0f0; font-weight: bold; font-size: 10px; border: 1px solid #000; padding: 5px 6px; text-align: center; }
-  table.equip td { border: 1px solid #000; padding: 4px 6px; font-size: 11px; text-align: center; }
-  .section-title { background: #e8e8e8; font-weight: bold; font-size: 11px; padding: 5px 8px; border: 1px solid #000; border-top: none; }
-  .specs-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; border: 1px solid #000; border-top: none; }
-  .specs-grid .spec-item { padding: 5px 8px; border-right: 1px solid #000; font-size: 10px; }
-  .specs-grid .spec-item:last-child { border-right: none; }
-  .specs-grid .spec-lbl { font-weight: bold; }
-  .obs-box { border: 1px solid #000; border-top: none; padding: 6px 8px; min-height: 40px; }
-  .terms { border: 1px solid #000; border-top: none; padding: 10px 12px; font-size: 9.5px; line-height: 1.5; }
-  .terms-title { font-weight: bold; text-align: center; margin-bottom: 6px; font-size: 10px; }
-  .terms-accept { font-weight: bold; font-style: italic; font-size: 10px; margin-top: 8px; }
-  .signature-row { display: flex; border: 1px solid #000; border-top: none; }
-  .signature-col { flex: 1; padding: 12px 16px; text-align: center; min-height: 80px; display: flex; flex-direction: column; justify-content: flex-end; }
-  .signature-col + .signature-col { border-left: 1px solid #000; }
-  .sig-line { border-top: 1px solid #000; padding-top: 4px; font-weight: bold; font-size: 10px; margin-top: auto; }
-  .sig-name { font-size: 10px; color: #333; margin-top: 2px; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5px; color: #000; padding: 12px; background: #fff; }
+  .acta { max-width: 800px; margin: 0 auto; border: 2px solid #1e3a5f; padding: 14px; }
+  .header { display: flex; align-items: center; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid #cbd5e1; margin-bottom: 10px; }
+  .header-logo { width: 140px; }
+  .header-logo svg { width: 130px; height: auto; }
+  .header-title { flex: 1; text-align: center; font-size: 14px; font-weight: bold; color: #1e3a5f; letter-spacing: 0.5px; }
+  .header-code { background: #f1f5f9; border: 1px solid #cbd5e1; padding: 5px 12px; font-size: 10px; font-weight: bold; color: #334155; border-radius: 3px; }
+  .cat-row { display: flex; justify-content: center; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .cat-row .cat-lbl { font-weight: bold; font-size: 11px; }
+  .cat-row .cat-val { border: 1.5px solid #1e3a5f; padding: 4px 16px; font-weight: bold; font-size: 11px; background: #eff6ff; color: #1e3a5f; min-width: 140px; text-align: center; }
+  table.form-tbl { width: 100%; border-collapse: collapse; margin-bottom: 0; }
+  table.form-tbl td { border: 1px solid #1e3a5f; padding: 4px 8px; font-size: 10.5px; vertical-align: middle; }
+  table.form-tbl .lbl { background: #dbeafe; font-weight: bold; width: 110px; font-size: 9.5px; color: #1e3a5f; }
+  .section-title { background: #1e3a5f; color: #fff; font-weight: bold; font-size: 11px; padding: 5px 10px; margin-top: 10px; }
+  .section-title.entrega { background: #16a34a; }
+  .section-title.recojo { background: #dc2626; }
+  table.equip { width: 100%; border-collapse: collapse; }
+  table.equip th { background: #f1f5f9; font-weight: bold; font-size: 9.5px; border: 1px solid #1e3a5f; padding: 4px 5px; text-align: center; color: #1e3a5f; }
+  table.equip td { border: 1px solid #1e3a5f; padding: 3px 5px; font-size: 10px; text-align: left; height: 18px; }
+  table.equip td.ti { text-align: center; font-weight: bold; width: 32px; background: #f8fafc; }
+  .obs-box { border: 1px solid #1e3a5f; padding: 5px 8px; margin-top: -1px; min-height: 28px; font-size: 10px; }
+  .obs-box b { color: #1e3a5f; font-size: 9.5px; }
+  .specs-row { display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid #1e3a5f; border-top: none; }
+  .specs-row .spec-item { padding: 4px 8px; font-size: 10px; border-right: 1px solid #1e3a5f; }
+  .specs-row .spec-item:last-child { border-right: none; }
+  .specs-row .spec-lbl { font-weight: bold; color: #1e3a5f; font-size: 9.5px; }
+  .estado-row { display: flex; align-items: center; gap: 12px; border: 1px solid #1e3a5f; padding: 6px 10px; margin-top: -1px; font-size: 10px; }
+  .estado-row .lbl { font-weight: bold; color: #1e3a5f; }
+  .estado-opt { display: flex; align-items: center; gap: 6px; }
+  .estado-opt .chk { width: 14px; height: 14px; border: 1.5px solid #1e3a5f; display: inline-block; text-align: center; line-height: 12px; font-weight: bold; font-size: 11px; color: #16a34a; }
+  .terms { border: 1px solid #1e3a5f; padding: 8px 10px; font-size: 8.5px; line-height: 1.45; margin-top: 10px; background: #f8fafc; }
+  .terms-title { font-weight: bold; text-align: center; margin-bottom: 5px; font-size: 9.5px; color: #1e3a5f; text-transform: uppercase; }
+  .terms p { margin-bottom: 3px; }
+  .signature-row { display: flex; border: 1px solid #1e3a5f; border-top: none; }
+  .signature-col { flex: 1; padding: 12px 14px 8px; text-align: center; min-height: 64px; display: flex; flex-direction: column; justify-content: flex-end; }
+  .signature-col + .signature-col { border-left: 1px solid #1e3a5f; }
+  .sig-line { border-top: 1px solid #1e3a5f; padding-top: 3px; font-weight: bold; font-size: 9.5px; margin-top: auto; }
+  .sig-name { font-size: 9.5px; color: #334155; margin-top: 2px; font-weight: bold; }
 </style></head><body>
 <div class="acta">
-  <div class="header-row">
-    <div class="header-logo"><svg viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg"><circle cx="22" cy="30" r="18" fill="#FF6600"/><text x="22" y="36" text-anchor="middle" font-size="18" fill="#fff" font-weight="bold" font-family="Arial">e</text><text x="68" y="40" font-size="28" fill="#1a237e" font-weight="bold" font-family="Arial">entel</text></svg></div>
-    <div class="header-title">ACTA DE ASIGNACION DE EQUIPOS - ${esc((record.tipoAsignacion || record.motivo || 'ASIGNACION').toUpperCase())}</div>
-    <div class="header-code">FORM-26A</div>
+  <div class="header">
+    <div class="header-logo">
+      <svg viewBox="0 0 200 60" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="22" cy="30" r="16" fill="#FF6B00"/>
+        <text x="22" y="35" text-anchor="middle" font-size="16" fill="#fff" font-weight="bold" font-family="Arial">e</text>
+        <text x="48" y="38" font-size="24" fill="#1e3a5f" font-weight="bold" font-family="Arial">entel</text>
+      </svg>
+    </div>
+    <div class="header-title">ACTA DE ENTREGA DE EQUIPOS</div>
+    <div class="header-code">${esc(record.actaEntrega || record.ticket || '')}</div>
   </div>
+
+  <div class="cat-row">
+    <span class="cat-lbl">CATEGORÍA:</span>
+    <div class="cat-val">${esc(categoria)}</div>
+  </div>
+
   <table class="form-tbl">
-    <tr><td class="lbl">USUARIO:</td><td colspan="3">${esc(_fullName(colab) || record.colaboradorNombre)}</td><td class="lbl" style="width:100px">TICKET:</td><td style="width:160px;font-family:monospace">${esc(record.ticket || '')}</td></tr>
-    <tr><td class="lbl">EMAIL:</td><td colspan="3">${esc(colab.email || record.correoColab || '')}</td><td class="lbl">FECHA ENTREGA:</td><td>${fechaEntrega}</td></tr>
-    <tr><td class="lbl">CARGO:</td><td>${esc(colab.puesto || colab.tipoPuesto || '')}</td><td class="lbl" style="width:60px">AREA:</td><td colspan="3">${esc(colab.area || record.area || '')}</td></tr>
-    <tr><td class="lbl">LOCAL:</td><td colspan="5">${esc(colab.ubicacionFisica || colab.ubicacion || '')}</td></tr>
-    <tr><td class="lbl">JEFE/ RESPONSABLE:</td><td colspan="3"></td><td class="lbl">ING. DE SOP:</td><td></td></tr>
+    <tr>
+      <td class="lbl">USUARIO:</td>
+      <td colspan="3">${esc(_fullName(colab) || record.colaboradorNombre || '')}</td>
+      <td class="lbl">TICKET:</td>
+      <td style="font-family:monospace;width:160px">${esc(record.ticket || '')}</td>
+    </tr>
+    <tr>
+      <td class="lbl">EMAIL:</td>
+      <td colspan="3">${esc(colab.email || record.correoColab || '')}</td>
+      <td class="lbl">ÁREA:</td>
+      <td>${esc(colab.area || record.area || '')}</td>
+    </tr>
+    <tr>
+      <td class="lbl">CARGO:</td>
+      <td colspan="3">${esc(colab.puesto || colab.tipoPuesto || '')}</td>
+      <td class="lbl">FECHA INICIO:</td>
+      <td>${fechaEntrega}</td>
+    </tr>
+    <tr>
+      <td class="lbl">LOCAL:</td>
+      <td colspan="5">${esc(colab.ubicacionFisica || colab.ubicacion || '')}</td>
+    </tr>
+    <tr>
+      <td class="lbl">JEFE / RESPONSABLE:</td>
+      <td colspan="5">${esc(jefe)}</td>
+    </tr>
   </table>
-  <div class="section-title">${isReposicion ? 'DATOS DEL EQUIPO ENTREGADO (EQUIPO NUEVO)' : 'DATOS DEL EQUIPO'}</div>
-  <table class="equip"><thead><tr><th>ITEM</th><th>EQUIPO</th><th>MARCA</th><th>MODELO</th><th>SERIE</th><th>INVENTARIO</th></tr></thead><tbody>${equipRows}</tbody></table>
-  ${devPrint}
-  <div class="section-title" style="border-top:none">ESPECIFICACIONES TECNICAS:</div>
-  <div class="specs-grid">
-    <div class="spec-item"><span class="spec-lbl">HOSTNAME:</span> ${esc(activoPrincipal.hostname || '')}</div>
-    <div class="spec-item"><span class="spec-lbl">PROCESADOR:</span> ${esc(activoPrincipal.procesador || '')}</div>
-    <div class="spec-item"><span class="spec-lbl">DISCO DURO:</span> ${esc(activoPrincipal.discoDuro || '')}</div>
-    <div class="spec-item"><span class="spec-lbl">RAM:</span> ${esc(activoPrincipal.ram || '')}</div>
+
+  <div class="section-title entrega">DATOS DEL EQUIPO — ENTREGA AL USUARIO</div>
+  <table class="equip">
+    <thead><tr><th style="width:32px">ITEM</th><th>EQUIPO</th><th>MARCA</th><th>MODELO</th><th>SERIE</th><th>INVENTARIO</th></tr></thead>
+    <tbody>${equipRows7}</tbody>
+  </table>
+  ${(() => {
+    // Especificaciones tecnicas: PROCESADOR, RAM, DISCO (del activo principal o serie)
+    const _serieG = (activoPrincipal.series || []).find(s => s.serie === (grupo[0] || {}).serieAsignada) || {};
+    const _proc = activoPrincipal.procesador || '';
+    const _ram = _serieG.ram || activoPrincipal.ram || activoPrincipal.memoria || '';
+    const _disco = _serieG.disco || _serieG.almacenamiento || activoPrincipal.disco || '';
+    if (!_proc && !_ram && !_disco) return '';
+    return `<div class="specs-row">
+      <div class="spec-item"><span class="spec-lbl">PROCESADOR:</span> ${esc(_proc)}</div>
+      <div class="spec-item"><span class="spec-lbl">RAM:</span> ${esc(_ram)}</div>
+      <div class="spec-item"><span class="spec-lbl">DISCO:</span> ${esc(_disco)}</div>
+    </div>`;
+  })()}
+  <div class="obs-box"><b>OBSERVACIONES:</b> ${esc(record.observaciones || '')}</div>
+
+  ${isReposicion && _devueltos.length > 0 ? `
+  <div class="section-title recojo">DATOS DEL EQUIPO — RECOJO DE EQUIPO</div>
+  <table class="equip">
+    <thead><tr><th style="width:32px">ITEM</th><th>EQUIPO</th><th>MARCA</th><th>MODELO</th><th>SERIE</th><th>INVENTARIO</th></tr></thead>
+    <tbody>${devRows}</tbody>
+  </table>
+  <div class="estado-row">
+    <span class="lbl">ESTADO EQUIPO:</span>
+    <div class="estado-opt"><span class="chk"></span> OPERATIVO</div>
+    <div class="estado-opt"><span class="chk"></span> INOPERATIVO</div>
+    <div class="estado-opt"><span class="chk"></span> DAÑO FÍSICO</div>
   </div>
-  <div class="obs-box"><div style="font-weight:bold;font-size:11px;margin-bottom:4px">OBSERVACIONES:</div><div style="min-height:30px;padding-top:4px">${esc(record.motivo || '')}</div></div>
+  <div class="obs-box"><b>OBSERVACIONES RECOJO:</b> ${esc(record.motivoReemplazo || '')}</div>
+  ` : ''}
+
   <div class="terms">
-    <div class="terms-title">Condiciones y responsabilidades sobre la asignacion de equipos</div>
-    <p>1. El empleado recibe los equipos y herramientas de trabajo descritos previamente para uso exclusivo en actividades relacionadas a su trabajo para Entel.</p>
-    <p>2. El uso correcto de las herramientas de trabajo se tienen que realizar conforme a las recomendaciones senaladas por SST.</p>
-    <p>3. El empleado es responsable de manera integra de mantener las condiciones de seguridad adecuadas a fin de no exponer al riesgo las herramientas de trabajo.</p>
-    <p>4. En caso de perdida o robo, el empleado debe realizar la denuncia policial inmediatamente y notificar a su lider y al area de Seguridad dentro de las 24 horas.</p>
-    <div class="terms-accept">He leido y acepto los terminos y condiciones de la Politica de asignacion de equipos informaticos portatiles</div>
+    <div class="terms-title">CONDICIONES Y RESPONSABILIDADES SOBRE LA ASIGNACIÓN DE EQUIPOS</div>
+    <p>1. El empleado recibe el equipo asignado por tiempo indefinido para uso exclusivo en actividades relacionadas a su trabajo para Entel.</p>
+    <p>2. Es responsabilidad del empleado mantener las condiciones de seguridad adecuadas para no exponer al riesgo de robo o daños, dentro y fuera de las instalaciones de Entel.</p>
+    <p>3. En caso de laptops y notebooks que cuenten con la ranura de seguridad (Kensington lock), el equipo será entregado con la cadena de seguridad, el mismo que debe ser usado permanentemente por el usuario.</p>
+    <p>4. Cuando el equipo requiera ser transportado, especialmente fuera de las instalaciones de Entel, evitar llevarlo a la vista del público y cautelar que el transporte sea por el menor tiempo posible.</p>
+    <p>5. En caso de pérdida o robo del equipo:</p>
+    <p style="padding-left:16px">a. El usuario debe realizar una denuncia policial inmediatamente sucedido el hecho.</p>
+    <p style="padding-left:16px">b. Presentar un informe detallado de los hechos, a su Gerente y al Gerente de Seguridad Entel dentro de las 24 horas siguientes de sucedido el hecho.</p>
+    <p style="padding-left:16px">c. Tan pronto tenga copia de la denuncia debe enviar por e-mail imagen de la denuncia policial al Gerente de Seguridad, con copia a su propio gerente.</p>
+    <p style="padding-left:16px">d. El área de Seguridad evaluará cada caso para determinar si hubo responsabilidad o negligencia por parte del usuario.</p>
+    <p>6. Es responsabilidad del empleado leer la Política de Asignación de Equipos Informáticos portátiles designado por la Vicepresidencia de TI &amp; Procesos.</p>
+    <p>7. Mayor información remitirse a la Política de Asignación de Equipos Informáticos.</p>
   </div>
+
   <div class="signature-row">
-    <div class="signature-col"><div class="sig-line">Firma Usuario Entel</div></div>
-    <div class="signature-col"><div class="sig-line">Usuario / DNI</div><div class="sig-name">${esc(_fullName(colab) || record.colaboradorNombre)}</div></div>
+    <div class="signature-col"><div class="sig-line">FIRMA DEL USUARIO</div><div class="sig-name">${esc(_fullName(colab) || record.colaboradorNombre || '')}</div></div>
+    <div class="signature-col"><div class="sig-line">FIRMA DEL GESTOR DE TI</div><div class="sig-name">${esc(currentUser ? currentUser.nombre : '')}</div></div>
   </div>
 </div>
 </body></html>`;
@@ -7563,11 +8369,15 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
                 </tr></thead>
                 <tbody>${devueltos.map(d => {
                   const act = activos.find(x => x.id === d.activoId);
+                  const _tipo = d.activoTipo || (act ? act.tipo : '') || '';
+                  const _marca = d.activoMarca || (act ? act.marca : '') || '';
+                  const _modelo = d.activoModelo || (act ? act.modelo : '') || '';
+                  const _codigo = d.activoCodigo || (act ? act.codigo : '') || '—';
                   return '<tr style="background:#fef2f2">' +
-                  '<td style="font-size:12px">' + esc(d.activoTipo) + '</td>' +
-                  '<td style="font-size:12px">' + esc(d.activoMarca || '') + ' ' + esc(d.activoModelo || '') + '</td>' +
+                  '<td style="font-size:12px">' + esc(_tipo) + '</td>' +
+                  '<td style="font-size:12px">' + esc(_marca) + ' ' + esc(_modelo) + '</td>' +
                   '<td style="font-size:11px;font-family:monospace">' + esc(d.serieAsignada || '—') + '</td>' +
-                  '<td style="font-size:11px;font-family:monospace">' + esc(d.activoCodigo || '—') + '</td>' +
+                  '<td style="font-size:11px;font-family:monospace">' + esc(_codigo) + '</td>' +
                   '<td>' + _eqBadge(act ? act.estadoEquipo : '') + '</td>' +
                 '</tr>';}).join('')}</tbody>
               </table>
@@ -7587,11 +8397,15 @@ function verDetalleAsignacion(ticket, colabId, fecha) {
                 </tr></thead>
                 <tbody>${grupo.map(a => {
                   const act = activos.find(x => x.id === a.activoId);
+                  const _tipo = a.activoTipo || (act ? act.tipo : '') || '';
+                  const _marca = a.activoMarca || (act ? act.marca : '') || '';
+                  const _modelo = a.activoModelo || (act ? act.modelo : '') || '';
+                  const _codigo = a.activoCodigo || (act ? act.codigo : '') || '—';
                   return '<tr style="background:#f0fdf4">' +
-                  '<td style="font-size:12px">' + esc(a.activoTipo) + '</td>' +
-                  '<td style="font-size:12px">' + esc(a.activoMarca || '') + ' ' + esc(a.activoModelo || '') + '</td>' +
+                  '<td style="font-size:12px">' + esc(_tipo) + '</td>' +
+                  '<td style="font-size:12px">' + esc(_marca) + ' ' + esc(_modelo) + '</td>' +
                   '<td style="font-size:11px;font-family:monospace">' + esc(a.serieAsignada || '—') + '</td>' +
-                  '<td style="font-size:11px;font-family:monospace">' + esc(a.activoCodigo || '—') + '</td>' +
+                  '<td style="font-size:11px;font-family:monospace">' + esc(_codigo) + '</td>' +
                   '<td>' + _eqBadge(act ? act.estadoEquipo : '') + '</td>' +
                 '</tr>';}).join('')}</tbody>
               </table>
@@ -7822,24 +8636,39 @@ function _ejecutarDevSingle(asigId) {
   const activos = DB.get('activos');
   const activo = activos.find(x => x.id === a.activoId);
   if (activo) {
-    // Solo cambiar estado del activo si no quedan más series vigentes
     const otrasVigentes = asig.filter(o => o.activoId === a.activoId && o.estado === 'Vigente').length;
-    if (otrasVigentes === 0) {
-      switch (destino) {
-        case 'DISPONIBLE':
-          activo.estado = 'Disponible'; activo.estadoEquipo = subDestino || 'USADO'; activo.responsable = ''; break;
-        case 'MANTENIMIENTO':
-          activo.estado = 'Mantenimiento'; activo.estadoEquipo = subDestino || 'REPARACIÓN'; activo.responsable = ''; break;
-        case 'BAJA':
-          activo.estado = 'Dado de Baja'; activo.motivoBaja = subDestino || ''; activo.responsable = ''; break;
-        case 'NO RECUPERABLE':
-          activo.estado = 'Dado de Baja'; activo.motivoBaja = 'CESE-NO RECUPERABLE'; activo.responsable = ''; break;
-      }
-    }
-    // Marcar serie específica como Dado de Baja si es NO RECUPERABLE
-    if (destino === 'NO RECUPERABLE' && a.serieAsignada && activo.series && activo.series.length > 0) {
-      const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (a.serieAsignada || '').toUpperCase().trim());
-      if (serieObj) serieObj.estadoSerie = 'Dado de Baja';
+    const serieObj = (a.serieAsignada && activo.series && activo.series.length > 0)
+      ? activo.series.find(s => (s.serie || '').toUpperCase().trim() === (a.serieAsignada || '').toUpperCase().trim())
+      : null;
+
+    switch (destino) {
+      case 'DISPONIBLE':
+        if (serieObj) _setSerieEstadoFull(serieObj, 'Disponible', subDestino || 'USADO');
+        if (otrasVigentes === 0) { activo.estado = 'Disponible'; activo.estadoEquipo = subDestino || 'USADO'; activo.responsable = ''; }
+        break;
+      case 'MANTENIMIENTO':
+        if (serieObj) _setSerieEstadoFull(serieObj, 'Mantenimiento', subDestino || 'REPARACIÓN');
+        if (otrasVigentes === 0) { activo.estado = 'Mantenimiento'; activo.estadoEquipo = subDestino || 'REPARACIÓN'; activo.responsable = ''; }
+        break;
+      case 'BAJA':
+        // BAJA pendiente: estado 'Baja' (NO 'Dado de Baja' que es ejecutada).
+        // Asi aparece en Bajas Pendientes y sigue visible en Inventario CMDB.
+        if (serieObj) {
+          _setSerieEstadoFull(serieObj, 'Baja', subDestino || 'DESTRUCCIÓN');
+          serieObj.motivoBaja = subDestino || 'DESTRUCCIÓN';
+        }
+        if (otrasVigentes === 0) {
+          activo.estado = 'Baja';
+          activo.estadoEquipo = subDestino || 'DESTRUCCIÓN';
+          activo.motivoBaja = subDestino || 'DESTRUCCIÓN';
+          activo.responsable = '';
+        }
+        break;
+      case 'NO RECUPERABLE':
+        // NO RECUPERABLE: ejecutada inmediata. Solo va a Historial de Bajas.
+        if (serieObj) _setSerieEstadoFull(serieObj, 'Dado de Baja', 'NO RECUPERABLE');
+        if (otrasVigentes === 0) { activo.estado = 'Dado de Baja'; activo.motivoBaja = 'CESE-NO RECUPERABLE'; activo.responsable = ''; }
+        break;
     }
   }
 
@@ -7877,13 +8706,16 @@ function _ejecutarDevSingle(asigId) {
     DB.set('historialBajas', historial);
   }
 
+  // BAJA — el estado 'Baja' en serie/activo basta para que aparezca en Bajas Pendientes
+  // (se construye desde activos en _buildBajasRows)
+
   addMovimiento('Devolución', `${a.activoCodigo} → ${destino}${subDestino ? ' (' + subDestino + ')' : ''} — devuelto por ${a.colaboradorNombre}`);
 
-  // Auto-registrar en bitácora
-  if (activo) {
-    const _bitMotivo = destino === 'NO RECUPERABLE' ? 'CESE-NO RECUPERABLE' : 'CESE';
+  // Auto-registrar en bitácora — SOLO si NO es NO RECUPERABLE
+  // (NO RECUPERABLE ya se registró en historialBajas y no debe aparecer en Bitácora ni Inventario CMDB)
+  if (activo && destino !== 'NO RECUPERABLE') {
     _autoBitacora({
-      movimiento: destino === 'NO RECUPERABLE' ? 'BAJA' : 'INGRESO',
+      movimiento: 'INGRESO',
       almacen: (activo.ubicacion || 'Almacen TI'),
       tipoEquipo: activo.tipo || a.activoTipo || '',
       equipo: activo.equipo || activo.tipo || '',
@@ -7891,12 +8723,12 @@ function _ejecutarDevSingle(asigId) {
       serie: a.serieAsignada || '',
       codInv: activo.codInv || '',
       correo: a.correoColab || '',
-      motivo: _bitMotivo
+      motivo: 'CESE'
     });
   }
 
   closeModal();
-  showToast('Activo procesado correctamente');
+  showToast(destino === 'NO RECUPERABLE' ? 'Activo registrado como NO RECUPERABLE en Historial de Bajas' : 'Activo procesado correctamente');
   renderCeses(document.getElementById('contentArea'));
 }
 
@@ -8336,39 +9168,69 @@ function _procesarExcelSitios(file) {
       const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
       if (rows.length === 0) { showToast('Archivo vacío', 'error'); return; }
 
+      const isLarge = rows.length > 0;
+      if (isLarge) {
+        const container = document.getElementById('sitiosCmpContainer');
+        if (container) container.innerHTML = `<div style="text-align:center;padding:40px"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Procesando ${rows.length.toLocaleString()} filas...</h3><div id="cmSitiosProgressBar" style="width:300px;height:6px;background:#e2e8f0;border-radius:3px;margin:16px auto"><div id="cmSitiosProgressFill" style="width:0%;height:100%;background:#2563eb;border-radius:3px;transition:width 0.3s"></div></div><div id="cmSitiosProgressText" style="font-size:12px;color:var(--text-light)">0%</div></div>`;
+      }
+
+      // Pre-indexar sitios existentes para O(1)
       const sitiosExistentes = DB.get('sitiosMoviles');
-
-      // Track keys within the file for intra-file duplicate detection
-      const seenInFile = {};
-
-      _cargaMasivaSitiosData = rows.map((r, i) => {
-        const sede = String(r.SEDE || r.sede || '').trim().toUpperCase();
-        const area = String(r.AREA || r.area || '').trim().toUpperCase();
-        const piso = String(r.PISO || r.piso || '').trim().toUpperCase();
-        const ubi  = String(r.UBICACION || r.ubicacion || '').trim().toUpperCase();
-        const obs  = String(r.OBSERVACION || r.observacion || '').trim();
-        const errors = [];
-
-        if (!sede) errors.push('SEDE requerida');
-        if (!piso) errors.push('PISO requerido');
-        if (!ubi) errors.push('UBICACIÓN requerida');
-
-        // Check duplicate against existing sitios
-        const key = `${sede}|${area}|${piso}|${ubi}`;
-        const dupExist = sitiosExistentes.find(s => s.sede === sede && s.area === area && s.piso === piso && s.ubicacion === ubi);
-        if (dupExist) errors.push('DUPLICADO — ya existe en sitios móviles');
-
-        // Check duplicate within the file
-        if (!errors.length && seenInFile[key] !== undefined) {
-          errors.push('DUPLICADO en archivo (fila ' + (seenInFile[key] + 2) + ')');
-        }
-        if (!errors.length) seenInFile[key] = i;
-
-        return { sede, area, piso, ubicacion: ubi, observacion: obs, _row: i + 2, _errors: errors, _valid: errors.length === 0 };
+      const _sitiosKeySet = new Set();
+      sitiosExistentes.forEach(s => {
+        _sitiosKeySet.add(`${(s.sede||'').toUpperCase()}|${(s.area||'').toUpperCase()}|${(s.piso||'').toUpperCase()}|${(s.ubicacion||'').toUpperCase()}`);
       });
 
-      _cmSitiosStep = 3;
-      _renderCmSitiosStep();
+      const seenInFile = {};
+      _cargaMasivaSitiosData = [];
+      const BATCH = 500;
+      let idx = 0;
+
+      function processBatch() {
+        const end = Math.min(idx + BATCH, rows.length);
+        for (let i = idx; i < end; i++) {
+          const r = rows[i];
+          const sede = String(r.SEDE || r.sede || '').trim().toUpperCase();
+          const area = String(r.AREA || r.area || '').trim().toUpperCase();
+          const piso = String(r.PISO || r.piso || '').trim().toUpperCase();
+          const ubi  = String(r.UBICACION || r.ubicacion || '').trim().toUpperCase();
+          const obs  = String(r.OBSERVACION || r.observacion || '').trim();
+          const errors = [];
+
+          if (!sede) errors.push('SEDE requerida');
+          if (!piso) errors.push('PISO requerido');
+          if (!ubi) errors.push('UBICACIÓN requerida');
+
+          const key = `${sede}|${area}|${piso}|${ubi}`;
+          if (_sitiosKeySet.has(key)) errors.push('DUPLICADO — ya existe en sitios móviles');
+
+          if (!errors.length && seenInFile[key] !== undefined) {
+            errors.push('DUPLICADO en archivo (fila ' + (seenInFile[key] + 2) + ')');
+          }
+          if (!errors.length) seenInFile[key] = i;
+
+          _cargaMasivaSitiosData.push({ sede, area, piso, ubicacion: ubi, observacion: obs, _row: i + 2, _errors: errors, _valid: errors.length === 0 });
+        }
+        idx = end;
+
+        if (isLarge) {
+          const pct = Math.round((idx / rows.length) * 100);
+          const fill = document.getElementById('cmSitiosProgressFill');
+          const txt = document.getElementById('cmSitiosProgressText');
+          if (fill) fill.style.width = pct + '%';
+          if (txt) txt.textContent = `Validando... ${idx.toLocaleString()} / ${rows.length.toLocaleString()}`;
+        }
+
+        if (idx < rows.length) {
+          setTimeout(processBatch, 0);
+        } else {
+          _cmSitiosStep = 3;
+          _renderCmSitiosStep();
+        }
+      }
+
+      if (isLarge) setTimeout(processBatch, 50);
+      else processBatch();
     } catch (err) { showToast('Error: ' + err.message, 'error'); }
   };
   reader.readAsArrayBuffer(file);
@@ -8429,7 +9291,7 @@ async function _ejecutarCargaMasivaSitios() {
     sitios.push(_s);
   });
   DB.set('sitiosMoviles', sitios);
-  await DB.flush();
+  await DB.flush('sitiosMoviles');
   closeModal();
   showToast(validos.length + ' sitios importados correctamente');
   renderSitiosMoviles(document.getElementById('contentArea'));
@@ -8544,12 +9406,13 @@ function _renderCesTable() {
               <th>Estado</th>
               <th>F. Cese</th>
               <th>Activos</th>
+              <th>Descuento</th>
               <th>Acciones</th>
             </tr>
           </thead>
           <tbody>
             ${filtered.length === 0
-              ? '<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">⛔</div><h3>Sin registros</h3><p>No hay colaboradores en proceso de cese</p></div></td></tr>'
+              ? '<tr><td colspan="11"><div class="empty-state"><div class="empty-icon">⛔</div><h3>Sin registros</h3><p>No hay colaboradores en proceso de cese</p></div></td></tr>'
               : pagSlice(filtered, 'ceses').map(c => {
                   const estado = _estadoCese(c);
                   const esProximo = estado === 'Próximo Cese';
@@ -8577,10 +9440,25 @@ function _renderCesTable() {
                       </td>
                       <td style="font-size:12px;font-weight:600;color:${esProximo ? '#a16207' : '#dc2626'}">${formatDate(c.fechaCese)}</td>
                       <td>
-                        ${activosVigentes > 0
-                          ? `<span class="badge badge-warning" style="font-size:10px;cursor:pointer" onclick="openDevolucionModal(${c.id})" title="Pendiente devolución">📦 ${activosVigentes} pendiente${activosVigentes > 1 ? 's' : ''}</span>`
-                          : '<span style="font-size:11px;color:var(--text-muted)">Sin activos</span>'
-                        }
+                        ${(() => {
+                          if (activosVigentes > 0) {
+                            return `<span class="badge badge-warning" style="font-size:10px;cursor:pointer" onclick="openDevolucionModal(${c.id})" title="Pendiente devolución">📦 ${activosVigentes} pendiente${activosVigentes > 1 ? 's' : ''}</span>`;
+                          }
+                          // Sin vigentes: chequear si tuvo asignaciones devueltas
+                          const tuvoAsig = asignaciones.some(a => a.colaboradorId === c.id);
+                          if (tuvoAsig) {
+                            return '<span class="badge" style="font-size:10px;background:#dbeafe;color:#1d4ed8;border:none;font-weight:700">✓ DEVUELTO</span>';
+                          }
+                          return '<span style="font-size:11px;color:var(--text-muted)">Sin activos</span>';
+                        })()}
+                      </td>
+                      <td>
+                        ${(() => {
+                          const _d = _calcularDescuentoColab(c.id);
+                          if (!_d.aplicaConfig) return '<span style="font-size:11px;color:var(--text-muted)">—</span>';
+                          if (_d.total === 0) return '<span style="font-size:11px;color:var(--text-muted)">—</span>';
+                          return `<strong style="color:#dc2626;font-size:12px">${_formatoSoles(_d.total)}</strong>`;
+                        })()}
                       </td>
                       <td>
                         <div class="action-btns">
@@ -8626,6 +9504,18 @@ function openDevolucionModal(colabId) {
         📦 Este colaborador tiene <strong>${asig.length} activo(s)</strong> pendientes de devolución. Seleccione los que desea confirmar como devueltos.
       </div>
 
+      ${(() => {
+        const desc = _calcularDescuentoColab(colabId);
+        if (!desc.aplicaConfig || desc.total === 0) return '';
+        return `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:11px;color:#991b1b;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">💰 Descuento Estimado (si no devuelve)</div>
+            <div style="font-size:11px;color:#7f1d1d;margin-top:2px">${desc.detalle.length} activo(s) aplican descuento</div>
+          </div>
+          <div style="font-size:20px;font-weight:800;color:#dc2626;font-family:'Outfit',sans-serif">${_formatoSoles(desc.total)}</div>
+        </div>`;
+      })()}
+
       <div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px">
         <table style="width:100%;font-size:12px">
           <thead>
@@ -8665,7 +9555,7 @@ function openDevolucionModal(colabId) {
   `, `
     <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
     <button class="btn btn-primary" onclick="confirmarDevolucion(${colabId})">Confirmar Devolución</button>
-  `);
+  `, 'modal-lg');
 }
 
 function confirmarDevolucion(colabId) {
@@ -8742,7 +9632,9 @@ function confirmarDevolucion(colabId) {
 }
 
 function _onDestinoChange(idx) {
-  const dest = document.getElementById('devDest_' + idx).value;
+  const destEl = document.getElementById('devDest_' + idx);
+  if (!destEl) return;
+  const dest = destEl.value;
   const subSelect = document.getElementById('devSub_' + idx);
   if (!subSelect) return;
 
@@ -8781,6 +9673,7 @@ function _ejecutarDevolucion(colabId) {
   const resumen = [];
 
   const _nrItems = []; // Para registrar NO RECUPERABLE después
+  const _bajaItems = []; // Para registrar BAJA (DESTRUCCION/DONACION/VENTA) en bajas pendientes
 
   items.forEach((item, i) => {
     const destino = document.getElementById('devDest_' + i).value;
@@ -8796,18 +9689,16 @@ function _ejecutarDevolucion(colabId) {
     const activo = activos.find(x => x.id === item.activoId);
     if (!activo) return;
 
-    // Marcar serie específica si aplica
-    if (item.serie && activo.series && activo.series.length > 0) {
-      const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === (item.serie || '').toUpperCase().trim());
-      if (serieObj && destino === 'NO RECUPERABLE') {
-        serieObj.estadoSerie = 'Dado de Baja';
-      }
-    }
+    // Marcar serie específica según destino
+    const serieObj = (item.serie && activo.series && activo.series.length > 0)
+      ? activo.series.find(s => (s.serie || '').toUpperCase().trim() === (item.serie || '').toUpperCase().trim())
+      : null;
 
     const otrasVigentes = asig.filter(o => o.activoId === item.activoId && o.estado === 'Vigente').length;
 
     switch (destino) {
       case 'DISPONIBLE':
+        if (serieObj) _setSerieEstadoFull(serieObj, 'Disponible', subDestino || 'USADO');
         if (otrasVigentes === 0) {
           activo.estado = 'Disponible';
           activo.estadoEquipo = subDestino || 'USADO';
@@ -8816,6 +9707,7 @@ function _ejecutarDevolucion(colabId) {
         resumen.push(`${item.codigo} → DISPONIBLE (${subDestino || 'USADO'})`);
         break;
       case 'MANTENIMIENTO':
+        if (serieObj) _setSerieEstadoFull(serieObj, 'Mantenimiento', subDestino || 'REPARACIÓN');
         if (otrasVigentes === 0) {
           activo.estado = 'Mantenimiento';
           activo.estadoEquipo = subDestino || 'REPARACIÓN';
@@ -8824,14 +9716,24 @@ function _ejecutarDevolucion(colabId) {
         resumen.push(`${item.codigo} → MANTENIMIENTO (${subDestino || 'REPARACIÓN'})`);
         break;
       case 'BAJA':
+        // BAJA pendiente: estado 'Baja' (NO 'Dado de Baja' que es ejecutada)
+        // Asi aparece en Bajas Pendientes y sigue en Inventario CMDB hasta que se ejecute
+        if (serieObj) {
+          _setSerieEstadoFull(serieObj, 'Baja', subDestino || 'DESTRUCCIÓN');
+          serieObj.motivoBaja = subDestino || 'DESTRUCCIÓN';
+        }
         if (otrasVigentes === 0) {
-          activo.estado = 'Dado de Baja';
-          activo.motivoBaja = subDestino || '';
+          activo.estado = 'Baja';
+          activo.estadoEquipo = subDestino || 'DESTRUCCIÓN';
+          activo.motivoBaja = subDestino || 'DESTRUCCIÓN';
           activo.responsable = '';
         }
+        _bajaItems.push({ item, activo, subDestino: subDestino || 'DESTRUCCIÓN' });
         resumen.push(`${item.codigo} → BAJA (${subDestino})`);
         break;
       case 'NO RECUPERABLE':
+        // NO RECUPERABLE: ejecutada inmediata (Dado de Baja). NO va a Inventario ni Bitacora.
+        if (serieObj) _setSerieEstadoFull(serieObj, 'Dado de Baja', 'NO RECUPERABLE');
         if (otrasVigentes === 0) {
           activo.estado = 'Dado de Baja';
           activo.motivoBaja = 'CESE-NO RECUPERABLE';
@@ -8880,15 +9782,19 @@ function _ejecutarDevolucion(colabId) {
     });
     DB.set('historialBajas', histBajas);
   }
+
+  // BAJA (DESTRUCCION/DONACION/VENTA) — el estado 'Baja' en serie/activo basta para que aparezca
+  // en el modulo Bajas Pendientes (se construye desde activos en _buildBajasRows)
   addMovimiento('Devolución Cese', `${items.length} activo(s) procesados de ${c ? _fullName(c) : 'colaborador'}: ${resumen.join('; ')}`);
 
-  // Auto-registrar en bitácora por cada equipo devuelto
+  // Auto-registrar en bitácora — solo equipos NO marcados como NO RECUPERABLE.
+  // (Los NO RECUPERABLE solo van a Historial de Bajas, no a Bitácora ni Inventario CMDB)
   items.forEach(item => {
+    if (item.destino === 'NO RECUPERABLE') return; // skip — solo va a historial de bajas
     const _devActivo = activos.find(x => x.id === item.activoId);
     if (_devActivo) {
-      const _isNR = item.destino === 'NO RECUPERABLE';
       _autoBitacora({
-        movimiento: _isNR ? 'BAJA' : 'INGRESO',
+        movimiento: 'INGRESO',
         almacen: (_devActivo.ubicacion || 'Almacen TI'),
         tipoEquipo: _devActivo.tipo || '',
         equipo: _devActivo.equipo || _devActivo.tipo || '',
@@ -8896,7 +9802,7 @@ function _ejecutarDevolucion(colabId) {
         serie: item.serie || '',
         codInv: _devActivo.codInv || '',
         correo: c ? (c.email || '') : '',
-        motivo: _isNR ? 'CESE-NO RECUPERABLE' : 'CESE'
+        motivo: 'CESE'
       });
     }
   });
@@ -9086,8 +9992,21 @@ function confirmarCese(id) {
 }
 
 function deleteColab(id) {
+  const colabs = DB.get('colaboradores');
+  const c = colabs.find(x => x.id === id);
+  if (!c) return;
+  // No permitir borrar un colaborador con activos vigentes: dejaría asignaciones
+  // huérfanas y activos "Asignado" sin responsable en el CMDB. (Coherente con _deleteSitio.)
+  const correo = (c.correo || c.email || '').toUpperCase();
+  const vigentes = DB.get('asignaciones').filter(a => a.estado === 'Vigente' &&
+    (a.colaboradorId === id || (correo && (a.correoColab || '').toUpperCase() === correo)));
+  if (vigentes.length > 0) {
+    showToast(`No se puede eliminar: tiene ${vigentes.length} activo(s) vigente(s). Gestione la devolución primero.`, 'error');
+    return;
+  }
   if (!confirm('¿Eliminar este colaborador?')) return;
-  DB.set('colaboradores', DB.get('colaboradores').filter(x => x.id !== id));
+  DB.set('colaboradores', colabs.filter(x => x.id !== id));
+  addMovimiento('Eliminación', `Colaborador ${_fullName(c)} eliminado`);
   showToast('Colaborador eliminado');
   renderPadron(document.getElementById('contentArea'));
 }
@@ -9183,7 +10102,7 @@ function renderTiendas(el) {
         <span style="font-size:12px;color:var(--text-muted);font-weight:500">Región:</span>
         ${regiones.map(r => `
           <span class="filter-chip ${tiendaFilterRegion === r ? 'active' : ''}"
-                onclick="tiendaFilterRegion='${esc(r)}';resetPage('tiendas');renderTiendas(document.getElementById('contentArea'))">
+                onclick="tiendaFilterRegion='${escJs(r)}';resetPage('tiendas');renderTiendas(document.getElementById('contentArea'))">
             ${esc(r)}
           </span>
         `).join('')}
@@ -9195,7 +10114,7 @@ function renderTiendas(el) {
         <span style="font-size:12px;color:var(--text-muted);font-weight:500">Tipo:</span>
         ${tiposLocal.map(t => `
           <span class="filter-chip ${tiendaFilterTipo === t ? 'active' : ''}"
-                onclick="tiendaFilterTipo='${esc(t)}';resetPage('tiendas');renderTiendas(document.getElementById('contentArea'))">
+                onclick="tiendaFilterTipo='${escJs(t)}';resetPage('tiendas');renderTiendas(document.getElementById('contentArea'))">
             ${esc(t)}
           </span>
         `).join('')}
@@ -9543,11 +10462,50 @@ const _INV_FILTER_OPTIONS = [
 let _invActiveFilters = { estadoCMDB: 'Todos' }; // estadoCMDB activo por defecto
 let _invFilterMenuOpen = false;
 
+// Caché de las filas del inventario: se arma UNA vez y se reutiliza en búsqueda/filtros/
+// paginación (antes se reconstruían las ~miles de filas en cada tecla). Se invalida solo
+// cuando cambian activos/asignaciones/colaboradores (ver invalidación en la capa DB).
+let _invRowsCache = null;
+function _invRows() {
+  // Caché desactivada temporalmente (siempre reconstruye) para descartarla como causa de
+  // "sin resultados". El índice Map + memo se mantienen (esos no afectan el resultado).
+  return _buildInventarioRows();
+}
+
 function _buildInventarioRows() {
   const activos = DB.get('activos');
   const asignaciones = DB.get('asignaciones');
   const colaboradores = DB.get('colaboradores');
   const rows = [];
+
+  // Índices O(1) para NO hacer .find() por cada unidad (antes: unidades × asignaciones,
+  // que con miles de asignaciones era el cuello de botella del módulo).
+  // Clave de asignación vigente: activoId||SERIE (en mayúsculas). Serie vacía → activoId||.
+  const asigVigentePorClave = new Map();
+  for (let i = 0; i < asignaciones.length; i++) {
+    const x = asignaciones[i];
+    if (x.estado !== 'Vigente') continue;
+    const key = x.activoId + '||' + (x.serieAsignada || '').toUpperCase().trim();
+    if (!asigVigentePorClave.has(key)) asigVigentePorClave.set(key, x); // conserva la 1ª (== find)
+  }
+  const colabPorId = new Map();
+  for (let i = 0; i < colaboradores.length; i++) colabPorId.set(colaboradores[i].id, colaboradores[i]);
+
+  // Memo del mapeo funcional por tipo: se lee la config UNA vez y se cachea por tipo,
+  // en vez de llamar getMapeoFuncional (2 lecturas de config + 2 .map) en cada fila.
+  const _epAdminSet = new Set(DB.getConfig('mapeoEPAdmin', []).map(v => (v || '').toUpperCase()));
+  const _adicErgSet = new Set(DB.getConfig('mapeoAdicErg', []).map(v => (v || '').toUpperCase()));
+  const _mapeoMemo = new Map();
+  const mapeoFuncional = (tipo) => {
+    if (!tipo) return 'ADICIONAL';
+    const t = tipo.toUpperCase();
+    let m = _mapeoMemo.get(t);
+    if (m === undefined) {
+      m = _epAdminSet.has(t) ? 'EP-ADMIN' : (_adicErgSet.has(t) ? 'ADIC-ERG' : 'ADICIONAL');
+      _mapeoMemo.set(t, m);
+    }
+    return m;
+  };
 
   activos.forEach(a => {
     // Excluir activos dados de baja definitiva
@@ -9557,8 +10515,8 @@ function _buildInventarioRows() {
     const series = a.series || [];
     if (series.length === 0) {
       // Activo sin series — una fila
-      const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (!x.serieAsignada || x.serieAsignada === ''));
-      const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
+      const asig = asigVigentePorClave.get(a.id + '||') || null;
+      const colab = asig ? (colabPorId.get(asig.colaboradorId) || null) : null;
       const _esSitio = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
       rows.push({
         activoId: a.id,
@@ -9574,10 +10532,10 @@ function _buildInventarioRows() {
         actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
         estadoCMDB: asig ? 'Asignado' : (a.estado || 'Disponible'),
         estadoEquipo: a.estadoEquipo || '',
-        usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
+        usoEquipo: asig ? (asig.usoEquipo || mapeoFuncional(a.tipo || a.equipo)) : '',
         areaTrabajo: _esSitio ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
         correo: _esSitio ? '—' : (colab ? colab.email || '' : ''),
-        colaborador: _esSitio ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
+        colaborador: _esSitio ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) : ''),
         jefe: asig ? asig.jefe || '' : '',
         ticket: asig ? asig.ticket || '' : ''
       });
@@ -9588,8 +10546,8 @@ function _buildInventarioRows() {
         if (_serieEstado === 'DADO DE BAJA') return;
         // Buscar asignación vigente para ESTA serie específica (case-insensitive)
         const serieUp = (s.serie || '').toUpperCase().trim();
-        const asig = asignaciones.find(x => x.activoId === a.id && x.estado === 'Vigente' && (x.serieAsignada || '').toUpperCase().trim() === serieUp);
-        const colab = asig ? colaboradores.find(c => c.id === asig.colaboradorId) : null;
+        const asig = asigVigentePorClave.get(a.id + '||' + serieUp) || null;
+        const colab = asig ? (colabPorId.get(asig.colaboradorId) || null) : null;
         const _esSitio2 = asig && (asig.tipoDestino || '').toUpperCase() === 'SITIO';
         rows.push({
           activoId: a.id,
@@ -9603,12 +10561,12 @@ function _buildInventarioRows() {
           fechaAsignacion: asig ? asig.fechaAsignacion || '' : '',
           motivo: asig ? asig.motivo || '' : '',
           actaEntrega: asig ? (asig.actaEntrega || 'PENDIENTE') : '',
-          estadoCMDB: asig ? 'Asignado' : (s.estadoSerie || a.estado || 'Disponible'),
-          estadoEquipo: s.estadoEquipoSerie || a.estadoEquipo || '',
-          usoEquipo: asig ? (asig.usoEquipo || getMapeoFuncional(a.tipo || a.equipo)) : '',
+          estadoCMDB: asig ? 'Asignado' : (s.estadoCMDB || s.estadoSerie || a.estado || 'Disponible'),
+          estadoEquipo: s.estadoEquipoSerie || s.estadoEquipo || a.estadoEquipo || '',
+          usoEquipo: asig ? (asig.usoEquipo || mapeoFuncional(a.tipo || a.equipo)) : '',
           areaTrabajo: _esSitio2 ? 'SITIOS MOVILES' : (colab ? colab.area || '' : ''),
           correo: _esSitio2 ? '—' : (colab ? colab.email || '' : ''),
-          colaborador: _esSitio2 ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) + (colab.puesto || colab.tipoPuesto ? ' / ' + (colab.puesto || colab.tipoPuesto) : '') : ''),
+          colaborador: _esSitio2 ? (asig.sitioNombre || asig.colaboradorNombre || '') : (colab ? _fullName(colab) : ''),
           jefe: asig ? asig.jefe || '' : '',
           ticket: asig ? asig.ticket || '' : ''
         });
@@ -9720,7 +10678,20 @@ function verDetalleSerie(activoId, serie) {
         ${_f('Motivo', asig.motivo, {bg:'#fefce8', border:'#fde68a'})}
         ${_f('Ticket', asig.ticket, {mono:true, bg:'#faf5ff', border:'#e9d5ff', color:'#7c3aed'})}
         ${_f('Fecha Asignación', formatDateTime(asig.fechaAsignacion))}
-        ${_f('Acta Entrega', asig.actaEntrega || 'PENDIENTE', {color: asig.actaEntrega ? '#16a34a' : '#dc2626', bg: asig.actaEntrega ? '#f0fdf4' : '#fef2f2', border: asig.actaEntrega ? '#bbf7d0' : '#fecaca'})}
+        ${(() => {
+          const acta = asig.actaEntrega || 'PENDIENTE';
+          const hasActa = !!(asig.actaEntrega && asig.actaEntrega !== 'PENDIENTE');
+          const cellBg = hasActa ? '#f0fdf4' : '#fef2f2';
+          const cellBorder = hasActa ? '#bbf7d0' : '#fecaca';
+          const cellColor = hasActa ? '#16a34a' : '#dc2626';
+          return `<div style="display:flex;flex-direction:column;gap:2px;padding:10px 14px;background:${cellBg};border-radius:8px;border:1px solid ${cellBorder}">
+            <span style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#94a3b8">Acta Entrega</span>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+              <span style="font-size:14px;font-weight:700;color:${cellColor}">${esc(acta)}</span>
+              ${hasActa ? `<button onclick="verActaPorCorrelativo('${escJs(acta)}')" style="padding:4px 10px;background:#2563eb;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:4px" onmouseover="this.style.background='#1d4ed8'" onmouseout="this.style.background='#2563eb'">👁️ Ver</button>` : ''}
+            </div>
+          </div>`;
+        })()}
       </div>
     </div>
   ` : '';
@@ -9841,12 +10812,154 @@ function verDetalleSerie(activoId, serie) {
     </div>
   `, `
     ${esAsignado && asig ? `<button class="btn btn-warning" onclick="closeModal();_devolverDesdeDetalle(${asig.id})" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;font-weight:700">🔄 Devolver</button>` : ''}
+    ${!esAsignado ? `<button class="btn" onclick="_abrirCambiarEstadoModal(${activoId},'${escJs(serie)}')" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;font-weight:700">🔧 Cambiar Estado</button>` : ''}
     <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
   `, 'modal-lg');
 }
 
 function _devolverDesdeDetalle(asigId) {
   confirmarRetorno(asigId, 'DEVOLUCIÓN');
+}
+
+/* ═══════════════════════════════════════════════════════
+   CAMBIAR ESTADO DE SERIE (Modal — desde detalle de serie)
+   ═══════════════════════════════════════════════════════ */
+let _cambEstActivoId = null;
+let _cambEstSerie = '';
+let _cambEstCmdb = '';
+let _cambEstEquipo = '';
+
+function _abrirCambiarEstadoModal(activoId, serie) {
+  _cambEstActivoId = activoId;
+  _cambEstSerie = serie;
+  const activos = DB.get('activos');
+  const activo = activos.find(a => a.id === activoId);
+  if (!activo) return;
+  const serieObj = (activo.series || []).find(s => (s.serie || '').toUpperCase().trim() === (serie || '').toUpperCase().trim()) || {};
+
+  _cambEstCmdb = serieObj.estadoCMDB || serieObj.estadoSerie || activo.estado || 'Disponible';
+  _cambEstEquipo = serieObj.estadoEquipoSerie || activo.estadoEquipo || '';
+
+  // Cerrar modal de detalle (si está abierto) y abrir el de cambiar estado
+  closeModal();
+  setTimeout(() => _renderCambiarEstadoModal(activo, serieObj), 50);
+}
+
+function _renderCambiarEstadoModal(activo, serieObj) {
+  const _ESTADOS = ['Disponible', 'Mantenimiento', 'Baja'];
+  const _COLORS = {
+    'Disponible':    { border:'#10b981', bg:'#f0fdf4', text:'#166534' },
+    'Mantenimiento': { border:'#f59e0b', bg:'#fffbeb', text:'#92400e' },
+    'Baja':          { border:'#ef4444', bg:'#fef2f2', text:'#991b1b' }
+  };
+
+  const _renderSubEstados = () => {
+    const opts = ESTADO_EQUIPO_MAP[(_cambEstCmdb || '').toUpperCase()] || [];
+    return opts.map(eq => {
+      const sel = eq === _cambEstEquipo;
+      return `<button type="button" class="cambest-eq-btn"
+        onclick="_cambEstSelectEquipo('${eq}')"
+        style="padding:8px 16px;border-radius:8px;border:2px solid ${sel ? '#3b82f6' : '#e2e8f0'};background:${sel ? '#eff6ff' : '#fff'};color:${sel ? '#1d4ed8' : '#334155'};font-weight:600;font-size:11px;cursor:pointer">${esc(eq)}</button>`;
+    }).join('');
+  };
+
+  const _renderCmdbBtns = () => {
+    return _ESTADOS.map(e => {
+      const c = _COLORS[e];
+      const sel = e === _cambEstCmdb;
+      return `<button type="button" id="cambEstCmdb_${e}"
+        onclick="_cambEstSelectCmdb('${e}')"
+        style="flex:1;padding:12px;border-radius:10px;border:2px solid ${sel ? c.border : '#e2e8f0'};background:${sel ? c.bg : '#fff'};color:${sel ? c.text : '#334155'};font-weight:700;font-size:12px;cursor:pointer">${esc(e.toUpperCase())}</button>`;
+    }).join('');
+  };
+
+  const body = `
+    <div style="display:flex;flex-direction:column;gap:18px">
+      <!-- Info equipo -->
+      <div style="background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px">
+        <div><span style="color:#64748b">Equipo:</span> <strong>${esc(activo.tipo)} ${esc(activo.marca)} ${esc(activo.modelo)}</strong></div>
+        <div><span style="color:#64748b">Serie:</span> <strong style="font-family:monospace">${esc(_cambEstSerie)}</strong></div>
+      </div>
+
+      <!-- Selector estado CMDB -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;display:block">Estado CMDB <span class="required">*</span></label>
+        <div id="cambEstCmdbBtns" style="display:flex;gap:8px">${_renderCmdbBtns()}</div>
+      </div>
+
+      <!-- Selector sub-estado -->
+      <div id="cambEstEquipoSection">
+        <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:8px;display:block">Estado del Equipo <span class="required">*</span></label>
+        <div id="cambEstEquipoBtns" style="display:flex;gap:8px;flex-wrap:wrap">${_renderSubEstados()}</div>
+      </div>
+
+      <!-- Observaciones -->
+      <div>
+        <label style="font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;display:block">Observaciones</label>
+        <textarea id="cambEstObs" class="form-control" rows="2" placeholder="Detalle del cambio de estado (opcional)" style="font-size:12px;resize:vertical">${esc(serieObj.obsRetorno || '')}</textarea>
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn btn-secondary" onclick="closeModal();verDetalleSerie(${_cambEstActivoId},'${escJs(_cambEstSerie)}')">← Volver</button>
+    <button class="btn btn-primary" onclick="_guardarCambioEstado()">Guardar Cambio</button>
+  `;
+  openModal('🔧 Cambiar Estado del Equipo', body, footer);
+}
+
+function _cambEstSelectCmdb(val) {
+  _cambEstCmdb = val;
+  _cambEstEquipo = ''; // reset subestado
+  const activos = DB.get('activos');
+  const activo = activos.find(a => a.id === _cambEstActivoId) || {};
+  const serieObj = (activo.series || []).find(s => (s.serie || '').toUpperCase().trim() === (_cambEstSerie || '').toUpperCase().trim()) || {};
+  _renderCambiarEstadoModal(activo, serieObj);
+}
+
+function _cambEstSelectEquipo(val) {
+  _cambEstEquipo = val;
+  const activos = DB.get('activos');
+  const activo = activos.find(a => a.id === _cambEstActivoId) || {};
+  const serieObj = (activo.series || []).find(s => (s.serie || '').toUpperCase().trim() === (_cambEstSerie || '').toUpperCase().trim()) || {};
+  _renderCambiarEstadoModal(activo, serieObj);
+}
+
+async function _guardarCambioEstado() {
+  if (!_cambEstCmdb) { showToast('Seleccione el estado CMDB', 'error'); return; }
+  if (!_cambEstEquipo) { showToast('Seleccione el estado del equipo', 'error'); return; }
+  if (!_esEstadoCoherente(_cambEstCmdb, _cambEstEquipo)) {
+    const valid = (ESTADO_EQUIPO_MAP[(_cambEstCmdb || '').toUpperCase()] || []).join(', ');
+    showToast(`Estado incoherente: "${_cambEstCmdb}" solo admite ${valid}`, 'error');
+    return;
+  }
+  const obs = (document.getElementById('cambEstObs') || {}).value || '';
+
+  const activos = DB.get('activos');
+  const activo = activos.find(a => a.id === _cambEstActivoId);
+  if (!activo) return;
+  const serieObj = (activo.series || []).find(s => (s.serie || '').toUpperCase().trim() === (_cambEstSerie || '').toUpperCase().trim());
+  if (!serieObj) return;
+
+  _setSerieEstadoFull(serieObj, _cambEstCmdb, _cambEstEquipo);
+  if (obs.trim()) serieObj.obsRetorno = obs.trim();
+
+  // Si el activo solo tiene 1 serie, sincronizar estado global del activo
+  if (!activo.series || activo.series.length <= 1) {
+    activo.estado = _cambEstCmdb;
+    activo.estadoEquipo = _cambEstEquipo;
+  }
+
+  // Persistir solo el activo modificado
+  DB.updateOne('activos', activo);
+  addMovimiento('Cambio Estado', `Serie ${_cambEstSerie} → ${_cambEstCmdb} / ${_cambEstEquipo}`);
+
+  showToast('Estado actualizado correctamente');
+  closeModal();
+  // Refrescar la tabla del inventario si esta visible
+  if (document.getElementById('invTableWrap')) {
+    _renderInvTable();
+  }
 }
 
 function _switchDetalleTab(tabId) {
@@ -9869,7 +10982,7 @@ function _switchDetalleTab(tabId) {
 }
 
 function renderInventario(el) {
-  const rows = _buildInventarioRows();
+  const rows = _invRows();
   const totalAsignados = rows.filter(r => r.estadoCMDB === 'Asignado').length;
   const totalDisponibles = rows.filter(r => r.estadoCMDB === 'Disponible').length;
 
@@ -9920,14 +11033,15 @@ function renderInventario(el) {
 
     <div id="invTableWrap"></div>
   `;
-  _renderInvFiltersBar();
-  _renderInvTable();
+  // Reutilizar las filas ya construidas (evita reconstruirlas 3 veces al abrir el módulo).
+  _renderInvFiltersBar(rows);
+  _renderInvTable(rows);
 }
 
-function _renderInvFiltersBar() {
+function _renderInvFiltersBar(rowsArg) {
   const bar = document.getElementById('invFiltersBar');
   if (!bar) return;
-  const rows = _buildInventarioRows();
+  const rows = rowsArg || _invRows();
 
   // Dropdowns de filtros activos
   let html = Object.keys(_invActiveFilters).map(key => {
@@ -10014,11 +11128,11 @@ function _clearInvSearch() {
   _renderInvTable();
 }
 
-function _renderInvTable() {
+function _renderInvTable(rowsArg) {
   const wrap = document.getElementById('invTableWrap');
   if (!wrap) return;
 
-  const rows = _buildInventarioRows();
+  const rows = rowsArg || _invRows();
   const filtered = rows.filter(r => {
     // Filtros dinámicos activos
     for (const [key, val] of Object.entries(_invActiveFilters)) {
@@ -10065,7 +11179,7 @@ function _renderInvTable() {
               <th style="${thStyle}">Uso Equipo</th>
               <th style="${thStyle}">Área Trabajo</th>
               <th style="${thStyle}">Correo</th>
-              <th style="${thStyle}">Colaborador / Posición</th>
+              <th style="${thStyle}">Colaborador</th>
               <th style="${thStyle}">Jefe / Responsable</th>
               <th style="${thStyle}">Ticket</th>
             </tr>
@@ -10085,7 +11199,7 @@ function _renderInvTable() {
                       <td style="${tdStyle}">${esc(r.equipo || '—')}</td>
                       <td style="${tdStyle}">${esc(r.marca || '—')}</td>
                       <td style="${tdStyle}">${esc(r.modelo || '—')}</td>
-                      <td style="${tdStyle};font-family:monospace">${r.serie ? `<a href="#" onclick="verDetalleSerie(${r.activoId},'${esc(r.serie)}');return false" style="color:var(--primary);text-decoration:underline;cursor:pointer;font-weight:600">${esc(r.serie)}</a>` : '—'}</td>
+                      <td style="${tdStyle};font-family:monospace">${r.serie ? `<a href="#" onclick="verDetalleSerie(${r.activoId},'${escJs(r.serie)}');return false" style="color:var(--primary);text-decoration:underline;cursor:pointer;font-weight:600">${esc(r.serie)}</a>` : '—'}</td>
                       <td style="${tdStyle};font-family:monospace">${esc(r.codInv || '—')}</td>
                       <td style="${tdStyle}">${formatDate(r.fechaAsignacion)}</td>
                       <td style="${tdStyle}">${esc(r.motivo || '—')}</td>
@@ -10113,8 +11227,8 @@ function _renderInvTable() {
 }
 
 function exportInventario() {
-  const rows = _buildInventarioRows();
-  const headers = ['ALMACEN','TIPO_EQUIPO','EQUIPO','MARCA','MODELO','SERIE','COD_INV','FECHA_ASIGNACION','MOTIVO','ACTA_ENTREGA','ESTADO_CMDB','ESTADO_EQUIPO','USO_EQUIPO','AREA_TRABAJO','CORREO','COLABORADOR_POSICION','JEFE_RESPONSABLE','TICKET'];
+  const rows = _invRows();
+  const headers = ['ALMACEN','TIPO_EQUIPO','EQUIPO','MARCA','MODELO','SERIE','COD_INV','FECHA_ASIGNACION','MOTIVO','ACTA_ENTREGA','ESTADO_CMDB','ESTADO_EQUIPO','USO_EQUIPO','AREA_TRABAJO','CORREO','COLABORADOR','JEFE_RESPONSABLE','TICKET'];
   const data = rows.map(r => [r.sede,r.tipo,r.equipo,r.marca,r.modelo,r.serie,r.codInv,formatDate(r.fechaAsignacion),r.motivo,r.actaEntrega,r.estadoCMDB,r.estadoEquipo,r.usoEquipo,r.areaTrabajo,r.correo,r.colaborador,r.jefe,r.ticket]);
   const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
   ws['!cols'] = headers.map(h => ({ wch: Math.max(h.length + 2, 16) }));
@@ -10169,6 +11283,15 @@ const _bitArchivos = {
       return result || null;
     } catch(e) { console.error(e); return null; }
   },
+  async delete(movId) {
+    try {
+      const db = await this._open();
+      const tx = db.transaction(this._storeName, 'readwrite');
+      tx.objectStore(this._storeName).delete(movId);
+      await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+      db.close();
+    } catch(e) { console.error(e); }
+  },
   // Migrar datos viejos de localStorage a IndexedDB (una sola vez)
   async migrate() {
     try {
@@ -10211,7 +11334,6 @@ function _limpiarAlmacen(val) {
 // Auto-registra un movimiento en la bitácora estructurada
 function _autoBitacora(opts) {
   _initBitacoraData();
-  const movs = DB.get('bitacoraMovimientos');
 
   // Buscar ticket automáticamente desde asignaciones por serie del equipo
   let ticketVal = opts.ticket || '';
@@ -10222,8 +11344,10 @@ function _autoBitacora(opts) {
     ticketVal = asig.ticket || '';
   }
 
-  const record = {
-    id: nextId(movs),
+  const _ahora = new Date();
+  const _fechaCompleta = today() + ' ' + String(_ahora.getHours()).padStart(2,'0') + ':' + String(_ahora.getMinutes()).padStart(2,'0') + ':' + String(_ahora.getSeconds()).padStart(2,'0');
+
+  DB.addOne('bitacoraMovimientos', {
     movimiento: (opts.movimiento || 'SALIDA').toUpperCase(),
     almacen: (opts.almacen || '').toUpperCase(),
     tipoEquipo: (opts.tipoEquipo || '').toUpperCase(),
@@ -10235,12 +11359,11 @@ function _autoBitacora(opts) {
     motivo: (opts.motivo || '').toUpperCase(),
     gestor: opts.gestor || (currentUser ? (currentUser.usuario || currentUser.nombre) : 'Sistema'),
     ticket: ticketVal.toUpperCase(),
-    estadoAsignacion: 'PENDIENTE',
-    actaCorrelativo: '',
+    estadoAsignacion: opts.estadoAsignacion || 'PENDIENTE',
+    actaCorrelativo: opts.actaCorrelativo || '',
+    fecha: _fechaCompleta,
     fechaRegistro: today()
-  };
-  movs.unshift(record);
-  DB.set('bitacoraMovimientos', movs);
+  });
 }
 
 function _nextActaCorrelativo() {
@@ -10253,7 +11376,28 @@ function _nextActaCorrelativo() {
   return 'ACT' + String(max + 1).padStart(5, '0');
 }
 
-function renderMovimientos(el) {
+// Paginacion server-side: solo carga la pagina actual.
+let _bitTotal = 0;
+
+async function _bitFetchPage(withCount) {
+  const p = pageState['bitacora'] || 1;
+  const ps = getPageSize('bitacora');
+  const offset = (p - 1) * ps;
+  const opts = { limit: ps, offset, force: true };
+  if (withCount) opts.withCount = 1;
+  const result = await DB.loadKey('bitacoraMovimientos', opts);
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    if (result.total != null) _bitTotal = result.total;
+  }
+}
+
+async function renderMovimientos(el) {
+  // Server-side pagination: solo carga la pagina actual desde la BD.
+  // En la primera carga pide el COUNT total; en navegacion siguiente no lo pide.
+  if (DB.isMySQL()) {
+    el.innerHTML = `<div style="padding:60px;text-align:center"><div style="font-size:48px;margin-bottom:16px">⏳</div><h3>Cargando bitácora...</h3></div>`;
+    await _bitFetchPage(true);
+  }
   _initBitacoraData();
 
   el.innerHTML = `
@@ -10286,6 +11430,7 @@ function renderMovimientos(el) {
           <button class="filter-chip ${_bitFilterEstado === 'Todos' ? 'active' : ''}" onclick="_setBitFilterEstado('Todos')">Todos</button>
           <button class="filter-chip ${_bitFilterEstado === 'PENDIENTE' ? 'active' : ''}" onclick="_setBitFilterEstado('PENDIENTE')" style="color:#d97706">Pendientes</button>
           <button class="filter-chip ${_bitFilterEstado === 'ATENDIDO' ? 'active' : ''}" onclick="_setBitFilterEstado('ATENDIDO')" style="color:#059669">Atendidos</button>
+          <button class="filter-chip ${_bitFilterEstado === 'DEVUELTO' ? 'active' : ''}" onclick="_setBitFilterEstado('DEVUELTO')" style="color:#1d4ed8">Devueltos</button>
           <button class="filter-chip ${_bitFilterEstado === 'ANULADO' ? 'active' : ''}" onclick="_setBitFilterEstado('ANULADO')" style="color:#dc2626">Anulados</button>
         </div>
       </div>
@@ -10318,12 +11463,14 @@ function _setBitFilterEstado(val) {
 function _renderBitTable() {
   const wrap = document.getElementById('bitTableWrap');
   if (!wrap) return;
-  const movs = DB.get('bitacoraMovimientos');
+  // Server-side pagination: los datos del cache YA son la pagina actual (ordenados DESC desde BD).
+  const movs = DB.get('bitacoraMovimientos') || [];
 
   const filtered = movs.filter(m => {
     if (_bitFilterMov !== 'Todos' && m.movimiento !== _bitFilterMov) return false;
     if (_bitFilterEstado === 'PENDIENTE' && m.estadoAsignacion !== 'PENDIENTE') return false;
     if (_bitFilterEstado === 'ATENDIDO' && m.estadoAsignacion !== 'ATENDIDO') return false;
+    if (_bitFilterEstado === 'DEVUELTO' && m.estadoAsignacion !== 'DEVUELTO') return false;
     if (_bitFilterEstado === 'ANULADO' && m.estadoAsignacion !== 'ANULADO') return false;
     if (_bitSearch) {
       const s = _bitSearch.toLowerCase();
@@ -10368,11 +11515,13 @@ function _renderBitTable() {
           <tbody>
             ${filtered.length === 0
               ? '<tr><td colspan="15"><div class="empty-state"><div class="empty-icon">📋</div><h3>Sin movimientos registrados</h3><p>Registra un nuevo movimiento para comenzar</p></div></td></tr>'
-              : pagSlice(filtered, 'bitacora').map(m => {
+              : filtered.map(m => {
                   const isCancelado = (m.movimiento || '').toUpperCase() === 'CANCELADO';
 
                   const estadoBadge = m.estadoAsignacion === 'ANULADO'
                     ? `<span class="badge bit-badge-estado" style="background:transparent;color:#dc2626;border:none;font-weight:700">ANULADO</span>`
+                    : m.estadoAsignacion === 'DEVUELTO'
+                    ? `<span class="badge bit-badge-estado" style="background:#dbeafe;color:#1d4ed8;border:none;font-weight:700">DEVUELTO</span>`
                     : m.estadoAsignacion === 'ATENDIDO'
                     ? `<span class="badge badge-success bit-badge-estado">ATENDIDO</span>`
                     : `<span class="badge badge-warning bit-badge-estado">PENDIENTE</span>`;
@@ -10381,7 +11530,7 @@ function _renderBitTable() {
                   const actaHTML = (isCancelado || _isBajaNR)
                     ? `<button class="btn bit-btn-cargar" disabled style="opacity:0.5;cursor:not-allowed" title="${_isBajaNR ? 'No aplica acta para baja no recuperable' : ''}">📎 Cargar acta</button>`
                     : m.actaCorrelativo
-                    ? `<span class="bit-acta-link" onclick="verActaAdjunta(${m.id})" title="Ver acta adjunta">${esc(m.actaCorrelativo)}</span>`
+                    ? `<span class="bit-acta-link" onclick="verActaPorCorrelativo('${escJs(m.actaCorrelativo)}')" title="Ver acta adjunta">${esc(m.actaCorrelativo)}</span>`
                     : `<button class="btn bit-btn-cargar" onclick="cargarActaBitacora(${m.id})">📎 Cargar acta</button>`;
 
                   const movBadge = isCancelado
@@ -10394,7 +11543,7 @@ function _renderBitTable() {
                   <tr>
                     <td style="font-weight:600;text-align:center">${m.id}</td>
                     <td>${movBadge}</td>
-                    <td style="font-size:12px">${formatDate(m.fechaRegistro)}</td>
+                    <td style="font-size:12px">${formatDate(m.fechaRegistro || m.fecha)}</td>
                     <td style="font-size:12px">${esc(_limpiarAlmacen(m.almacen) || '-')}</td>
                     <td>${esc(m.equipo || '-')}</td>
                     <td style="font-size:12px">${esc(m.modelo || '-')}</td>
@@ -10418,7 +11567,7 @@ function _renderBitTable() {
           </tbody>
         </table>
       </div>
-      <div class="table-footer">${pagFooter('bitacora', filtered.length)}</div>
+      <div class="table-footer">${pagFooter('bitacora', _bitTotal || filtered.length)}</div>
     </div>
   `;
 }
@@ -10539,17 +11688,17 @@ function saveBitacoraMovimiento(editId) {
       record.estadoAsignacion = movs[idx].estadoAsignacion || 'PENDIENTE';
       record.actaCorrelativo = movs[idx].actaCorrelativo || '';
       record.fechaRegistro = movs[idx].fechaRegistro;
-      movs[idx] = record;
+      // bitacoraMovimientos NO se auto-sincroniza (está en _NO_AUTO_SYNC): usar update/add
+      // individuales para que el cambio SÍ se persista en MySQL.
+      DB.updateOne('bitacoraMovimientos', record);
     }
   } else {
-    record.id = nextId(movs);
     record.estadoAsignacion = 'PENDIENTE';
     record.actaCorrelativo = '';
     record.fechaRegistro = today();
-    movs.unshift(record);
+    DB.addOne('bitacoraMovimientos', record); // persiste en MySQL y asigna el id real
   }
 
-  DB.set('bitacoraMovimientos', movs);
   addMovimiento(editId ? 'Edicion Bitacora' : 'Nuevo Mov. Bitacora', `${record.movimiento}: ${record.almacen} — ${record.equipo} (${record.serie})`);
   closeModal();
   showToast(editId ? 'Movimiento actualizado' : 'Movimiento registrado');
@@ -10558,11 +11707,10 @@ function saveBitacoraMovimiento(editId) {
 
 function deleteBitacoraMov(id) {
   if (!confirm('¿Eliminar este registro de movimiento?')) return;
-  const movs = DB.get('bitacoraMovimientos').filter(m => m.id !== id);
-  DB.set('bitacoraMovimientos', movs);
-  // Eliminar archivo adjunto si existe
-  const arch = DB.get('bitacoraArchivos').filter(a => a.movId !== id);
-  DB.set('bitacoraArchivos', arch);
+  DB.deleteOne('bitacoraMovimientos', id); // persiste el borrado en MySQL
+  // Eliminar el adjunto real en IndexedDB (la key localStorage 'bitacoraArchivos'
+  // quedó obsoleta tras la migración a IndexedDB).
+  if (_bitArchivos && _bitArchivos.delete) _bitArchivos.delete(id);
   addMovimiento('Eliminacion Bitacora', `Movimiento #${id} eliminado`);
   showToast('Registro eliminado');
   renderPage();
@@ -10652,6 +11800,25 @@ function _onBitFileSelected(input, movId) {
   reader.readAsDataURL(file);
 }
 
+// Sube un File/Blob a api/upload.php y devuelve la ruta persistida (o '' si falla o no hay
+// backend). Uso: guardar evidencia documental (denuncia de robo, guía de salida, valorización).
+async function _uploadArchivo(file, categoria) {
+  if (!file) return '';
+  if (!DB.isMySQL || !DB.isMySQL()) return ''; // sin backend no hay dónde persistirlo
+  try {
+    const fd = new FormData();
+    fd.append('archivo', file, file.name || 'archivo');
+    fd.append('categoria', categoria || 'documento');
+    const resp = await fetch('api/upload.php', { method: 'POST', body: fd });
+    if (!resp.ok) { console.warn('[_uploadArchivo ' + categoria + '] HTTP ' + resp.status); return ''; }
+    const json = await resp.json().catch(() => ({}));
+    return json.ruta || '';
+  } catch (err) {
+    console.warn('[_uploadArchivo ' + categoria + '] Error:', err);
+    return '';
+  }
+}
+
 async function _confirmActaUpload(movId) {
   if (!_bitPendingFile) { showToast('No hay archivo seleccionado', 'error'); return; }
 
@@ -10661,7 +11828,7 @@ async function _confirmActaUpload(movId) {
 
   const correlativo = _nextActaCorrelativo();
 
-  // Guardar archivo en IndexedDB
+  // 1. Guardar archivo en IndexedDB (cache local)
   await _bitArchivos.save(movId, {
     correlativo,
     name: _bitPendingFile.name,
@@ -10669,38 +11836,72 @@ async function _confirmActaUpload(movId) {
     data: _bitPendingFile.data
   });
 
-  // Buscar todos los movimientos relacionados (misma atención: mismo ticket + correo + fecha)
+  // 2. Subir archivo al servidor (persiste entre sesiones)
+  let _actaRuta = '';
+  try {
+    // Convertir dataURL a Blob
+    const _resp = await fetch(_bitPendingFile.data);
+    const _blob = await _resp.blob();
+    const _fd = new FormData();
+    _fd.append('archivo', _blob, _bitPendingFile.name);
+    _fd.append('bitacora_id', String(movId));
+    _fd.append('categoria', 'acta');
+    const _upResp = await fetch('api/upload.php', { method: 'POST', body: _fd });
+    if (_upResp.ok) {
+      const _upJson = await _upResp.json();
+      _actaRuta = _upJson.ruta || '';
+    } else {
+      console.warn('[upload acta] HTTP ' + _upResp.status);
+    }
+  } catch (err) {
+    console.warn('[upload acta] Error subiendo archivo:', err);
+    // No bloquea — el archivo queda en IndexedDB
+  }
+
+  // Buscar todos los movimientos relacionados (misma atención: mismo ticket).
+  // Se relaja: ya NO se exige misma fecha porque el INGRESO de retorno
+  // puede ocurrir dias despues que la SALIDA.
   const ref = movs[idx];
   const _refTicket = (ref.ticket || '').toUpperCase().trim();
   const _refCorreo = (ref.correo || '').toUpperCase().trim();
-  const _refFecha = (ref.fechaRegistro || '').split('T')[0];
+  const _refSerie = (ref.serie || '').toUpperCase().trim();
   const _relatedIds = [];
 
   for (const m of movs) {
     const mTicket = (m.ticket || '').toUpperCase().trim();
     const mCorreo = (m.correo || '').toUpperCase().trim();
-    const mFecha = (m.fechaRegistro || '').split('T')[0];
-    if (_refTicket && mTicket === _refTicket && mCorreo === _refCorreo && mFecha === _refFecha) {
-      m.actaCorrelativo = correlativo;
-      m.estadoAsignacion = 'ATENDIDO';
-      _relatedIds.push(m.id);
-      // Guardar el mismo archivo para cada movimiento relacionado
-      if (m.id !== movId) {
-        await _bitArchivos.save(m.id, {
-          correlativo,
-          name: _bitPendingFile.name,
-          type: _bitPendingFile.type,
-          data: _bitPendingFile.data
-        });
-      }
+    const mSerie = (m.serie || '').toUpperCase().trim();
+    if (!_refTicket || mTicket !== _refTicket) continue;
+    // Mismo ticket — relacionar si comparte correo O serie (o si el correo de ref vacio)
+    const _matchCorreo = !_refCorreo || !mCorreo || mCorreo === _refCorreo;
+    const _matchSerie = !_refSerie || !mSerie || mSerie === _refSerie;
+    if (!(_matchCorreo || _matchSerie)) continue;
+
+    m.actaCorrelativo = correlativo;
+    if (_actaRuta) m.actaRuta = _actaRuta;
+    // Mantener "DEVUELTO" si ya lo era (no degradar a ATENDIDO)
+    if (m.estadoAsignacion !== 'DEVUELTO') m.estadoAsignacion = 'ATENDIDO';
+    _relatedIds.push(m.id);
+    // Guardar el mismo archivo en IndexedDB para cada movimiento relacionado
+    if (m.id !== movId) {
+      await _bitArchivos.save(m.id, {
+        correlativo,
+        name: _bitPendingFile.name,
+        type: _bitPendingFile.type,
+        data: _bitPendingFile.data
+      });
     }
+    // Persistir cambios en BD para que sobrevivan refreshes
+    DB.updateOne('bitacoraMovimientos', m);
   }
 
   // Si no se encontraron relacionados por ticket (fallback), actualizar solo el actual
   if (_relatedIds.length === 0) {
     movs[idx].actaCorrelativo = correlativo;
-    movs[idx].estadoAsignacion = 'ATENDIDO';
+    if (_actaRuta) movs[idx].actaRuta = _actaRuta;
+    if (movs[idx].estadoAsignacion !== 'DEVUELTO') movs[idx].estadoAsignacion = 'ATENDIDO';
     _relatedIds.push(movId);
+    DB.updateOne('bitacoraMovimientos', movs[idx]);
   }
 
   DB.set('bitacoraMovimientos', movs);
@@ -10732,27 +11933,73 @@ async function _confirmActaUpload(movId) {
   renderPage();
 }
 
-async function verActaAdjunta(movId) {
-  const archivo = await _bitArchivos.find(movId);
-  if (!archivo) {
-    showToast('No se encontro el archivo adjunto', 'error');
+// Buscar acta por correlativo (ej: "ACT01557") y abrirla.
+// Si varios movimientos comparten el correlativo, usa el que SI tenga archivo
+// (servidor via actaRuta, o IndexedDB).
+async function verActaPorCorrelativo(correlativo) {
+  if (!correlativo || correlativo === 'PENDIENTE') {
+    showToast('Esta asignación no tiene acta adjunta', 'error');
     return;
   }
-
-  let previewHTML = '';
-  if (archivo.type === 'application/pdf') {
-    previewHTML = `<iframe src="${archivo.data}" style="width:100%;height:500px;border:none;border-radius:var(--radius-sm)"></iframe>`;
-  } else {
-    previewHTML = `<img src="${archivo.data}" style="max-width:100%;max-height:500px;border-radius:var(--radius-sm);display:block;margin:0 auto">`;
+  const movs = DB.get('bitacoraMovimientos');
+  const candidates = movs.filter(m => (m.actaCorrelativo || '') === correlativo);
+  if (candidates.length === 0) {
+    showToast('No se encontró el acta ' + correlativo, 'error');
+    return;
   }
+  // 1. Preferir el que tenga ruta de servidor (persistente)
+  const withRoute = candidates.find(m => m.actaRuta);
+  if (withRoute) return await verActaAdjunta(withRoute.id);
+  // 2. Buscar el que tenga archivo en IndexedDB local
+  for (const c of candidates) {
+    const archivo = await _bitArchivos.find(c.id);
+    if (archivo) return await verActaAdjunta(c.id);
+  }
+  // 3. Fallback al primero (aunque dará error de "archivo no encontrado")
+  await verActaAdjunta(candidates[0].id);
+}
+
+async function verActaAdjunta(movId) {
+  const movs = DB.get('bitacoraMovimientos');
+  const mov = movs.find(m => m.id === movId);
+
+  let src = '';     // URL o data URL para el preview
+  let nombre = '';
+  let tipo = '';
+  let correlativo = (mov ? mov.actaCorrelativo : '') || '';
+  let downloadHref = '';
+
+  // 1. Preferir archivo del servidor (actaRuta) — persiste entre sesiones
+  if (mov && mov.actaRuta) {
+    src = mov.actaRuta;
+    downloadHref = mov.actaRuta;
+    nombre = (mov.actaRuta.split('/').pop()) || ('acta_' + correlativo);
+    tipo = nombre.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image';
+  } else {
+    // 2. Fallback: IndexedDB local
+    const archivo = await _bitArchivos.find(movId);
+    if (!archivo) {
+      showToast('No se encontro el archivo adjunto', 'error');
+      return;
+    }
+    src = archivo.data;
+    downloadHref = archivo.data;
+    nombre = archivo.name;
+    tipo = archivo.type;
+    correlativo = archivo.correlativo || correlativo;
+  }
+
+  const previewHTML = tipo === 'application/pdf'
+    ? `<iframe src="${src}" style="width:100%;height:500px;border:none;border-radius:var(--radius-sm)"></iframe>`
+    : `<img src="${src}" style="max-width:100%;max-height:500px;border-radius:var(--radius-sm);display:block;margin:0 auto">`;
 
   const body = `
     <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
       <div>
-        <span class="badge badge-success" style="font-size:13px;padding:6px 14px">${esc(archivo.correlativo)}</span>
-        <span style="margin-left:10px;font-size:13px;color:var(--text-secondary)">${esc(archivo.name)}</span>
+        <span class="badge badge-success" style="font-size:13px;padding:6px 14px">${esc(correlativo)}</span>
+        <span style="margin-left:10px;font-size:13px;color:var(--text-secondary)">${esc(nombre)}</span>
       </div>
-      <a href="${archivo.data}" download="${esc(archivo.name)}" class="btn btn-secondary" style="font-size:12px;padding:6px 12px">Descargar</a>
+      <a href="${downloadHref}" download="${esc(nombre)}" class="btn btn-secondary" style="font-size:12px;padding:6px 12px">Descargar</a>
     </div>
     ${previewHTML}
   `;
@@ -10783,16 +12030,35 @@ function renderPendientesRetorno(el) {
   const activos = DB.get('activos');
   const colaboradores = DB.get('colaboradores');
 
+  // Helper: enriquecer el record con datos del activo (tipo, marca, modelo, codigo)
+  const _enrich = (a) => {
+    const act = activos.find(x => x.id === a.activoId);
+    return {
+      ...a,
+      activoTipo: a.activoTipo || (act ? act.tipo : '') || '',
+      activoEquipo: a.activoEquipo || (act ? (act.equipo || act.tipo) : '') || '',
+      activoMarca: a.activoMarca || (act ? act.marca : '') || '',
+      activoModelo: a.activoModelo || (act ? act.modelo : '') || '',
+      activoCodigo: a.activoCodigo || (act ? act.codigo : '') || ''
+    };
+  };
+
   // 1. Equipos vigentes de colaboradores cesados
   const cesadosIds = new Set(colaboradores.filter(c => c.estado === 'Cesado').map(c => c.id));
   const porCese = asignaciones.filter(a => a.estado === 'Vigente' && cesadosIds.has(a.colaboradorId))
-    .map(a => ({ ...a, _motivo: 'CESE DE COLABORADOR' }));
+    .map(a => ({ ..._enrich(a), _motivo: 'CESE DE COLABORADOR' }));
 
   // 2. Equipos con flag pendienteRetorno (por reemplazo o renovación)
   const porReemplazo = asignaciones.filter(a => a.estado === 'Vigente' && a.pendienteRetorno)
-    .map(a => ({ ...a, _motivo: a.motivoReemplazo || 'REEMPLAZO' }));
+    .map(a => ({ ..._enrich(a), _motivo: a.motivoReemplazo || 'REEMPLAZO' }));
 
-  const pendientes = [...porCese, ...porReemplazo];
+  // Combinar y ordenar descendente (mas reciente primero)
+  const pendientes = [...porCese, ...porReemplazo].sort((a, b) => {
+    const fa = a.fechaReemplazo || a.fechaAsignacion || '';
+    const fb = b.fechaReemplazo || b.fechaAsignacion || '';
+    if (fa !== fb) return fb.localeCompare(fa);
+    return (b.id || 0) - (a.id || 0);
+  });
 
   el.innerHTML = `
     <div class="page-header">
@@ -10828,7 +12094,7 @@ function renderPendientesRetorno(el) {
                     <td>${esc(a.colaboradorNombre || '')}</td>
                     <td>${formatDate(['REEMPLAZO','RENOVACIÓN','REPOSICIÓN DAÑO FÍSICO','REPOSICIÓN ROBO'].includes(a._motivo) ? a.fechaReemplazo || a.fechaAsignacion : a.fechaAsignacion)}</td>
                     <td><span class="badge badge-warning" style="font-size:10px"><span class="badge-dot"></span>Pendiente</span></td>
-                    <td><button class="btn btn-sm ${a._motivo === 'REPOSICIÓN ROBO' ? 'btn-danger' : 'btn-success'}" onclick="confirmarRetorno(${a.id},'${esc(a._motivo)}')">${a._motivo === 'REPOSICIÓN ROBO' ? 'Registrar Baja por Robo' : 'Confirmar Retorno'}</button></td>
+                    <td><button class="btn btn-sm ${a._motivo === 'REPOSICIÓN ROBO' ? 'btn-danger' : 'btn-success'}" onclick="confirmarRetorno(${a.id},'${escJs(a._motivo)}')">${a._motivo === 'REPOSICIÓN ROBO' ? 'Registrar Baja por Robo' : 'Confirmar Retorno'}</button></td>
                   </tr>`;
                 }).join('')
             }
@@ -11048,12 +12314,18 @@ function _retornoSelectEstadoEq(val) {
   document.getElementById('retornoPartesSection').style.display = val === 'REPARACIÓN' ? '' : 'none';
 }
 
-function _ejecutarRetorno() {
+async function _ejecutarRetorno() {
   const _esRoboRet = (_retornoMotivo || '').toUpperCase().includes('REPOSICIÓN ROBO');
   const almacen = _esRoboRet ? '' : ((document.getElementById('retornoAlmacen') || {}).value || '');
   if (!_esRoboRet && !almacen) { showToast('Seleccione el almacén de retorno', 'error'); return; }
   if (!_retornoCmdb) { showToast('Seleccione el estado CMDB', 'error'); return; }
   if (!_retornoEstadoEq) { showToast('Seleccione el estado del equipo', 'error'); return; }
+  // Validar coherencia: el estado de equipo debe pertenecer al estado CMDB seleccionado
+  if (!_esEstadoCoherente(_retornoCmdb, _retornoEstadoEq)) {
+    const valid = (ESTADO_EQUIPO_MAP[(_retornoCmdb || '').toUpperCase()] || []).join(', ');
+    showToast(`Estado incoherente: "${_retornoCmdb}" solo admite ${valid}`, 'error');
+    return;
+  }
   if (_esRoboRet && !_retornoDenunciaFile) { showToast('Debe adjuntar la denuncia de robo para confirmar la baja', 'error'); return; }
   const obs = (document.getElementById('retornoObs') || {}).value || '';
   if (!obs.trim()) { showToast('Ingrese las observaciones', 'error'); return; }
@@ -11079,6 +12351,8 @@ function _ejecutarRetorno() {
   if (_esRoboRet && _retornoDenunciaFile) {
     rec.denunciaRobo = _retornoDenunciaFile.name;
     rec.denunciaRoboFecha = today();
+    // Subir la denuncia al servidor: evidencia persistente de la baja por robo.
+    rec.denunciaRoboRuta = await _uploadArchivo(_retornoDenunciaFile, 'documento');
   }
 
   // Actualizar activo y serie específica
@@ -11089,8 +12363,7 @@ function _ejecutarRetorno() {
     if (_serieRet && activo.series && activo.series.length > 0) {
       const serieObj = activo.series.find(s => (s.serie || '').toUpperCase().trim() === _serieRet);
       if (serieObj) {
-        serieObj.estadoSerie = _retornoCmdb;
-        serieObj.estadoEquipoSerie = _retornoEstadoEq;
+        _setSerieEstadoFull(serieObj, _retornoCmdb, _retornoEstadoEq);
         if (partes.length) serieObj.partesAfectadas = partes.join(', ');
         serieObj.obsRetorno = obs.trim();
         if (_esRoboRet) serieObj.motivoBaja = 'ROBO';
@@ -11128,8 +12401,9 @@ function _ejecutarRetorno() {
     }
   }
 
-  DB.set('asignaciones', asignaciones);
-  DB.set('activos', activos);
+  // Persistir solo la asignacion y el activo modificados (no sync masivo)
+  DB.updateOne('asignaciones', rec);
+  if (activo) DB.updateOne('activos', activo);
   addMovimiento(_esRoboRet ? 'Baja por Robo' : 'Retorno', _esRoboRet ? `Baja por robo de ${rec.activoCodigo || 'activo'} — Denuncia: ${_retornoDenunciaFile ? _retornoDenunciaFile.name : '—'}` : `Retorno de ${rec.activoCodigo || 'activo'} → ${_retornoCmdb} / ${_retornoEstadoEq}${partes.length ? ' [' + partes.join(', ') + ']' : ''}`);
 
   // Auto-registrar en bitácora
@@ -11143,6 +12417,28 @@ function _ejecutarRetorno() {
     else if ((_retornoMotivo || '').toUpperCase() === 'DEVOLUCIÓN' || (_retornoMotivo || '').toUpperCase() === 'DEVOLUCION') _motivoBit = 'DEVOLUCIÓN';
     else _motivoBit = (rec.motivoCese || '').toUpperCase().includes('CESE') ? 'CESE' : 'RETORNO';
 
+    // Heredar ticket, acta y MOTIVO de la asignación de reemplazo (la nueva).
+    // El INGRESO del equipo viejo es la "contracara" del reemplazo: mismo trámite.
+    // Estado: DEVUELTO cuando es un retorno confirmado (no PENDIENTE/ATENDIDO porque
+    // ya cumplio su ciclo — el equipo fisicamente regreso al almacen).
+    let _ticketHeredado = '';
+    let _actaHeredada = '';
+    let _motivoHeredado = '';
+    let _estadoBit = (_esRoboRet || _esBajaRet) ? 'PENDIENTE' : 'DEVUELTO';
+    if (rec.ticketReemplazo) {
+      // Buscar la asignación NUEVA por su ticket
+      const _asigNueva = asignaciones.find(a =>
+        a.ticket === rec.ticketReemplazo &&
+        a.colaboradorId === rec.colaboradorId &&
+        a.id !== rec.id
+      );
+      if (_asigNueva) {
+        _ticketHeredado = _asigNueva.ticket || '';
+        _actaHeredada = _asigNueva.actaEntrega || '';
+        _motivoHeredado = _asigNueva.tipoAsignacion || _asigNueva.motivo || '';
+      }
+    }
+
     _autoBitacora({
       movimiento: (_esRoboRet || _esBajaRet) ? 'BAJA' : 'INGRESO',
       almacen: _esRoboRet ? 'N/A — ROBO' : (almacen || 'Almacen TI'),
@@ -11152,7 +12448,10 @@ function _ejecutarRetorno() {
       serie: rec.serieAsignada || '',
       codInv: activo.codInv || '',
       correo: rec.correoColab || '',
-      motivo: _motivoBit
+      motivo: _motivoHeredado || _motivoBit,   // prioriza motivo del trámite actual (SALIDA asociada)
+      ticket: _ticketHeredado,                 // hereda ticket del reemplazo si existe
+      actaCorrelativo: _actaHeredada,          // hereda acta del reemplazo si existe
+      estadoAsignacion: _estadoBit             // DEVUELTO para retornos normales
     });
   }
 
@@ -11409,7 +12708,7 @@ function _renderBajasTable() {
                     + '<td>' + _eqBadge(r.estadoEquipo) + '</td>'
                     + '<td style="font-size:11px;color:#64748b">' + r.antiguedad + '</td>'
                     + '<td style="text-align:center">' + valTd + '</td>'
-                    + '<td><div class="action-btns"><button class="btn-icon" title="Ver detalle" onclick="_verDetalleBaja(' + r.activoId + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">👁️</button></div></td>'
+                    + '<td><div class="action-btns"><button class="btn-icon" title="Ver detalle" onclick="_verDetalleBaja(' + r.activoId + ",'" + escJs(r.serie || '') + "'" + ')" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">👁️</button></div></td>'
                     + '</tr>';
                 }).join('')
             }
@@ -11449,13 +12748,30 @@ function _bajasTogglePageAll(checked) {
   renderBajasPendientes(document.getElementById('contentArea'));
 }
 
-function _verDetalleBaja(activoId) {
+function _verDetalleBaja(activoId, serie) {
   const activos = DB.get('activos');
   const a = activos.find(x => x.id === activoId);
   if (!a) return;
+  // Buscar la serie especifica que esta en baja (no todas las del activo)
+  const _serieKey = (serie || '').toUpperCase().trim();
+  const serieObj = _serieKey
+    ? (a.series || []).find(s => (s.serie || '').toUpperCase().trim() === _serieKey)
+    : (a.series && a.series.length === 1 ? a.series[0] : null);
+
   const asignaciones = DB.get('asignaciones');
-  const ultimaAsig = asignaciones.filter(x => x.activoId === a.id).sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0];
+  // Buscar la asignacion mas reciente de esta serie especifica
+  const ultimaAsigSerie = serie
+    ? asignaciones
+        .filter(x => x.activoId === a.id && (x.serieAsignada || '').toUpperCase().trim() === _serieKey)
+        .sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0]
+    : asignaciones.filter(x => x.activoId === a.id).sort((x, y) => (y.fechaAsignacion || '').localeCompare(x.fechaAsignacion || ''))[0];
+
   const _f = (label, val) => `<div><div style="font-size:10px;color:#64748b;text-transform:uppercase">${label}</div><div style="font-size:13px;font-weight:600">${val || '—'}</div></div>`;
+
+  // Estado y motivo de baja: priorizar el de la serie especifica, luego el del activo
+  const _estadoCmdb = (serieObj && (serieObj.estadoCMDB || serieObj.estadoSerie)) || a.estado || '';
+  const _estadoEquipo = (serieObj && (serieObj.estadoEquipoSerie || serieObj.estadoEquipo)) || a.estadoEquipo || '';
+  const _motivoBaja = (serieObj && serieObj.motivoBaja) || a.motivoBaja || a.obsRetorno || '';
 
   openModal('Detalle de Activo en Baja', `
     <div style="display:flex;flex-direction:column;gap:16px">
@@ -11466,22 +12782,22 @@ function _verDetalleBaja(activoId) {
         ${_f('Marca', esc(a.marca))}
         ${_f('Modelo', esc(a.modelo))}
         ${_f('SKU', esc(a.sku))}
-        ${_f('Serie', (a.series||[]).map(s=>s.serie).join(', ') || '—')}
-        ${_f('Cod. Inv', (a.series||[]).map(s=>s.codInv).join(', ') || '—')}
+        ${_f('Serie', esc(serie || (serieObj && serieObj.serie) || '—'))}
+        ${_f('Cod. Inv', esc((serieObj && serieObj.codInv) || '—'))}
         ${_f('Almacén', esc(a.ubicacion))}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;background:#f8fafc;padding:14px;border-radius:8px">
-        ${_f('Estado CMDB', esc(a.estado))}
-        ${_f('Estado Equipo', esc(a.estadoEquipo))}
-        ${_f('Motivo Baja', esc(a.motivoBaja || a.obsRetorno || ''))}
+        ${_f('Estado CMDB', esc(_estadoCmdb))}
+        ${_f('Estado Equipo', esc(_estadoEquipo))}
+        ${_f('Motivo Baja', esc(_motivoBaja))}
         ${_f('Fecha Compra', formatDate(a.fechaCompra))}
         ${_f('Fecha Ingreso', formatDate(a.fechaIngreso))}
         ${_f('Costo', a.costo ? 'S/ ' + parseFloat(a.costo).toFixed(2) : '—')}
         ${_f('Origen', esc(a.origenEquipo))}
         ${_f('N° Documento', esc(a.nDocumento))}
-        ${_f('Último Responsable', esc(ultimaAsig ? ultimaAsig.colaboradorNombre : a.responsable || ''))}
+        ${_f('Último Responsable', esc(ultimaAsigSerie ? ultimaAsigSerie.colaboradorNombre : a.responsable || ''))}
       </div>
-      ${a.obsRetorno ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;font-size:12px;color:#92400e"><strong>Observaciones:</strong> ${esc(a.obsRetorno)}</div>` : ''}
+      ${a.obsRetorno || (serieObj && serieObj.obsRetorno) ? `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;font-size:12px;color:#92400e"><strong>Observaciones:</strong> ${esc((serieObj && serieObj.obsRetorno) || a.obsRetorno)}</div>` : ''}
     </div>
   `, `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>`, 'modal-lg');
 }
@@ -11608,7 +12924,7 @@ function _onBajaGuiaChange(input) {
   if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
 }
 
-function _confirmarEjecucionBajas() {
+async function _confirmarEjecucionBajas() {
   const fechaSalida = (document.getElementById('bajaSalidaFecha') || {}).value || '';
   const numGuia = ((document.getElementById('bajaSalidaGuia') || {}).value || '').trim();
   const obs = ((document.getElementById('bajaSalidaObs') || {}).value || '').trim();
@@ -11618,6 +12934,9 @@ function _confirmarEjecucionBajas() {
   if (!window._bajaPendGuiaFile) { showToast('Debe adjuntar la guía de salida para ejecutar las bajas', 'error'); return; }
 
   if (!confirm('¿Está seguro de ejecutar la baja definitiva de los equipos seleccionados? Esta acción es irreversible.')) return;
+
+  // Subir la guía de salida al servidor (evidencia persistente de la baja irreversible).
+  const guiaRuta = await _uploadArchivo(window._bajaPendGuiaFile, 'documento');
 
   const rows = _buildBajasRows();
   const selRows = rows.filter(r => _bajasSeleccionadas.has(r.activoId + '||' + r.serie) && r.valorizado === 'VALOR <=0');
@@ -11648,6 +12967,7 @@ function _confirmarEjecucionBajas() {
       activo.fechaBajaEjecutada = fechaSalida;
       activo.guiaSalida = numGuia;
       activo.guiaSalidaArchivo = window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '';
+      activo.guiaSalidaRuta = guiaRuta;
     }
 
     historial.unshift({
@@ -11670,6 +12990,7 @@ function _confirmarEjecucionBajas() {
       fechaSalida: fechaSalida,
       numGuia: numGuia,
       guiaArchivo: window._bajaPendGuiaFile ? window._bajaPendGuiaFile.name : '',
+      guiaRuta: guiaRuta,
       etapaBaja: r.etapaBaja || '',
       estadoBaja: 'Ejecutada',
       fechaAprobacion: today(),
@@ -11862,7 +13183,7 @@ function _onValDocChange(input) {
   if (wrap) { wrap.style.borderColor = '#10b981'; wrap.style.background = '#f0fdf4'; }
 }
 
-function _confirmarValorizacion() {
+async function _confirmarValorizacion() {
   const etapa = ((document.getElementById('valEtapaNombre') || {}).value || '').trim();
   const fecha = ((document.getElementById('valFecha') || {}).value || '').trim();
   if (!etapa) { showToast('Ingrese el nombre de la etapa de baja', 'error'); return; }
@@ -11872,6 +13193,10 @@ function _confirmarValorizacion() {
   if (matched.length === 0) { showToast('No se encontraron series pendientes en el archivo. Verifique que la columna SERIE contenga series válidas.', 'error'); return; }
 
   if (!confirm(`Se valorizarán ${matched.length} serie(s) en la etapa "${etapa}". ¿Continuar?`)) return;
+
+  // Subir evidencia al servidor (Excel de series valorizadas + sustento documental).
+  const _seriesRuta = await _uploadArchivo(window._valSeriesFile, 'valorizacion');
+  const _sustentoRuta = await _uploadArchivo(window._valDocFile, 'valorizacion');
 
   const activos = DB.get('activos');
   let count = 0;
@@ -11888,6 +13213,8 @@ function _confirmarValorizacion() {
         serieObj.fechaValorizacion = fecha;
         serieObj.archivoSeries = window._valSeriesFile.name;
         serieObj.archivoSustento = window._valDocFile.name;
+        serieObj.archivoSeriesRuta = _seriesRuta;
+        serieObj.archivoSustentoRuta = _sustentoRuta;
         count++;
       }
     } else {
@@ -11896,6 +13223,8 @@ function _confirmarValorizacion() {
       activo.fechaValorizacion = fecha;
       activo.archivoSeries = window._valSeriesFile.name;
       activo.archivoSustento = window._valDocFile.name;
+      activo.archivoSeriesRuta = _seriesRuta;
+      activo.archivoSustentoRuta = _sustentoRuta;
       count++;
     }
   });
@@ -12092,7 +13421,7 @@ function renderGestores(el) {
                 <td>
                   <div style="display:flex;align-items:center;gap:10px">
                     <div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,${g.perfil === 'Tiendas' ? '#f59e0b,#ef4444' : '#3b82f6,#6366f1'});display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:700;flex-shrink:0">
-                      ${esc(g.nombre.split(' ').map(p => p[0]).slice(0, 2).join(''))}
+                      ${esc((g.nombre || '').split(' ').map(p => p[0] || '').slice(0, 2).join(''))}
                     </div>
                     <strong>${esc(g.nombre)}</strong>
                   </div>
@@ -12207,6 +13536,25 @@ function openGestorModal(id) {
   `, 'modal-lg');
 }
 
+// Persiste una operación de gestor en MySQL vía api/gestores.php (gestores NO está en el
+// sync masivo, por eso sus cambios deben ir por su endpoint dedicado). En modo localStorage
+// no hace nada: DB.set ya persiste localmente.
+function _apiGestor(method, payload, onId) {
+  if (!DB.isMySQL || !DB.isMySQL()) return;
+  let url = 'api/gestores.php';
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (method === 'DELETE') {
+    url += '?id=' + encodeURIComponent(payload.id);
+  } else {
+    opts.body = JSON.stringify(payload);
+  }
+  fetch(url, opts).then(async r => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { console.error('[gestores.php] HTTP ' + r.status, j); showToast('Error al guardar gestor en el servidor', 'error'); return; }
+    if (onId && j && j.id) onId(j.id);
+  }).catch(err => { console.error('[gestores.php] Network error', err); showToast('Sin conexión al guardar el gestor', 'error'); });
+}
+
 function saveGestor(id) {
   const nombre  = document.getElementById('fGNombre').value.trim();
   const email   = document.getElementById('fGEmail').value.trim();
@@ -12227,6 +13575,7 @@ function saveGestor(id) {
     if (idx >= 0) {
       gestores[idx] = { ...gestores[idx], nombre, email, rol, perfil, estado };
       addMovimiento('Edición Gestor', `Gestor ${nombre} actualizado (Perfil: ${perfil})`);
+      _apiGestor('PUT', { id, nombre, email, rol, perfil, usuario, estado });
     }
   } else {
     const pass1 = document.getElementById('fGPassword').value;
@@ -12245,8 +13594,11 @@ function saveGestor(id) {
       return;
     }
 
-    gestores.push(upperFields({ id: nextId(gestores), nombre, email, rol, perfil, usuario, password: pass1, estado }));
+    const rec = upperFields({ id: nextId(gestores), nombre, email, rol, perfil, usuario, password: pass1, estado });
+    gestores.push(rec);
     addMovimiento('Nuevo Gestor', `Gestor ${nombre} registrado (Perfil: ${perfil}, Usuario: ${usuario})`);
+    // Persistir en MySQL y reemplazar el id temporal por el real que genera la BD.
+    _apiGestor('POST', { nombre: rec.nombre, email: rec.email, rol: rec.rol, perfil: rec.perfil, usuario: rec.usuario, password: pass1, estado: rec.estado }, realId => { rec.id = realId; });
   }
   DB.set('gestores', gestores);
   closeModal();
@@ -12298,6 +13650,10 @@ function saveCambiarPass(id) {
   if (idx >= 0) {
     gestores[idx].password = pass1;
     DB.set('gestores', gestores);
+    const g = gestores[idx];
+    // PUT completo (gestores.php reescribe todos los campos + password si viene): enviar
+    // el registro entero para no borrar nombre/email/etc.
+    _apiGestor('PUT', { id, nombre: g.nombre, email: g.email, rol: g.rol, perfil: g.perfil, usuario: g.usuario, estado: g.estado, password: pass1 });
     addMovimiento('Cambio Contraseña', `Contraseña cambiada para ${gestores[idx].nombre}`);
     closeModal();
     showToast('Contraseña actualizada correctamente');
@@ -12309,10 +13665,20 @@ function deleteGestor(id) {
     showToast('No puede eliminar su propia cuenta', 'error');
     return;
   }
-  if (!confirm('¿Eliminar este gestor?')) return;
   const gestores = DB.get('gestores');
   const g = gestores.find(x => x.id === id);
+  if (!g) return;
+  // Evitar quedarse sin acceso administrativo (lockout).
+  if (g.rol === 'Administrador') {
+    const admins = gestores.filter(x => x.rol === 'Administrador' && (x.estado || 'Activo') === 'Activo');
+    if (admins.length <= 1) {
+      showToast('No se puede eliminar el último administrador activo', 'error');
+      return;
+    }
+  }
+  if (!confirm('¿Eliminar este gestor?')) return;
   DB.set('gestores', gestores.filter(x => x.id !== id));
+  _apiGestor('DELETE', { id }); // persiste (gestores.php lo marca Inactivo → no reaparece)
   if (g) addMovimiento('Eliminación Gestor', `Gestor ${g.nombre} eliminado`);
   showToast('Gestor eliminado');
   renderGestores(document.getElementById('contentArea'));
@@ -12348,7 +13714,8 @@ const PARAM_TABS = [
   { key: 'tipoAsignacion', label: 'Motivos' },
   { key: 'tiposRepuesto', label: 'Repuestos' },
   { key: 'mapeoEPAdmin', label: 'EP-ADMIN (Equipo Principal)' },
-  { key: 'mapeoAdicErg', label: 'ADIC-ERG (Accesorios Ergonómicos)' }
+  { key: 'mapeoAdicErg', label: 'ADIC-ERG (Accesorios Ergonómicos)' },
+  { key: 'tiposDescuento', label: '💰 Descuentos' }
 ];
 
 function renderParametros(el) {
@@ -12453,13 +13820,26 @@ function _renderTipoEquiposTab() {
 
 function _renderFlatParamTab(key, label) {
   const items = DB.getConfig(key, []);
+  // Para tiposDescuento: boton "Gestionar" abre selector con todos los tipos disponibles
+  const addBtn = key === 'tiposDescuento'
+    ? `<button class="btn btn-sm btn-primary" onclick="_openDescuentoSelectorModal()">📋 Gestionar tipos con descuento</button>`
+    : `<button class="btn btn-sm btn-primary" onclick="addParamItem('${key}','${label}')">+ Agregar</button>`;
+
+  // Para tiposDescuento, mostrar info adicional
+  const infoExtra = key === 'tiposDescuento'
+    ? `<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;font-size:12px;color:#1e40af;margin-bottom:12px">
+        💡 <strong>Tipos de equipo aplicables al descuento.</strong> Al cesar un colaborador, el sistema calcula el descuento sumando el costo de los activos cuyo tipo esté en esta lista.
+      </div>`
+    : '';
+
   return `
     <div class="card">
       <div class="card-header">
         <h3>${label}</h3>
-        <button class="btn btn-sm btn-primary" onclick="addParamItem('${key}','${label}')">+ Agregar</button>
+        ${addBtn}
       </div>
       <div class="card-body">
+        ${infoExtra}
         ${items.length === 0
           ? '<p style="color:var(--text-muted);font-size:13px">Sin elementos configurados</p>'
           : `<div style="display:flex;flex-direction:column;gap:6px">
@@ -12542,6 +13922,117 @@ function addParamItem(key, label) {
   DB.setConfig(key, items);
   showToast('Valor agregado');
   renderParametros(document.getElementById('contentArea'));
+}
+
+/* ═══════════════════════════════════════════════════════
+   MODAL: Selector de Tipos para Descuento
+   ═══════════════════════════════════════════════════════ */
+function _openDescuentoSelectorModal() {
+  // Obtener tipos disponibles: combinar catalogo de tipos + tipos reales en activos
+  const tiposCatalogo = (DB.getConfig('tipos', []) || []).map(t => String(t).toUpperCase().trim()).filter(Boolean);
+  const tiposActivos = [...new Set((DB.get('activos') || []).map(a => String(a.tipo || '').toUpperCase().trim()).filter(Boolean))];
+  const todosLosTipos = [...new Set([...tiposCatalogo, ...tiposActivos])].sort();
+
+  // Tipos actualmente seleccionados (que aplican descuento)
+  const seleccionados = new Set((DB.getConfig('tiposDescuento', []) || []).map(t => String(t).toUpperCase().trim()));
+
+  // Contar activos por tipo (info util al usuario)
+  const conteoActivos = {};
+  (DB.get('activos') || []).forEach(a => {
+    const t = String(a.tipo || '').toUpperCase().trim();
+    if (t) conteoActivos[t] = (conteoActivos[t] || 0) + 1;
+  });
+
+  const body = `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;font-size:12px;color:#1e40af">
+        Marca los <strong>tipos de equipo</strong> que aplican descuento al colaborador en caso de no devolución.
+      </div>
+
+      <!-- Buscador -->
+      <div class="search-box" style="margin:0">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="descSelSearch" placeholder="Buscar tipo..."
+          oninput="document.querySelectorAll('.desc-tipo-row').forEach(r => { r.style.display = r.dataset.tipo.toLowerCase().includes(this.value.toLowerCase()) ? '' : 'none'; })">
+      </div>
+
+      <!-- Acciones rápidas -->
+      <div style="display:flex;gap:8px;align-items:center;font-size:12px">
+        <button class="btn btn-sm btn-secondary" onclick="document.querySelectorAll('.desc-tipo-check').forEach(c => c.checked = true)">Seleccionar todos</button>
+        <button class="btn btn-sm btn-secondary" onclick="document.querySelectorAll('.desc-tipo-check').forEach(c => c.checked = false)">Limpiar selección</button>
+        <span style="margin-left:auto;color:var(--text-muted)">${todosLosTipos.length} tipo(s) disponibles</span>
+      </div>
+
+      <!-- Lista de tipos con checkboxes -->
+      <div style="border:1px solid var(--border);border-radius:8px;max-height:380px;overflow-y:auto">
+        ${todosLosTipos.length === 0
+          ? '<div style="padding:30px;text-align:center;color:var(--text-muted);font-size:13px">No hay tipos de equipo configurados. Primero agrega tipos en el módulo "Tipo de Equipos".</div>'
+          : todosLosTipos.map(tipo => {
+              const checked = seleccionados.has(tipo);
+              const count = conteoActivos[tipo] || 0;
+              return `
+                <label class="desc-tipo-row" data-tipo="${esc(tipo)}"
+                  style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid #f1f5f9;cursor:pointer;transition:background .15s"
+                  onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background=''">
+                  <input type="checkbox" class="desc-tipo-check" value="${esc(tipo)}" ${checked ? 'checked' : ''}
+                    style="width:16px;height:16px;cursor:pointer">
+                  <div style="flex:1">
+                    <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(tipo)}</div>
+                    <div style="font-size:11px;color:var(--text-muted)">${count} activo(s) registrado(s) con este tipo</div>
+                  </div>
+                  ${checked ? '<span class="badge" style="background:#fef2f2;color:#991b1b;font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px">APLICA DESCUENTO</span>' : ''}
+                </label>
+              `;
+            }).join('')
+        }
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    <button class="btn btn-primary" onclick="_guardarDescuentoSelector()">Guardar</button>
+  `;
+  openModal('💰 Tipos que aplican descuento', body, footer, 'modal-lg');
+}
+
+async function _guardarDescuentoSelector() {
+  const checks = document.querySelectorAll('.desc-tipo-check:checked');
+  const nuevosTipos = [...checks].map(c => c.value);
+
+  // Persistencia EXPLICITA en BD: hace el POST directo y espera respuesta antes de cerrar
+  // Esto evita perder cambios por debounce o errores silenciosos.
+  console.log('[Descuentos] Guardando tipos:', nuevosTipos);
+
+  // Actualizar cache local primero
+  DB.setConfig('tiposDescuento', nuevosTipos);
+
+  // Forzar POST inmediato y esperar respuesta
+  try {
+    const resp = await fetch('api/sync.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: '_config',
+        action: 'sync',
+        data: { tiposDescuento: nuevosTipos }
+      })
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      console.error('[Descuentos] Error backend:', resp.status, body);
+      showToast('⚠ Error al guardar en BD: HTTP ' + resp.status, 'error');
+      return;
+    }
+    const json = await resp.json().catch(() => ({}));
+    console.log('[Descuentos] Respuesta backend:', json);
+    showToast(`✓ ${nuevosTipos.length} tipo(s) guardados en BD`);
+    closeModal();
+    renderParametros(document.getElementById('contentArea'));
+  } catch (err) {
+    console.error('[Descuentos] Network error:', err);
+    showToast('⚠ Error de red: ' + err.message, 'error');
+  }
 }
 
 function removeParamItem(key, idx) {
@@ -12636,17 +14127,46 @@ function _recoverFromIndexedDB() {
 /* ═══════════════════════════════════════════════════════
    APP INITIALIZATION
    ═══════════════════════════════════════════════════════ */
+// Pantalla de bloqueo cuando NO hay conexión con la base de datos (sistema solo-BD).
+function _showDbConnectionError() {
+  const html = `
+    <div id="dbErrorScreen" style="position:fixed;inset:0;z-index:99999;background:#0f172a;display:flex;align-items:center;justify-content:center;font-family:'DM Sans',system-ui,sans-serif;padding:20px">
+      <div style="max-width:460px;width:100%;text-align:center;background:#1e293b;border:1px solid #334155;border-radius:16px;padding:44px 34px;box-shadow:0 24px 60px rgba(0,0,0,.55)">
+        <div style="font-size:60px;margin-bottom:14px">🔌</div>
+        <h1 style="color:#f8fafc;font-size:23px;font-weight:700;margin:0 0 10px">Sin conexión con la base de datos</h1>
+        <p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 22px">No se pudo establecer conexión con la base de datos. La aplicación no puede iniciar sin ella.</p>
+        <div style="display:inline-block;background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px 18px;margin-bottom:26px">
+          <div style="color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:2px">Código de error</div>
+          <div style="color:#f87171;font-family:'Courier New',monospace;font-size:17px;font-weight:700;letter-spacing:2px">ERR-DB-CONN</div>
+        </div>
+        <div>
+          <button onclick="location.reload()" style="background:#2563eb;color:#fff;border:none;border-radius:9px;padding:12px 30px;font-size:14px;font-weight:600;cursor:pointer">Reintentar</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+}
+
 document.addEventListener('DOMContentLoaded', async function () {
-  // 1. Recuperar datos de IndexedDB a localStorage (si existen)
-  try { await _recoverFromIndexedDB(); } catch (e) { console.warn('IndexedDB recovery skipped:', e); }
+  // 1. Mostrar indicador de carga
+  const _loadEl = document.getElementById('contentArea');
+  if (_loadEl) _loadEl.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:60vh;gap:16px"><div style="width:40px;height:40px;border:4px solid #e2e8f0;border-top-color:#2563eb;border-radius:50%;animation:spin 0.8s linear infinite"></div><div style="font-size:14px;color:#64748b">Conectando...</div></div>';
 
-  // 2. Inicializar DB (localStorage - sincrono)
-  await DB.init();
+  // 2. Conectar a MySQL. Sistema de una sola fuente de verdad: SIN fallback a localStorage.
+  const _apiOk = await DB.init();
 
-  // 3. Inicializar datos por defecto / migraciones
+  // 3. Si no hay conexión con la BD, bloquear la app con un error claro (no se guarda local).
+  if (!_apiOk) {
+    console.error('%c[CMDDB] Sin conexión con la base de datos — app bloqueada', 'color:#dc2626;font-weight:bold;font-size:14px');
+    _showDbConnectionError();
+    return;
+  }
+
+  // 4. Inicializar datos por defecto / migraciones
   initSampleData();
+  console.log('%c[CMDDB] Modo: MySQL (API)', 'color:#059669;font-weight:bold;font-size:14px');
 
-  // 3. Restaurar sesión y arrancar la app
+  // 5. Restaurar sesion y arrancar la app
   const hasSession = checkSession();
   if (hasSession) {
     restoreSidebarState();

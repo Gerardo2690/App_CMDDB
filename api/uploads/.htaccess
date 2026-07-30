@@ -1,0 +1,7 @@
+# Impedir ejecucion de codigo en el directorio de subidas (defensa contra webshell).
+php_flag engine off
+Options -ExecCGI -Indexes
+<FilesMatch "\.(php|php3|php4|php5|php7|phtml|pht|phar|cgi|pl|asp|aspx|jsp|sh)$">
+    Require all denied
+</FilesMatch>
+AddType text/plain .php .phtml .phar .pht

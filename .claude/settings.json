@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php -l c:/App_CMDDB/api/sync.php)",
+      "Bash(php -l c:/App_CMDDB/api/config.php)",
+      "Bash(php -l c:/App_CMDDB/api/activos.php)",
+      "Bash(php -l c:/App_CMDDB/api/colaboradores.php)",
+      "Bash(php -l c:/App_CMDDB/api/asignaciones.php)",
+      "Bash(ls -la c:/App_CMDDB/api/*.php)",
+      "Bash(ls c:/App_CMDDB/api/*.php)"
+    ]
+  }
+}

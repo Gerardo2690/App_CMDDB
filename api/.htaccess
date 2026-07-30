@@ -1,0 +1,7 @@
+# Permitir CORS y acceso a la API
+Header set Access-Control-Allow-Origin "*"
+Header set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+Header set Access-Control-Allow-Headers "Content-Type, Authorization"
+
+# Habilitar mod_rewrite si se necesita
+RewriteEngine On
