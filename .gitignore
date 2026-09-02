@@ -5,3 +5,24 @@
 # Copias de seguridad locales
 *.bak
 *_backup_*.sql
+
+# ── Datos: se comparten por el OneDrive del equipo, NUNCA por Git ──
+# Dumps de base de datos
+*.sql
+# Excel con inventario, padrón o plantillas de carga
+*.xlsx
+*.xls
+*.csv
+# Documentos subidos por la aplicación (actas de asignación, etc.)
+api/uploads/**
+!api/uploads/.htaccess
+
+# ── Configuración personal de cada máquina ──
+.claude/settings.local.json
+
+# ── Sistema operativo / editores ──
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
